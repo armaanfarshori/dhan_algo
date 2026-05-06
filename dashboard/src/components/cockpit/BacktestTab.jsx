@@ -3,8 +3,12 @@ import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceL
 import { T, INR, INR0 } from '../../tokens'
 
 const STRATEGIES = [
-  { value: 'sma_crossover', label: 'SMA Crossover 9/21' },
-  { value: 'scalper',       label: 'RSI Scalper (simulated)' },
+  { value: 'sma_crossover',     label: 'SMA Crossover (9/21 Golden/Death Cross)' },
+  { value: 'rsi_scalper',       label: 'RSI Scalper (oversold/overbought crossover)' },
+  { value: 'momentum_breakout', label: 'Momentum Breakout (N-day high/low break)' },
+  { value: 'mean_reversion',    label: 'Mean Reversion (extreme RSI reversal)' },
+  { value: 'bollinger',         label: 'Bollinger Band Reversion (band touch)' },
+  { value: 'vwap_reversion',    label: 'VWAP Reversion (deviation from VWAP)' },
 ]
 const SEGMENTS = [
   { value: 'NSE_EQ',  label: 'NSE Equity' },
