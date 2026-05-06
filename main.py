@@ -32,6 +32,14 @@ from core.risk import RiskManager, RiskConfig
 from core.backtest import Backtester
 from strategies.strategy_base import SMACrossoverStrategy, SMAConfig
 from strategies.options_scalper import OptionsScalperStrategy, OptionsScalperConfig
+from strategies.backtest_strategies import (
+    RSIScalperStrategy, RSIConfig,
+    MomentumBreakoutStrategy, MomentumConfig,
+    MeanReversionStrategy, MeanReversionConfig,
+    BollingerReversionStrategy, BollingerConfig,
+    VWAPReversionStrategy, VWAPConfig,
+    STRATEGY_REGISTRY,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -182,6 +190,50 @@ async def config_handler(request: web.Request) -> web.Response:
     return web.json_response(request.app.get("runtime_config", {}))
 
 
+async def market_status_handler(_request: web.Request) -> web.Response:
+    """Returns open/close status for NSE equity, NSE F&O and MCX commodity."""
+    from datetime import datetime, time as dtime
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+    now = datetime.now(IST)
+    t   = now.time()
+    wd  = now.weekday()  # 0=Mon … 6=Sun
+
+    is_weekday = wd < 5
+
+    nse_open  = dtime(9, 15)
+    nse_close = dtime(15, 30)
+    fno_open  = dtime(9, 15)
+    fno_close = dtime(15, 30)
+    pre_open  = dtime(9, 0)
+
+    # MCX: Mon–Fri 09:00–23:30, Sat 09:00–14:00
+    mcx_open      = dtime(9, 0)
+    mcx_close_wkd = dtime(23, 30)
+    mcx_close_sat = dtime(14, 0)
+    is_saturday   = wd == 5
+
+    nse_status  = "OPEN"  if is_weekday and nse_open  <= t <= nse_close else "CLOSED"
+    fno_status  = "OPEN"  if is_weekday and fno_open  <= t <= fno_close else "CLOSED"
+    pre_status  = "PRE"   if is_weekday and pre_open  <= t < nse_open   else None
+
+    if is_weekday:
+        mcx_status = "OPEN" if mcx_open <= t <= mcx_close_wkd else "CLOSED"
+    elif is_saturday:
+        mcx_status = "OPEN" if mcx_open <= t <= mcx_close_sat else "CLOSED"
+    else:
+        mcx_status = "CLOSED"
+
+    return web.json_response({
+        "nse_equity":  pre_status or nse_status,
+        "nse_fno":     pre_status or fno_status,
+        "mcx":         mcx_status,
+        "ist_time":    now.strftime("%H:%M:%S"),
+        "weekday":     now.strftime("%A"),
+        "is_weekend":  not is_weekday and not is_saturday,
+    })
+
+
 async def switch_strategy_handler(request: web.Request) -> web.Response:
     body          = await request.json()
     strategy_name = body.get("strategy", "scalper")
@@ -310,20 +362,20 @@ async def payoff_handler(request: web.Request) -> web.Response:
 
 async def backtest_run_handler(request: web.Request) -> web.Response:
     body        = await request.json()
-    strategy    = body.get("strategy", "sma_crossover")
-    security_id = body.get("security_id", "2885")
-    segment     = body.get("segment", "NSE_EQ")
-    from_date   = body.get("from_date", "2026-01-01")
-    to_date     = body.get("to_date",   "2026-05-01")
-    quantity    = int(body.get("quantity",    1))
-    fast_period = int(body.get("fast_period", 9))
-    slow_period = int(body.get("slow_period", 21))
-    interval    = body.get("interval", "D")
+    strategy_key = body.get("strategy", "sma_crossover")
+    security_id  = body.get("security_id", "2885")
+    segment      = body.get("segment", "NSE_EQ")
+    from_date    = body.get("from_date", "2026-01-01")
+    to_date      = body.get("to_date",   "2026-05-01")
+    quantity     = int(body.get("quantity",    1))
+    fast_period  = int(body.get("fast_period", 9))
+    slow_period  = int(body.get("slow_period", 21))
+    interval     = body.get("interval", "D")
 
     try:
         client = request.app["client"]
 
-        # Fetch historical bars from DhanHQ
+        # ── Fetch historical bars ─────────────────────────────────────────────
         instrument = "EQUITY" if segment == "NSE_EQ" else "INDEX"
         if interval == "D":
             raw = await client.get_daily_historical(
@@ -337,53 +389,77 @@ async def backtest_run_handler(request: web.Request) -> web.Response:
                 from_date=from_date, to_date=to_date,
             )
 
-        opens      = raw.get("open",      [])
-        highs      = raw.get("high",      [])
-        lows       = raw.get("low",       [])
         closes     = raw.get("close",     [])
-        volumes    = raw.get("volume",    [])
-        timestamps = raw.get("timestamp", raw.get("start_Time", []))
+        opens      = raw.get("open",      closes)
+        highs      = raw.get("high",      closes)
+        lows       = raw.get("low",       closes)
+        volumes    = raw.get("volume",    [0] * len(closes))
+        timestamps = raw.get("timestamp", raw.get("start_Time", list(range(len(closes)))))
 
         if not closes:
-            return web.json_response({"ok": False, "error": "No historical data returned. Check security_id, segment and date range."}, status=400)
+            return web.json_response({
+                "ok": False,
+                "error": "No historical data returned — check security_id, segment and date range."
+            }, status=400)
 
         bars = [
-            {"date": str(timestamps[i])[:10] if i < len(timestamps) else str(i),
-             "open": opens[i] if i < len(opens) else closes[i],
-             "high": highs[i] if i < len(highs) else closes[i],
-             "low":  lows[i]  if i < len(lows)  else closes[i],
-             "close": closes[i],
-             "volume": volumes[i] if i < len(volumes) else 0}
+            {
+                "date":   str(timestamps[i])[:10] if i < len(timestamps) else str(i),
+                "open":   opens[i],
+                "high":   highs[i],
+                "low":    lows[i],
+                "close":  closes[i],
+                "volume": volumes[i] if i < len(volumes) else 0,
+            }
             for i in range(len(closes))
         ]
 
-        # Build strategy config for backtester
-        if strategy == "sma_crossover":
-            from strategies.strategy_base import SMAConfig
-            cfg = SMAConfig(
-                name=f"SMA_{fast_period}_{slow_period}",
-                security_id=security_id, exchange_segment=segment,
-                product_type="INTRADAY", quantity=quantity,
-                fast_period=fast_period, slow_period=slow_period,
-                paper_trading=True,
-            )
+        # ── Build strategy + backtester ───────────────────────────────────────
+        base_kwargs = dict(
+            security_id=security_id, exchange_segment=segment,
+            product_type="INTRADAY", quantity=quantity, paper_trading=True,
+        )
+
+        if strategy_key == "sma_crossover":
+            cfg = SMAConfig(name=f"SMA_{fast_period}_{slow_period}",
+                            fast_period=fast_period, slow_period=slow_period,
+                            **base_kwargs)
             bt = Backtester(SMACrossoverStrategy, cfg)
+
+        elif strategy_key == "rsi_scalper":
+            cfg = RSIConfig(name="RSI_Scalper", **base_kwargs)
+            bt  = Backtester(RSIScalperStrategy, cfg)
+
+        elif strategy_key == "momentum_breakout":
+            cfg = MomentumConfig(name="Momentum_Breakout", **base_kwargs)
+            bt  = Backtester(MomentumBreakoutStrategy, cfg)
+
+        elif strategy_key == "mean_reversion":
+            cfg = MeanReversionConfig(name="Mean_Reversion", **base_kwargs)
+            bt  = Backtester(MeanReversionStrategy, cfg)
+
+        elif strategy_key == "bollinger":
+            cfg = BollingerConfig(name="Bollinger_Reversion", **base_kwargs)
+            bt  = Backtester(BollingerReversionStrategy, cfg)
+
+        elif strategy_key == "vwap_reversion":
+            cfg = VWAPConfig(name="VWAP_Reversion", **base_kwargs)
+            bt  = Backtester(VWAPReversionStrategy, cfg)
+
         else:
-            cfg = SMAConfig(
-                name="SMA_9_21", security_id=security_id,
-                exchange_segment=segment, product_type="INTRADAY",
-                quantity=quantity, paper_trading=True,
-            )
-            bt = Backtester(SMACrossoverStrategy, cfg)
+            return web.json_response({"ok": False, "error": f"Unknown strategy: {strategy_key}"}, status=400)
 
         result = await bt.run(bars)
         return web.json_response({
             "ok":           True,
             "bars":         len(bars),
+            "strategy":     strategy_key,
+            "symbol":       body.get("symbol", security_id),
             "summary":      result.summary(),
             "equity_curve": result.equity_curve,
             "trades":       result.trades,
         })
+
     except Exception as e:
         logger.error(f"Backtest error: {e}")
         return web.json_response({"ok": False, "error": str(e)}, status=500)
@@ -506,6 +582,7 @@ async def main():
         app.router.add_post("/api/strategy/switch",   switch_strategy_handler)
         app.router.add_post("/api/killswitch",        killswitch_handler)
         app.router.add_post("/api/backtest/run",      backtest_run_handler)
+        app.router.add_get("/api/market",             market_status_handler)
         app.router.add_post("/postback",              postback_handler)
 
         # Serve React build assets if available
