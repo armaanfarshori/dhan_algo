@@ -54,13 +54,20 @@ class DhanAPIError(Exception):
         super().__init__(f"[{error_code}] {error_message}")
 
 
+AUTH_ERROR_CODES = {"DH-901", "DH-807", "DH-902"}
+
+
 class DhanClient:
     """
     Async wrapper around the DhanHQ REST API v2.
-    
+
     Usage:
         async with DhanClient(client_id="...", access_token="...") as dhan:
             ltp = await dhan.get_ltp({"NSE_EQ": [1333]})
+
+    With auth manager (auto token refresh):
+        async with DhanClient(client_id="...", access_token="...", auth_manager=mgr) as dhan:
+            ...
     """
 
     BASE_URL = "https://api.dhan.co/v2"
@@ -72,25 +79,38 @@ class DhanClient:
         sandbox: bool = False,
         max_retries: int = 3,
         timeout: int = 10,
+        auth_manager=None,
     ):
-        self.client_id = client_id
+        self.client_id    = client_id
         self.access_token = access_token
-        self.sandbox = sandbox
-        self.max_retries = max_retries
-        self.timeout = aiohttp.ClientTimeout(total=timeout)
+        self.sandbox      = sandbox
+        self.max_retries  = max_retries
+        self.timeout      = aiohttp.ClientTimeout(total=timeout)
         self._session: Optional[aiohttp.ClientSession] = None
+        self._auth_manager = auth_manager
 
         self._rate_limiters = {
             cat: RateLimiter(cat)
             for cat in ("orders", "data", "quote", "non_trading")
         }
 
+        # Register token refresh callback if auth manager provided
+        if auth_manager:
+            auth_manager.on_token_refresh(self._on_token_refreshed)
+
+    def _on_token_refreshed(self, new_token: str):
+        """Called by DhanAuthManager when a new token is generated."""
+        self.access_token = new_token
+        if self._session:
+            self._session.headers.update({"access-token": new_token})
+        logger.info("DhanClient: access token updated")
+
     @property
     def _headers(self) -> Dict[str, str]:
         return {
             "Content-Type": "application/json",
             "access-token": self.access_token,
-            "client-id": self.client_id,
+            "client-id":    self.client_id,
         }
 
     async def __aenter__(self):
@@ -132,9 +152,16 @@ class DhanClient:
 
                     # DhanHQ error envelope
                     if isinstance(body, dict) and "errorCode" in body:
+                        error_code = body.get("errorCode", "")
+                        # Auto-refresh token on auth errors and retry once
+                        if error_code in AUTH_ERROR_CODES and self._auth_manager:
+                            logger.warning(f"Auth error {error_code} — refreshing token and retrying")
+                            new_token = await self._auth_manager.handle_auth_error()
+                            self._on_token_refreshed(new_token)
+                            continue
                         raise DhanAPIError(
                             body.get("errorType", "UNKNOWN"),
-                            body.get("errorCode", str(resp.status)),
+                            error_code or str(resp.status),
                             body.get("errorMessage", "Unknown error"),
                         )
 
