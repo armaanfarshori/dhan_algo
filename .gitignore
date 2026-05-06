@@ -1,5 +1,6 @@
 # Credentials — never commit
 .env
+dhan_token.json
 
 # Python
 __pycache__/
