@@ -225,7 +225,8 @@ class OptionsScalperStrategy(BaseStrategy):
             self._prev_rsi = rsi
             return
 
-        ok, reason = self.risk.check_order(self.scalper_cfg.quantity, price, "BUY")
+        # Use max_premium as the estimated cost per unit (not the index price)
+        ok, reason = self.risk.check_order(self.scalper_cfg.quantity, self.scalper_cfg.max_premium, "BUY")
         if not ok:
             logger.warning(f"Risk block: {reason}")
             self._prev_rsi = rsi
