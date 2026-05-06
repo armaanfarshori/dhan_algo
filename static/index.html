@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DhanHQ Algo Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0d1117;
+      --surface:   #161b22;
+      --border:    #30363d;
+      --text:      #c9d1d9;
+      --muted:     #8b949e;
+      --green:     #3fb950;
+      --red:       #f85149;
+      --yellow:    #d29922;
+      --blue:      #58a6ff;
+      --font:      'Courier New', Courier, monospace;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 13px;
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 24px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+    }
+    header h1 { font-size: 15px; letter-spacing: 1px; color: var(--blue); }
+    .header-right { display: flex; gap: 16px; align-items: center; }
+    .badge {
+      padding: 3px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: bold;
+      letter-spacing: 0.5px;
+    }
+    .badge-paper { background: #1c2d1e; color: var(--green); border: 1px solid var(--green); }
+    .badge-live  { background: #2d1c1c; color: var(--red);   border: 1px solid var(--red);   }
+    #uptime { color: var(--muted); font-size: 12px; }
+
+    /* ── Main grid ── */
+    main {
+      padding: 20px 24px;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      grid-template-rows: auto auto 1fr;
+      gap: 16px;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    /* ── Cards ── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .card-label {
+      font-size: 10px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .card-value {
+      font-size: 22px;
+      font-weight: bold;
+      color: var(--text);
+    }
+    .card-sub {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+    .positive { color: var(--green); }
+    .negative { color: var(--red); }
+    .neutral  { color: var(--muted); }
+
+    /* ── KPI row (cols 1–4, row 1) ── */
+    #card-balance, #card-pnl, #card-positions, #card-orders {
+      grid-row: 1;
+    }
+
+    /* ── Risk + Strategy status (cols 1–4, row 2) ── */
+    #card-risk {
+      grid-column: 1 / 3;
+      grid-row: 2;
+    }
+    #card-strategy {
+      grid-column: 3 / 5;
+      grid-row: 2;
+    }
+
+    /* ── Signals feed (cols 1–3, row 3) ── */
+    #card-signals {
+      grid-column: 1 / 4;
+      grid-row: 3;
+    }
+
+    /* ── Positions (col 4, row 3) ── */
+    #card-pos-detail {
+      grid-column: 4;
+      grid-row: 3;
+    }
+
+    /* ── Risk card internals ── */
+    .risk-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 8px;
+    }
+    .risk-indicator {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .risk-ok     { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    .risk-halted { background: var(--red);   box-shadow: 0 0 6px var(--red); animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+    .pnl-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .pnl-item { background: var(--bg); border-radius: 6px; padding: 8px 10px; }
+    .pnl-item .label { font-size: 10px; color: var(--muted); margin-bottom: 2px; }
+    .pnl-item .val   { font-size: 14px; font-weight: bold; }
+
+    /* ── Strategy card internals ── */
+    .warmup-bar-wrap {
+      margin-top: 10px;
+    }
+    .warmup-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+    .warmup-track {
+      height: 6px;
+      background: var(--border);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .warmup-fill {
+      height: 100%;
+      background: var(--blue);
+      border-radius: 3px;
+      transition: width 0.4s ease;
+    }
+    .ready-badge {
+      display: inline-block;
+      background: #1c2d1e;
+      color: var(--green);
+      border: 1px solid var(--green);
+      border-radius: 12px;
+      padding: 2px 10px;
+      font-size: 11px;
+      margin-top: 8px;
+    }
+    .strategy-meta {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .strategy-meta .item { background: var(--bg); border-radius: 6px; padding: 8px 10px; }
+    .strategy-meta .item .label { font-size: 10px; color: var(--muted); }
+    .strategy-meta .item .val   { font-size: 14px; font-weight: bold; margin-top: 2px; }
+
+    /* ── Signals table ── */
+    #card-signals { display: flex; flex-direction: column; }
+    .signals-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .signals-scroll {
+      overflow-y: auto;
+      flex: 1;
+      max-height: 260px;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    thead th {
+      text-align: left;
+      font-size: 10px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: var(--muted);
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      background: var(--surface);
+    }
+    tbody tr { border-bottom: 1px solid #21262d; }
+    tbody tr:last-child { border-bottom: none; }
+    tbody td { padding: 7px 8px; font-size: 12px; }
+    .action-buy  { color: var(--green); font-weight: bold; }
+    .action-sell { color: var(--red);   font-weight: bold; }
+    .action-exit { color: var(--yellow); font-weight: bold; }
+    .no-signals  { color: var(--muted); padding: 16px 8px; font-size: 12px; }
+
+    /* ── Position detail ── */
+    .pos-item {
+      background: var(--bg);
+      border-radius: 6px;
+      padding: 10px;
+      margin-top: 8px;
+    }
+    .pos-item .sym  { font-weight: bold; color: var(--blue); }
+    .pos-item .qty  { color: var(--muted); font-size: 11px; margin-top: 2px; }
+    .pos-item .upnl { font-size: 13px; margin-top: 4px; }
+    .no-pos { color: var(--muted); font-size: 12px; margin-top: 8px; }
+
+    /* ── Refresh indicator ── */
+    #refresh-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--muted);
+      display: inline-block;
+      margin-left: 4px;
+      transition: background 0.2s;
+    }
+    #refresh-dot.active { background: var(--green); }
+
+    .error-text { color: var(--red); font-size: 11px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>⚡ DHANHQ ALGO PLATFORM</h1>
+  <div class="header-right">
+    <span id="mode-badge" class="badge badge-paper">PAPER</span>
+    <span id="uptime">↑ --:--:--</span>
+    <span id="refresh-dot"></span>
+  </div>
+</header>
+
+<main>
+  <!-- KPI Cards -->
+  <div class="card" id="card-balance">
+    <div class="card-label">Available Balance</div>
+    <div class="card-value" id="val-balance">—</div>
+    <div class="card-sub" id="val-sodlimit">SOD Limit: —</div>
+  </div>
+
+  <div class="card" id="card-pnl">
+    <div class="card-label">Total P&amp;L</div>
+    <div class="card-value" id="val-pnl">—</div>
+    <div class="card-sub" id="val-pnl-sub">Realised — | Unrealised —</div>
+  </div>
+
+  <div class="card" id="card-positions">
+    <div class="card-label">Open Positions</div>
+    <div class="card-value" id="val-openpos">—</div>
+    <div class="card-sub" id="val-posstatus">—</div>
+  </div>
+
+  <div class="card" id="card-orders">
+    <div class="card-label">Orders Placed</div>
+    <div class="card-value" id="val-orders">—</div>
+    <div class="card-sub" id="val-client">Client —</div>
+  </div>
+
+  <!-- Risk Status -->
+  <div class="card" id="card-risk">
+    <div class="card-label">Risk Manager</div>
+    <div class="risk-row">
+      <div class="risk-indicator risk-ok" id="risk-dot"></div>
+      <span id="risk-status-text">Checking…</span>
+    </div>
+    <div class="pnl-grid">
+      <div class="pnl-item">
+        <div class="label">Realised</div>
+        <div class="val" id="r-realised">—</div>
+      </div>
+      <div class="pnl-item">
+        <div class="label">Unrealised</div>
+        <div class="val" id="r-unrealised">—</div>
+      </div>
+      <div class="pnl-item">
+        <div class="label">Daily Limit</div>
+        <div class="val" id="r-limit">—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Strategy Status -->
+  <div class="card" id="card-strategy">
+    <div class="card-label">Strategy</div>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start">
+      <span id="strat-name" style="color:var(--blue);font-size:14px;font-weight:bold">—</span>
+      <span id="strat-ready-badge"></span>
+    </div>
+    <div class="warmup-bar-wrap" id="warmup-section">
+      <div class="warmup-label">
+        <span>Warming up (slow SMA)</span>
+        <span id="warmup-count">0 / 21</span>
+      </div>
+      <div class="warmup-track">
+        <div class="warmup-fill" id="warmup-fill" style="width:0%"></div>
+      </div>
+    </div>
+    <div class="strategy-meta">
+      <div class="item">
+        <div class="label">Position</div>
+        <div class="val" id="strat-pos">0</div>
+      </div>
+      <div class="item">
+        <div class="label">Entry Price</div>
+        <div class="val" id="strat-entry">—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Signals Feed -->
+  <div class="card" id="card-signals">
+    <div class="signals-header">
+      <div class="card-label" style="margin:0">Signal Feed (last 50)</div>
+      <span id="signal-count" style="color:var(--muted);font-size:11px">0 signals</span>
+    </div>
+    <div class="signals-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Action</th>
+            <th>Price</th>
+            <th>Reason</th>
+          </tr>
+        </thead>
+        <tbody id="signals-body">
+          <tr><td colspan="4" class="no-signals">Waiting for first signal…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Live Positions -->
+  <div class="card" id="card-pos-detail">
+    <div class="card-label">Live Positions</div>
+    <div id="positions-body">
+      <div class="no-pos">Loading…</div>
+    </div>
+  </div>
+</main>
+
+<script>
+  const INR = v => '₹' + Number(v).toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  const pct  = v => (v >= 0 ? '+' : '') + Number(v).toFixed(2) + '%';
+  const colorClass = v => Number(v) > 0 ? 'positive' : Number(v) < 0 ? 'negative' : 'neutral';
+
+  function fmtTime(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    return d.toLocaleTimeString('en-IN', {hour12: false});
+  }
+
+  function fmtUptime(secs) {
+    const h = String(Math.floor(secs / 3600)).padStart(2, '0');
+    const m = String(Math.floor((secs % 3600) / 60)).padStart(2, '0');
+    const s = String(secs % 60).padStart(2, '0');
+    return `↑ ${h}:${m}:${s}`;
+  }
+
+  async function fetchJSON(url) {
+    try {
+      const r = await fetch(url);
+      if (!r.ok) return null;
+      return r.json();
+    } catch { return null; }
+  }
+
+  function renderStatus(d) {
+    if (!d) return;
+    document.getElementById('uptime').textContent = fmtUptime(d.uptime_seconds);
+    document.getElementById('val-orders').textContent = d.orders_placed;
+    document.getElementById('val-client').textContent = `Client ${d.client_id}`;
+
+    const badge = document.getElementById('mode-badge');
+    badge.textContent = d.mode;
+    badge.className = 'badge ' + (d.mode === 'LIVE' ? 'badge-live' : 'badge-paper');
+
+    // Strategy
+    document.getElementById('strat-name').textContent = d.strategy_name;
+    const pos = d.position;
+    const posEl = document.getElementById('strat-pos');
+    posEl.textContent = pos > 0 ? `+${pos} LONG` : pos < 0 ? `${pos} SHORT` : 'FLAT';
+    posEl.className = 'val ' + (pos > 0 ? 'positive' : pos < 0 ? 'negative' : 'neutral');
+    document.getElementById('strat-entry').textContent = d.entry_price ? INR(d.entry_price) : '—';
+
+    const w = d.warmup;
+    const warmupSection = document.getElementById('warmup-section');
+    const readyBadge    = document.getElementById('strat-ready-badge');
+    if (w.ready) {
+      warmupSection.style.display = 'none';
+      readyBadge.innerHTML = '<span class="ready-badge">● READY</span>';
+    } else {
+      warmupSection.style.display = 'block';
+      readyBadge.innerHTML = '';
+      document.getElementById('warmup-count').textContent = `${w.slow_current} / ${w.slow_required}`;
+      document.getElementById('warmup-fill').style.width = Math.round((w.slow_current / w.slow_required) * 100) + '%';
+    }
+  }
+
+  function renderRisk(d) {
+    if (!d) return;
+    const halted = d.halted;
+    const dot    = document.getElementById('risk-dot');
+    const txt    = document.getElementById('risk-status-text');
+
+    dot.className = 'risk-indicator ' + (halted ? 'risk-halted' : 'risk-ok');
+    txt.textContent = halted ? `HALTED — ${d.halt_reason}` : 'OK — All limits within range';
+    txt.style.color = halted ? 'var(--red)' : 'var(--green)';
+
+    const r = d.realised_pnl   || 0;
+    const u = d.unrealised_pnl || 0;
+    const t = d.total_pnl      || 0;
+
+    const rEl = document.getElementById('r-realised');
+    rEl.textContent = INR(r);
+    rEl.className = 'val ' + colorClass(r);
+
+    const uEl = document.getElementById('r-unrealised');
+    uEl.textContent = INR(u);
+    uEl.className = 'val ' + colorClass(u);
+
+    document.getElementById('r-limit').textContent = '₹5,000';
+
+    // PnL KPI card
+    const pnlEl  = document.getElementById('val-pnl');
+    pnlEl.textContent = INR(t);
+    pnlEl.className = 'card-value ' + colorClass(t);
+    document.getElementById('val-pnl-sub').textContent =
+      `Realised ${INR(r)} | Unrealised ${INR(u)}`;
+
+    // Positions KPI
+    document.getElementById('val-openpos').textContent = d.open_positions ?? '—';
+    document.getElementById('val-posstatus').textContent =
+      halted ? '⛔ Trading halted' : d.open_positions === 0 ? 'No open positions' : 'Active';
+  }
+
+  function renderSignals(signals) {
+    if (!signals) return;
+    const tbody = document.getElementById('signals-body');
+    document.getElementById('signal-count').textContent = `${signals.length} signal${signals.length !== 1 ? 's' : ''}`;
+
+    if (!signals.length) {
+      tbody.innerHTML = '<tr><td colspan="4" class="no-signals">Waiting for first signal…</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = signals.map(s => {
+      const cls = s.action === 'BUY' ? 'action-buy' : s.action === 'SELL' ? 'action-sell' : 'action-exit';
+      return `<tr>
+        <td>${fmtTime(s.timestamp)}</td>
+        <td class="${cls}">${s.action}</td>
+        <td>${s.price ? INR(s.price) : '—'}</td>
+        <td style="color:var(--muted)">${s.reason}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  function renderFunds(d) {
+    if (!d || !d.ok) return;
+    const f = d.data;
+    document.getElementById('val-balance').textContent = INR(f.availabelBalance ?? 0);
+    document.getElementById('val-sodlimit').textContent = `SOD Limit: ${INR(f.sodLimit ?? 0)}`;
+  }
+
+  function renderPositions(d) {
+    const el = document.getElementById('positions-body');
+    if (!d || !d.ok) {
+      el.innerHTML = '<div class="no-pos error-text">Could not load positions</div>';
+      return;
+    }
+    const positions = (d.data || []).filter(p => p.netQty !== 0);
+    if (!positions.length) {
+      el.innerHTML = '<div class="no-pos">No open positions</div>';
+      return;
+    }
+    el.innerHTML = positions.map(p => {
+      const upnl = p.unrealisedProfit || 0;
+      return `<div class="pos-item">
+        <div class="sym">${p.tradingSymbol || p.securityId}</div>
+        <div class="qty">Qty: ${p.netQty} · ${p.productType || ''}</div>
+        <div class="upnl ${colorClass(upnl)}">uPnL: ${INR(upnl)}</div>
+      </div>`;
+    }).join('');
+  }
+
+  const dot = document.getElementById('refresh-dot');
+
+  async function pollAll() {
+    dot.className = 'active';
+    const [status, risk, signals, funds, positions] = await Promise.all([
+      fetchJSON('/api/status'),
+      fetchJSON('/api/risk'),
+      fetchJSON('/api/signals'),
+      fetchJSON('/api/funds'),
+      fetchJSON('/api/positions'),
+    ]);
+    renderStatus(status);
+    renderRisk(risk);
+    renderSignals(signals);
+    renderFunds(funds);
+    renderPositions(positions);
+    setTimeout(() => dot.className = '', 300);
+  }
+
+  pollAll();
+  setInterval(pollAll, 5000);
+</script>
+</body>
+</html>

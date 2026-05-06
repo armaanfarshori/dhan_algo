@@ -1,0 +1,28 @@
+# DhanHQ Algo Platform — Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core async HTTP
+aiohttp>=3.9.0
+
+# Official DhanHQ SDK (optional — our wrapper is standalone but SDK is handy for testing)
+dhanhq>=2.0.0
+
+# Data & analytics
+pandas>=2.1.0
+numpy>=1.26.0
+scipy>=1.11.0
+
+# Configuration
+python-dotenv>=1.0.0
+
+# Logging & monitoring
+rich>=13.7.0          # pretty terminal output
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.23.0
+aioresponses>=0.7.6   # mock aiohttp in tests
+
+# Optional: Telegram / email alerts
+# httpx>=0.26.0
+# python-telegram-bot>=20.7
