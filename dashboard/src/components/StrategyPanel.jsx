@@ -1,26 +1,54 @@
 import { INR } from '../utils'
 
 const s = {
-  card:  { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: 16 },
-  label: { fontSize: 10, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--muted)', marginBottom: 8 },
-  row:   { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' },
-  name:  { color: 'var(--blue)', fontSize: 14, fontWeight: 'bold' },
-  track: { height: 6, background: 'var(--border)', borderRadius: 3, overflow: 'hidden', marginTop: 4 },
-  fill:  pct => ({ height: '100%', background: 'var(--blue)', borderRadius: 3, width: `${pct}%`, transition: 'width .4s ease' }),
-  wlabel:{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--muted)', marginBottom: 4, marginTop: 10 },
-  ready: { display: 'inline-block', background: '#1c2d1e', color: 'var(--green)', border: '1px solid var(--green)', borderRadius: 12, padding: '2px 10px', fontSize: 11 },
-  grid:  { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 12 },
-  cell:  { background: 'var(--bg)', borderRadius: 6, padding: '8px 10px' },
-  cl:    { fontSize: 10, color: 'var(--muted)' },
-  cv:    { fontSize: 14, fontWeight: 'bold', marginTop: 2 },
+  card:   { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: 16 },
+  label:  { fontSize: 10, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--muted)', marginBottom: 8 },
+  row:    { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' },
+  name:   { color: 'var(--blue)', fontSize: 14, fontWeight: 'bold' },
+  track:  { height: 6, background: 'var(--border)', borderRadius: 3, overflow: 'hidden', marginTop: 4 },
+  fill:   pct => ({ height: '100%', background: 'var(--blue)', borderRadius: 3, width: `${pct}%`, transition: 'width .4s ease' }),
+  wlabel: { display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--muted)', marginBottom: 4, marginTop: 10 },
+  ready:  { display: 'inline-block', background: '#1c2d1e', color: 'var(--green)', border: '1px solid var(--green)', borderRadius: 12, padding: '2px 10px', fontSize: 11 },
+  warming:{ display: 'inline-block', background: '#1c1e2d', color: 'var(--blue)',  border: '1px solid var(--blue)',  borderRadius: 12, padding: '2px 10px', fontSize: 11 },
+  grid:   { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 12 },
+  cell:   { background: 'var(--bg)', borderRadius: 6, padding: '8px 10px' },
+  cl:     { fontSize: 10, color: 'var(--muted)' },
+  cv:     { fontSize: 14, fontWeight: 'bold', marginTop: 2 },
+}
+
+function RsiBar({ rsi }) {
+  if (!rsi) return null
+  const pct   = Math.round(rsi)
+  const color = rsi <= 30 ? 'var(--green)' : rsi >= 70 ? 'var(--red)' : 'var(--blue)'
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div style={{ ...s.wlabel, marginTop: 0 }}>
+        <span>RSI-14</span>
+        <span style={{ color, fontWeight: 'bold' }}>{rsi.toFixed(1)}</span>
+      </div>
+      <div style={s.track}>
+        <div style={{ ...s.fill(pct), background: color }} />
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: 'var(--muted)', marginTop: 2 }}>
+        <span>Oversold 30</span>
+        <span>Overbought 70</span>
+      </div>
+    </div>
+  )
 }
 
 export default function StrategyPanel({ status, scalper }) {
-  const d  = status?.data
-  const sc = scalper?.data
-  const w  = d?.warmup ?? {}
-  const pct = w.slow_required ? Math.round((w.slow_current / w.slow_required) * 100) : 0
+  const d   = status?.data
+  const sc  = scalper?.data
+  const w   = d?.warmup ?? {}
   const pos = d?.position ?? 0
+  const rsi = sc?.last_rsi ?? 0
+
+  // For scalper: RSI warmed up when last_rsi > 0
+  // For SMA: use warmup fields
+  const isScalper = d?.strategy_name?.toLowerCase().includes('scalper')
+  const isReady   = isScalper ? rsi > 0 : w.ready
+  const pct       = w.slow_required ? Math.round((w.slow_current / w.slow_required) * 100) : 0
 
   const posColor = pos > 0 ? 'var(--green)' : pos < 0 ? 'var(--red)' : 'var(--muted)'
   const posLabel = pos > 0 ? `+${pos} LONG` : pos < 0 ? `${pos} SHORT` : 'FLAT'
@@ -30,12 +58,13 @@ export default function StrategyPanel({ status, scalper }) {
       <div style={s.label}>Strategy</div>
       <div style={s.row}>
         <span style={s.name}>{d?.strategy_name ?? '—'}</span>
-        {w.ready
+        {isReady
           ? <span style={s.ready}>● READY</span>
-          : null}
+          : <span style={s.warming}>◌ WARMING UP</span>}
       </div>
 
-      {!w.ready && (
+      {/* SMA warmup bar */}
+      {!isScalper && !w.ready && (
         <div>
           <div style={s.wlabel}>
             <span>Warming up (slow SMA)</span>
@@ -44,6 +73,9 @@ export default function StrategyPanel({ status, scalper }) {
           <div style={s.track}><div style={s.fill(pct)} /></div>
         </div>
       )}
+
+      {/* Scalper RSI bar */}
+      {isScalper && <RsiBar rsi={rsi} />}
 
       <div style={s.grid}>
         <div style={s.cell}>
@@ -66,6 +98,14 @@ export default function StrategyPanel({ status, scalper }) {
                 {sc.oco_state ?? '—'}
               </div>
             </div>
+            {sc.current_atm && (
+              <div style={{ ...s.cell, gridColumn: '1 / 3' }}>
+                <div style={s.cl}>Active Strike</div>
+                <div style={{ ...s.cv, fontSize: 12 }}>
+                  NIFTY {sc.current_atm.strike} · {sc.active_expiry}
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>
