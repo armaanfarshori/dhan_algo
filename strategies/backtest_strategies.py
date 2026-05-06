@@ -1,6 +1,10 @@
 """
-Backtest-only strategy implementations.
-Lightweight signal generators that plug into core/backtest.py.
+Strategy implementations for both live trading and backtesting.
+All strategies extend BaseStrategy and can be used with DhanClient
+(live) or MockClient (backtest) transparently.
+
+Live usage:  strategy = MomentumBreakoutStrategy(dhan, risk, config)
+Backtest:    bt = Backtester(MomentumBreakoutStrategy, config); await bt.run(bars)
 """
 
 from collections import deque
