@@ -19,6 +19,9 @@ import logging
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, Callable
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
 
 import pyotp
 from dhanhq import DhanLogin
@@ -181,10 +184,15 @@ class DhanAuthManager:
 
     @staticmethod
     def _parse_expiry(exp_str: str) -> Optional[datetime]:
+        """Parse expiry string to UTC-aware datetime.
+        Dhan returns IST without timezone suffix — attach IST then convert to UTC."""
         if not exp_str:
             return None
         try:
-            return datetime.fromisoformat(exp_str.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(exp_str.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=IST)   # Dhan returns IST naive strings
+            return dt.astimezone(timezone.utc)
         except ValueError:
             return None
 
