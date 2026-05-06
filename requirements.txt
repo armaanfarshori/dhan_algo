@@ -26,6 +26,9 @@ aioresponses>=0.7.6   # mock aiohttp in tests
 # TOTP for auto token refresh
 pyotp>=2.9.0
 
+# Brotli decompression (required for NSE India API responses)
+Brotli>=1.1.0
+
 # Optional: Telegram / email alerts
 # httpx>=0.26.0
 # python-telegram-bot>=20.7

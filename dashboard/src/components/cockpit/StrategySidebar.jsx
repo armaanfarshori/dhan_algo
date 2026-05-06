@@ -151,26 +151,45 @@ function StrategyCard({ s, onSelect, active }) {
   )
 }
 
-export default function StrategySidebar({ config, onSwitch }) {
-  const [cat, setCat]   = useState('All')
-  const [applying, setApplying] = useState(false)
-  const [msg, setMsg]   = useState(null)
-  const activeStrategy  = config?.data?.strategy || 'scalper'
-  const [qty, setQty]   = useState(1)
+const ALL_SEGMENTS = [
+  { value: 'NSE_EQ',   label: 'NSE Equity' },
+  { value: 'NSE_FNO',  label: 'NSE F&O' },
+  { value: 'MCX_COMM', label: 'MCX Commodity' },
+]
 
+export default function StrategySidebar({ config, onSwitch }) {
+  const [cat, setCat]           = useState('All')
+  const [applying, setApplying] = useState(false)
+  const [msg, setMsg]           = useState(null)
+  const [segments, setSegments] = useState(['NSE_EQ'])
+  const [capitalPct, setCapPct] = useState(70)
+  const activeStrategy          = config?.data?.strategy || 'scalper'
   const filtered = cat === 'All' ? STRATEGIES : STRATEGIES.filter(s => s.cat === cat)
+
+  function toggleSegment(val) {
+    setSegments(prev => prev.includes(val)
+      ? (prev.length > 1 ? prev.filter(s => s !== val) : prev)  // keep at least 1
+      : [...prev, val]
+    )
+  }
 
   async function handleSelect(s) {
     setApplying(true); setMsg(null)
     try {
+      // Update scanner if running
+      await fetch('/api/scanner/config', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ strategy_key: s.strategy, segments, capital_pct: capitalPct / 100 }),
+      })
+      // Also switch single-strategy engine
       const r = await fetch('/api/strategy/switch', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ strategy: s.strategy, segment: s.segment, security_id: '13', quantity: s.segment === 'NSE_FNO' ? 75 : qty, num_lots: qty }),
+        body: JSON.stringify({ strategy: s.strategy, segment: s.segment, security_id: '13', quantity: 75, num_lots: 1 }),
       })
       const d = await r.json()
-      setMsg(d.ok ? { ok: true, text: `Switched to ${s.name}` } : { ok: false, text: d.error })
+      setMsg(d.ok ? `Active: ${s.name}` : d.error)
       if (d.ok) onSwitch?.()
-    } catch (e) { setMsg({ ok: false, text: String(e) }) }
+    } catch (e) { setMsg(String(e)) }
     finally { setApplying(false) }
   }
 
@@ -183,16 +202,40 @@ export default function StrategySidebar({ config, onSwitch }) {
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       }}>
         <span style={{ color: T.ink0 }}>STRATEGY PANEL</span>
-        {msg && <span style={{ fontSize: 9, color: msg.ok ? T.green : T.red }}>{msg.text}</span>}
+        {msg && <span style={{ fontSize: 9, color: T.green }}>{msg}</span>}
       </div>
 
-      {/* Lots slider */}
+      {/* Segment selector (multi) */}
       <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.line}`, background: T.bg2 }}>
-        <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink2, letterSpacing: '0.2em', textTransform: 'uppercase', marginBottom: 6 }}>
-          LOTS: <span style={{ color: T.cyan }}>{qty}</span>
+        <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink2, letterSpacing: '0.2em', textTransform: 'uppercase', marginBottom: 8 }}>
+          SEGMENTS (multi-select)
         </div>
-        <input type="range" min={1} max={10} value={qty} onChange={e => setQty(Number(e.target.value))}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+          {ALL_SEGMENTS.map(seg => (
+            <label key={seg.value} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+              <input type="checkbox" checked={segments.includes(seg.value)}
+                onChange={() => toggleSegment(seg.value)}
+                style={{ accentColor: T.green }} />
+              <span style={{ fontFamily: T.mono, fontSize: 10, color: segments.includes(seg.value) ? T.ink0 : T.ink3, letterSpacing: '0.1em' }}>
+                {seg.label}
+              </span>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      {/* Capital allocation (auto-calculated, no lot slider) */}
+      <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.line}`, background: T.bg2 }}>
+        <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink2, letterSpacing: '0.2em', textTransform: 'uppercase', marginBottom: 6, display: 'flex', justifyContent: 'space-between' }}>
+          <span>CAPITAL PER TRADE</span>
+          <span style={{ color: T.cyan }}>{capitalPct}% OF BALANCE</span>
+        </div>
+        <input type="range" min={10} max={90} step={5} value={capitalPct}
+          onChange={e => setCapPct(Number(e.target.value))}
           style={{ width: '100%', accentColor: T.green, cursor: 'pointer' }} />
+        <div style={{ fontFamily: T.mono, fontSize: 8, color: T.ink3, marginTop: 4, letterSpacing: '0.12em' }}>
+          LOTS & QTY CALCULATED AUTOMATICALLY FROM ACCOUNT BALANCE
+        </div>
       </div>
 
       {/* Category filter */}
