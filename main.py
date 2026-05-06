@@ -29,6 +29,7 @@ load_dotenv()
 from core.auth import DhanAuthManager
 from core.client import DhanClient
 from core.risk import RiskManager, RiskConfig
+from core.backtest import Backtester
 from strategies.strategy_base import SMACrossoverStrategy, SMAConfig
 from strategies.options_scalper import OptionsScalperStrategy, OptionsScalperConfig
 
@@ -307,6 +308,87 @@ async def payoff_handler(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "mode": mode, "entry": entry, "breakeven": bep, "target": target, "stop": stop, "points": points})
 
 
+async def backtest_run_handler(request: web.Request) -> web.Response:
+    body        = await request.json()
+    strategy    = body.get("strategy", "sma_crossover")
+    security_id = body.get("security_id", "2885")
+    segment     = body.get("segment", "NSE_EQ")
+    from_date   = body.get("from_date", "2026-01-01")
+    to_date     = body.get("to_date",   "2026-05-01")
+    quantity    = int(body.get("quantity",    1))
+    fast_period = int(body.get("fast_period", 9))
+    slow_period = int(body.get("slow_period", 21))
+    interval    = body.get("interval", "D")
+
+    try:
+        client = request.app["client"]
+
+        # Fetch historical bars from DhanHQ
+        instrument = "EQUITY" if segment == "NSE_EQ" else "INDEX"
+        if interval == "D":
+            raw = await client.get_daily_historical(
+                security_id=security_id, exchange_segment=segment,
+                instrument=instrument, from_date=from_date, to_date=to_date,
+            )
+        else:
+            raw = await client.get_intraday_historical(
+                security_id=security_id, exchange_segment=segment,
+                instrument=instrument, interval=interval,
+                from_date=from_date, to_date=to_date,
+            )
+
+        opens      = raw.get("open",      [])
+        highs      = raw.get("high",      [])
+        lows       = raw.get("low",       [])
+        closes     = raw.get("close",     [])
+        volumes    = raw.get("volume",    [])
+        timestamps = raw.get("timestamp", raw.get("start_Time", []))
+
+        if not closes:
+            return web.json_response({"ok": False, "error": "No historical data returned. Check security_id, segment and date range."}, status=400)
+
+        bars = [
+            {"date": str(timestamps[i])[:10] if i < len(timestamps) else str(i),
+             "open": opens[i] if i < len(opens) else closes[i],
+             "high": highs[i] if i < len(highs) else closes[i],
+             "low":  lows[i]  if i < len(lows)  else closes[i],
+             "close": closes[i],
+             "volume": volumes[i] if i < len(volumes) else 0}
+            for i in range(len(closes))
+        ]
+
+        # Build strategy config for backtester
+        if strategy == "sma_crossover":
+            from strategies.strategy_base import SMAConfig
+            cfg = SMAConfig(
+                name=f"SMA_{fast_period}_{slow_period}",
+                security_id=security_id, exchange_segment=segment,
+                product_type="INTRADAY", quantity=quantity,
+                fast_period=fast_period, slow_period=slow_period,
+                paper_trading=True,
+            )
+            bt = Backtester(SMACrossoverStrategy, cfg)
+        else:
+            cfg = SMAConfig(
+                name="SMA_9_21", security_id=security_id,
+                exchange_segment=segment, product_type="INTRADAY",
+                quantity=quantity, paper_trading=True,
+            )
+            bt = Backtester(SMACrossoverStrategy, cfg)
+
+        result = await bt.run(bars)
+        return web.json_response({
+            "ok":           True,
+            "bars":         len(bars),
+            "summary":      result.summary(),
+            "equity_curve": result.equity_curve,
+            "trades":       result.trades,
+        })
+    except Exception as e:
+        logger.error(f"Backtest error: {e}")
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
 # ── Server startup ────────────────────────────────────────────────────────────
 async def start_server(app: web.Application):
     runner = web.AppRunner(app)
@@ -423,6 +505,7 @@ async def main():
         app.router.add_get("/api/instruments/price",  instrument_price_handler)
         app.router.add_post("/api/strategy/switch",   switch_strategy_handler)
         app.router.add_post("/api/killswitch",        killswitch_handler)
+        app.router.add_post("/api/backtest/run",      backtest_run_handler)
         app.router.add_post("/postback",              postback_handler)
 
         # Serve React build assets if available
