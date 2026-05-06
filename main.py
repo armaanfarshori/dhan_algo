@@ -30,7 +30,10 @@ from core.auth import DhanAuthManager
 from core.client import DhanClient
 from core.risk import RiskManager, RiskConfig
 from core.backtest import Backtester
-from strategies.strategy_base import SMACrossoverStrategy, SMAConfig
+from strategies.strategy_base import (
+    SMACrossoverStrategy, SMAConfig,
+    StraddleSellerStrategy, StraddleSellerConfig,
+)
 from strategies.options_scalper import OptionsScalperStrategy, OptionsScalperConfig
 from strategies.backtest_strategies import (
     RSIScalperStrategy, RSIConfig,
@@ -253,7 +256,12 @@ async def switch_strategy_handler(request: web.Request) -> web.Response:
         old_task.cancel()
         await asyncio.gather(old_task, return_exceptions=True)
 
-    # Build new strategy
+    # Common equity config kwargs
+    equity_kwargs = dict(
+        security_id=security_id, exchange_segment=segment,
+        product_type="INTRADAY", quantity=quantity, paper_trading=PAPER_TRADING,
+    )
+
     if strategy_name == "scalper":
         cfg = OptionsScalperConfig(
             security_id=security_id, exchange_segment="IDX_I",
@@ -261,13 +269,39 @@ async def switch_strategy_handler(request: web.Request) -> web.Response:
             poll_interval=10.0, paper_trading=PAPER_TRADING,
         )
         new_strategy = OptionsScalperStrategy(dhan, risk, cfg)
+
     elif strategy_name == "sma_crossover":
-        cfg = SMAConfig(
-            name=f"SMA_9_21_{security_id}", security_id=security_id,
-            exchange_segment=segment, product_type="INTRADAY",
-            quantity=quantity, paper_trading=PAPER_TRADING,
-        )
+        cfg = SMAConfig(name=f"SMA_9_21_{security_id}", **equity_kwargs)
         new_strategy = SMACrossoverStrategy(dhan, risk, cfg)
+
+    elif strategy_name == "rsi_scalper":
+        cfg = RSIConfig(name=f"RSI_Scalper_{security_id}", **equity_kwargs)
+        new_strategy = RSIScalperStrategy(dhan, risk, cfg)
+
+    elif strategy_name == "momentum_breakout":
+        cfg = MomentumConfig(name=f"Momentum_{security_id}", **equity_kwargs)
+        new_strategy = MomentumBreakoutStrategy(dhan, risk, cfg)
+
+    elif strategy_name == "mean_reversion":
+        cfg = MeanReversionConfig(name=f"MeanRev_{security_id}", **equity_kwargs)
+        new_strategy = MeanReversionStrategy(dhan, risk, cfg)
+
+    elif strategy_name == "bollinger":
+        cfg = BollingerConfig(name=f"Bollinger_{security_id}", **equity_kwargs)
+        new_strategy = BollingerReversionStrategy(dhan, risk, cfg)
+
+    elif strategy_name == "vwap_reversion":
+        cfg = VWAPConfig(name=f"VWAP_{security_id}", **equity_kwargs)
+        new_strategy = VWAPReversionStrategy(dhan, risk, cfg)
+
+    elif strategy_name == "short_straddle":
+        cfg = StraddleSellerConfig(
+            name="Short_Straddle", security_id=security_id,
+            exchange_segment="NSE_FNO", product_type="MARGIN",
+            quantity=quantity, lot_size=quantity, paper_trading=PAPER_TRADING,
+        )
+        new_strategy = StraddleSellerStrategy(dhan, risk, cfg)
+
     else:
         return web.json_response({"ok": False, "error": f"Unknown strategy: {strategy_name}"}, status=400)
 

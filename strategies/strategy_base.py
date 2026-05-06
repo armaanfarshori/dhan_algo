@@ -273,56 +273,176 @@ class SMACrossoverStrategy(BaseStrategy):
 
 
 # ======================================================================
-#  READY-TO-USE STRATEGY: Options Straddle Seller (short volatility)
+#  STRATEGY: Options Short Straddle (short volatility / theta decay)
 # ======================================================================
 
+@dataclass
 class StraddleSellerConfig(StrategyConfig):
-    name: str = "Straddle_Seller"
-    call_security_id: str = ""   # ATM Call securityId
-    put_security_id: str = ""    # ATM Put securityId
+    name: str             = "Short_Straddle"
+    call_security_id: str = ""       # ATM Call securityId (from InstrumentMaster)
+    put_security_id: str  = ""       # ATM Put securityId  (from InstrumentMaster)
     exchange_segment: str = "NSE_FNO"
-    product_type: str = "MARGIN"
-    # Stop loss as % of premium collected
-    stop_loss_pct: float = 50.0
-    # Target profit as % of premium collected
-    target_pct: float = 30.0
+    product_type: str     = "MARGIN"
+    stop_loss_pct: float  = 50.0    # % of premium collected — exit both legs
+    target_pct: float     = 30.0    # % profit on premium — exit both legs
+    lot_size: int         = 75
 
 
 class StraddleSellerStrategy(BaseStrategy):
     """
-    Short Straddle options strategy.
-    Sells ATM CE + PE at open, exits on SL or target.
+    Short Straddle: sell ATM CE + ATM PE simultaneously.
+    Collects combined premium; exits both legs when combined
+    value moves +target_pct% (profit) or -stop_loss_pct% (loss).
 
-    ⚠  Always use with adequate margin and risk controls.
+    Entry: SELL call + SELL put at market on first tick.
+    Monitor: poll CE and PE prices every tick, sum = combined_val.
+    Exit:  BUY back both legs when P&L threshold is hit.
+
+    set call_security_id + put_security_id from InstrumentMaster.find_atm()
+    before starting the strategy.
     """
 
     def __init__(self, client, risk_manager, config: StraddleSellerConfig):
         super().__init__(client, risk_manager, config)
-        self.straddle_cfg: StraddleSellerConfig = config
-        self.premium_collected: float = 0.0
-        self.entered: bool = False
+        self.straddle_cfg        = config
+        self.premium_collected   = 0.0   # CE premium + PE premium at entry
+        self.call_entry_premium  = 0.0
+        self.put_entry_premium   = 0.0
+        self.entered             = False
+        self.call_order_id: Optional[str] = None
+        self.put_order_id:  Optional[str] = None
 
-    async def on_tick(self, tick: Dict) -> Optional[Signal]:
-        """
-        Override: this strategy needs two-leg quotes.
-        The tick here is for monitoring PnL against premium.
-        """
+    # ── run() override: fetches TWO legs every tick ─────────────────────────
+    async def run(self):
+        self._running = True
+        logger.info(f"▶ Short Straddle started | CE {self.straddle_cfg.call_security_id} · PE {self.straddle_cfg.put_security_id}")
+
+        while self._running:
+            try:
+                await self._straddle_tick()
+            except Exception as e:
+                logger.error(f"Straddle tick error: {e}")
+            await asyncio.sleep(self.config.poll_interval)
+
+    async def _straddle_tick(self):
+        if not self.straddle_cfg.call_security_id or not self.straddle_cfg.put_security_id:
+            logger.warning("Straddle: call_security_id or put_security_id not set")
+            return
+
+        seg = self.straddle_cfg.exchange_segment
+
+        # Fetch both leg prices in one request
+        try:
+            data     = await self.client.get_ohlc({seg: [
+                int(self.straddle_cfg.call_security_id),
+                int(self.straddle_cfg.put_security_id),
+            ]})
+            seg_data = data.get("data", {}).get(seg, {})
+            ce_price = seg_data.get(self.straddle_cfg.call_security_id, {}).get("last_price", 0.0)
+            pe_price = seg_data.get(self.straddle_cfg.put_security_id,  {}).get("last_price", 0.0)
+        except Exception as e:
+            logger.warning(f"Straddle quote error: {e}")
+            return
+
+        if not ce_price or not pe_price:
+            return
+
+        combined_val = ce_price + pe_price
+
         if not self.entered:
-            return Signal(action="BUY", price=0, reason="Enter straddle at open")
+            await self._enter_straddle(ce_price, pe_price)
+            return
 
-        current_val = tick.get("last_price", 0.0)
-        pnl_pct = ((self.premium_collected - current_val) / self.premium_collected) * 100
+        if self.premium_collected <= 0:
+            return
 
+        # P&L as % of premium collected (positive = profit since we're short)
+        pnl_pct = (self.premium_collected - combined_val) / self.premium_collected * 100
+
+        sig = None
         if pnl_pct >= self.straddle_cfg.target_pct:
-            return Signal(
-                action="EXIT",
-                price=current_val,
-                reason=f"Target hit: {pnl_pct:.1f}% profit",
+            sig = Signal("EXIT", combined_val, f"Target {pnl_pct:.1f}% · CE ₹{ce_price} PE ₹{pe_price}")
+        elif pnl_pct <= -self.straddle_cfg.stop_loss_pct:
+            sig = Signal("EXIT", combined_val, f"Stop loss {pnl_pct:.1f}% · CE ₹{ce_price} PE ₹{pe_price}")
+
+        if sig:
+            self.signals.append(sig)
+            await self._exit_straddle(ce_price, pe_price, sig.reason)
+
+    async def _enter_straddle(self, ce_price: float, pe_price: float):
+        logger.info(f"📡 Straddle entry | CE ₹{ce_price} + PE ₹{pe_price} = ₹{ce_price+pe_price:.2f}")
+
+        if self.config.paper_trading:
+            self.call_entry_premium  = ce_price
+            self.put_entry_premium   = pe_price
+            self.premium_collected   = ce_price + pe_price
+            self.entered             = True
+            self.position            = -self.straddle_cfg.lot_size  # short
+            self.entry_price         = self.premium_collected
+            self.orders_placed      += 2
+            sig = Signal("SELL", self.premium_collected,
+                         f"[PAPER] Sell straddle CE ₹{ce_price} + PE ₹{pe_price}")
+            self.signals.append(sig)
+            logger.info(f"📝 [PAPER] Short straddle @ ₹{self.premium_collected:.2f} collected")
+            return
+
+        # Live: place two SELL orders
+        try:
+            cr = await self.client.place_order(
+                transaction_type="SELL", exchange_segment=self.straddle_cfg.exchange_segment,
+                product_type=self.straddle_cfg.product_type, order_type="MARKET",
+                security_id=self.straddle_cfg.call_security_id,
+                quantity=self.straddle_cfg.lot_size,
             )
-        if pnl_pct <= -self.straddle_cfg.stop_loss_pct:
-            return Signal(
-                action="EXIT",
-                price=current_val,
-                reason=f"Stop loss hit: {pnl_pct:.1f}% loss",
+            self.call_order_id = cr.get("orderId")
+            pr = await self.client.place_order(
+                transaction_type="SELL", exchange_segment=self.straddle_cfg.exchange_segment,
+                product_type=self.straddle_cfg.product_type, order_type="MARKET",
+                security_id=self.straddle_cfg.put_security_id,
+                quantity=self.straddle_cfg.lot_size,
             )
+            self.put_order_id = pr.get("orderId")
+        except Exception as e:
+            logger.error(f"Straddle entry failed: {e}")
+            return
+
+        self.call_entry_premium  = ce_price
+        self.put_entry_premium   = pe_price
+        self.premium_collected   = ce_price + pe_price
+        self.entered             = True
+        self.position            = -self.straddle_cfg.lot_size
+        self.entry_price         = self.premium_collected
+        self.orders_placed      += 2
+        logger.info(f"🔴 Short straddle entered @ ₹{self.premium_collected:.2f}")
+
+    async def _exit_straddle(self, ce_price: float, pe_price: float, reason: str):
+        logger.info(f"📤 Straddle exit: {reason}")
+
+        if self.config.paper_trading:
+            pnl = (self.premium_collected - (ce_price + pe_price)) * self.straddle_cfg.lot_size
+            self.position        = 0
+            self.entered         = False
+            self.premium_collected = 0.0
+            self.orders_placed  += 2
+            logger.info(f"📝 [PAPER] Exit straddle · PnL ≈ ₹{pnl:+.2f}")
+            return
+
+        for sid, price in [(self.straddle_cfg.call_security_id, ce_price),
+                           (self.straddle_cfg.put_security_id,  pe_price)]:
+            try:
+                await self.client.place_order(
+                    transaction_type="BUY", exchange_segment=self.straddle_cfg.exchange_segment,
+                    product_type=self.straddle_cfg.product_type, order_type="MARKET",
+                    security_id=sid, quantity=self.straddle_cfg.lot_size,
+                )
+            except Exception as e:
+                logger.error(f"Straddle exit leg {sid} failed: {e}")
+
+        self.position          = 0
+        self.entered           = False
+        self.premium_collected = 0.0
+        self.orders_placed    += 2
+
+    # Not used — _straddle_tick handles signal logic directly
+    async def on_tick(self, tick: Dict) -> Optional[Signal]:
         return None
