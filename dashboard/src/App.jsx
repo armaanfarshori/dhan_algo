@@ -13,6 +13,7 @@ import PayoffChart        from './components/cockpit/PayoffChart'
 import FloatingKillSwitch from './components/cockpit/FloatingKillSwitch'
 import StrategySidebar    from './components/cockpit/StrategySidebar'
 import BacktestTab        from './components/cockpit/BacktestTab'
+import WatchlistPanel     from './components/cockpit/WatchlistPanel'
 
 const TABS = ['Cockpit', 'Backtest', 'Risk Console']
 
@@ -248,7 +249,7 @@ function Tabs({ active, onChange }) {
 
 // ── Cockpit layout (two-column) ───────────────────────────────────────────────
 function CockpitTab({ data }) {
-  const { status, risk, signals, funds, positions, scalper, payoff, config } = data
+  const { status, risk, signals, funds, positions, scalper, payoff, config, watchlist, scanner } = data
   const halted = risk?.data?.halted ?? false
 
   return (
@@ -269,6 +270,7 @@ function CockpitTab({ data }) {
 
         <Pipeline scalper={scalper} />
 
+        <WatchlistPanel watchlist={watchlist} scanner={scanner} />
         <PayoffChart payoff={payoff} />
         <EquityPanel signals={signals} />
         <div style={{ marginBottom: 14 }} />

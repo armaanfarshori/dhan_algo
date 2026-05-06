@@ -35,6 +35,8 @@ from strategies.strategy_base import (
     StraddleSellerStrategy, StraddleSellerConfig,
 )
 from strategies.options_scalper import OptionsScalperStrategy, OptionsScalperConfig
+from core.watchlist import WatchlistManager
+from strategies.scanner import MultiStockScanner
 from strategies.backtest_strategies import (
     RSIScalperStrategy, RSIConfig,
     MomentumBreakoutStrategy, MomentumConfig,
@@ -59,6 +61,8 @@ PAPER_TRADING  = os.getenv("PAPER_TRADING",     "true").lower() == "true"
 MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "5000"))
 WEBHOOK_PORT   = int(os.getenv("WEBHOOK_PORT",  "8765"))
 STRATEGY       = os.getenv("STRATEGY", "scalper").lower()
+SCANNER_MODE   = os.getenv("SCANNER_MODE", "false").lower() == "true"
+SEGMENTS       = os.getenv("SEGMENTS", "NSE_EQ").split(",")
 
 # Auth manager available when PIN + TOTP are configured
 _auth_manager: Optional[DhanAuthManager] = None
@@ -394,6 +398,59 @@ async def payoff_handler(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "mode": mode, "entry": entry, "breakeven": bep, "target": target, "stop": stop, "points": points})
 
 
+async def watchlist_handler(request: web.Request) -> web.Response:
+    wl = request.app.get("watchlist")
+    if not wl:
+        return web.json_response({"ok": False, "error": "Watchlist not initialised"}, status=503)
+    return web.json_response({"ok": True, **wl.summary()})
+
+
+async def watchlist_refresh_handler(request: web.Request) -> web.Response:
+    wl = request.app.get("watchlist")
+    if not wl:
+        return web.json_response({"ok": False, "error": "Watchlist not initialised"}, status=503)
+    try:
+        await wl.refresh()
+        return web.json_response({"ok": True, "count": len(wl.get()),
+                                  "stocks": [s.symbol for s in wl.get()]})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
+async def scanner_handler(request: web.Request) -> web.Response:
+    scanner = request.app.get("scanner")
+    if not scanner:
+        return web.json_response({"ok": False, "mode": "single_strategy"})
+    return web.json_response({"ok": True, **scanner.get_scan_summary()})
+
+
+async def scanner_config_handler(request: web.Request) -> web.Response:
+    """Update scanner config (strategy, segments, capital_pct) without full restart."""
+    body         = await request.json()
+    scanner      = request.app.get("scanner")
+    if not scanner:
+        return web.json_response({"ok": False, "error": "Scanner not running"}, status=404)
+
+    if "strategy_key" in body:
+        new_key = body["strategy_key"]
+        if new_key in STRATEGY_MAP:
+            scanner.strategy_key = new_key
+            scanner._cfg_cls, scanner._cfg_type = STRATEGY_MAP[new_key]
+            scanner._strategies.clear()   # reset per-stock instances
+    if "segments" in body:
+        scanner.segments = body["segments"]
+    if "capital_pct" in body:
+        scanner.capital_pct = float(body["capital_pct"])
+    if "max_positions" in body:
+        scanner.max_positions = int(body["max_positions"])
+    if "hedge_fno" in body:
+        scanner.hedge_fno = bool(body["hedge_fno"])
+
+    return web.json_response({"ok": True, "strategy_key": scanner.strategy_key,
+                              "segments": scanner.segments,
+                              "capital_pct": scanner.capital_pct})
+
+
 async def backtest_run_handler(request: web.Request) -> web.Response:
     body        = await request.json()
     strategy_key = body.get("strategy", "sma_crossover")
@@ -555,6 +612,9 @@ async def main():
         async def on_risk_halt(reason: str):
             logger.critical(f"⛔ HALT: {reason}")
 
+        # ── Watchlist (top movers from NSE) ──────────────────────────────────
+        watchlist = await WatchlistManager.build()
+
         # ── Strategy selection ────────────────────────────────────────────────
         if STRATEGY == "scalper":
             cfg = OptionsScalperConfig(
@@ -583,14 +643,33 @@ async def main():
             )
             strategy = SMACrossoverStrategy(dhan, risk, cfg)
 
+        # ── Scanner (multi-stock, multi-segment, auto-capital) ───────────────
+        scanner = None
+        if SCANNER_MODE:
+            scanner = MultiStockScanner(
+                client        = dhan,
+                risk_manager  = risk,
+                watchlist     = watchlist,
+                strategy_key  = STRATEGY if STRATEGY != "scalper" else "sma_crossover",
+                segments      = [s.strip() for s in SEGMENTS],
+                paper_trading = PAPER_TRADING,
+                capital_pct   = 0.70,
+                hedge_fno     = True,
+                max_positions = 5,
+            )
+
         # ── Web app ───────────────────────────────────────────────────────────
         app = web.Application(middlewares=[cors_middleware])
         app["risk"]           = risk
-        app["strategy"]       = strategy
-        app["strategy_task"]  = asyncio.create_task(strategy.run(), name="strategy")
+        app["strategy"]       = scanner if scanner else strategy
+        app["strategy_task"]  = asyncio.create_task(
+            (scanner or strategy).run(), name="strategy"
+        )
         app["client"]         = dhan
         app["auth_manager"]   = _auth_manager
         app["start_time"]     = time.time()
+        app["watchlist"]      = watchlist
+        app["scanner"]        = scanner
         app["runtime_config"] = {
             "strategy":    STRATEGY,
             "segment":     "NSE_FNO" if STRATEGY == "scalper" else "NSE_EQ",
@@ -617,6 +696,10 @@ async def main():
         app.router.add_post("/api/killswitch",        killswitch_handler)
         app.router.add_post("/api/backtest/run",      backtest_run_handler)
         app.router.add_get("/api/market",             market_status_handler)
+        app.router.add_get("/api/watchlist",          watchlist_handler)
+        app.router.add_post("/api/watchlist/refresh", watchlist_refresh_handler)
+        app.router.add_get("/api/scanner",            scanner_handler)
+        app.router.add_post("/api/scanner/config",    scanner_config_handler)
         app.router.add_post("/postback",              postback_handler)
 
         # Serve React build assets if available
