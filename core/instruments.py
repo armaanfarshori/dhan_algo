@@ -185,3 +185,67 @@ class InstrumentMaster:
 
     def strikes_for_expiry(self, expiry: str) -> List[float]:
         return sorted({c.strike for c in self._contracts if c.expiry == expiry})
+
+    @classmethod
+    def search_instruments(cls, query: str, segment: str, max_results: int = 20) -> list:
+        """
+        Search equity (NSE_EQ) or commodity (MCX) instruments from the cached CSV.
+        Runs synchronously — call via run_in_executor from async handlers.
+        """
+        if not CACHE_FILE.exists():
+            return []
+
+        q     = query.strip().upper()
+        today = date.today().isoformat()
+        results: dict = {}  # keyed by security_id to deduplicate
+
+        with open(CACHE_FILE, encoding="utf-8", errors="replace") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                exch       = row.get("SEM_EXM_EXCH_ID", "")
+                instrument = row.get("SEM_INSTRUMENT_NAME", "")
+                series     = row.get("SEM_SERIES", "")
+                sym        = row.get("SM_SYMBOL_NAME", "").upper()
+                trading    = row.get("SEM_TRADING_SYMBOL", "").upper()
+                sid        = row.get("SEM_SMST_SECURITY_ID", "").strip()
+
+                if segment == "NSE_EQ":
+                    if exch != "NSE" or instrument != "EQUITY" or series != "EQ":
+                        continue
+                    if q not in sym and q not in trading:
+                        continue
+
+                elif segment == "MCX":
+                    if exch != "MCX" or instrument != "FUTCOM":
+                        continue
+                    expiry_raw = row.get("SEM_EXPIRY_DATE", "")[:10]
+                    if expiry_raw < today:
+                        continue
+                    if q not in sym and q not in trading:
+                        continue
+                    # Keep only nearest expiry per commodity symbol
+                    if sym in results:
+                        continue
+                else:
+                    continue
+
+                if not sid:
+                    continue
+
+                try:
+                    results[sid] = {
+                        "security_id": sid,
+                        "symbol":      row.get("SEM_TRADING_SYMBOL", "").strip(),
+                        "name":        row.get("SM_SYMBOL_NAME", "").strip(),
+                        "exchange":    exch,
+                        "lot_size":    int(float(row.get("SEM_LOT_UNITS", "1") or "1")),
+                        "segment":     segment,
+                        "instrument":  instrument,
+                    }
+                except (ValueError, KeyError):
+                    continue
+
+                if len(results) >= max_results:
+                    break
+
+        return list(results.values())

@@ -1,24 +1,63 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg:      #0d1117;
-  --surface: #161b22;
-  --border:  #30363d;
-  --text:    #c9d1d9;
-  --muted:   #8b949e;
-  --green:   #3fb950;
-  --red:     #f85149;
-  --yellow:  #d29922;
-  --blue:    #58a6ff;
-  --font:    'Courier New', Courier, monospace;
+  --bg-0:    #07080a;
+  --bg-1:    #0c0e12;
+  --bg-2:    #11141a;
+  --bg-3:    #161a22;
+  --line:    #1f242e;
+  --line-2:  #2a3140;
+  --ink-0:   #e7ebf2;
+  --ink-1:   #a9b2c2;
+  --ink-2:   #6b7589;
+  --ink-3:   #424b5c;
+  --green:   oklch(0.78 0.19 145);
+  --green-d: oklch(0.45 0.16 145);
+  --red:     oklch(0.68 0.22 25);
+  --red-d:   oklch(0.42 0.18 25);
+  --amber:   oklch(0.82 0.16 75);
+  --cyan:    oklch(0.82 0.12 200);
+  --violet:  oklch(0.72 0.15 290);
+  --font-mono: 'JetBrains Mono', monospace;
+  --font-dot:  'VT323', monospace;
+  --font-ui:   'Inter', system-ui, sans-serif;
 }
 
-body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--font);
-  font-size: 13px;
+html, body {
+  background: var(--bg-0);
+  color: var(--ink-0);
+  font-family: var(--font-ui);
+  font-feature-settings: 'tnum', 'ss01';
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
   min-height: 100vh;
 }
 
-#root { display: flex; flex-direction: column; min-height: 100vh; }
+#root { min-height: 100vh; }
+
+body::before {
+  content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+  background:
+    radial-gradient(900px 600px at 18% 12%,  oklch(0.55 0.16 145 / 0.08), transparent 60%),
+    radial-gradient(700px 500px at 92% 88%, oklch(0.55 0.16 25  / 0.06), transparent 60%);
+}
+
+body::after {
+  content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+  background-image:
+    linear-gradient(to right,  rgba(255,255,255,0.012) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255,255,255,0.012) 1px, transparent 1px);
+  background-size: 32px 32px;
+  mask-image: radial-gradient(ellipse at center, black 40%, transparent 100%);
+}
+
+@keyframes pulse  { 0%,100%{opacity:1} 50%{opacity:0.3} }
+@keyframes spin   { to { transform: rotate(360deg); } }
+@keyframes breathe{ 0%,100%{filter:brightness(1)} 50%{filter:brightness(1.18)} }
+@keyframes rev    { to { opacity:1; transform:translateY(0); } }
+@keyframes introCross { from{transform:scaleY(0)} to{transform:scaleY(1)} }
+@keyframes introWord  {
+  0%  {opacity:0;letter-spacing:1em}
+  50% {opacity:1}
+  100%{opacity:1;letter-spacing:0.05em}
+}

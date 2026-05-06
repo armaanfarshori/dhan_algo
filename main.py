@@ -177,6 +177,136 @@ async def auth_handler(request: web.Request) -> web.Response:
     return web.json_response({"mode": "auto", **mgr.summary()})
 
 
+async def config_handler(request: web.Request) -> web.Response:
+    return web.json_response(request.app.get("runtime_config", {}))
+
+
+async def switch_strategy_handler(request: web.Request) -> web.Response:
+    body          = await request.json()
+    strategy_name = body.get("strategy", "scalper")
+    segment       = body.get("segment",   "NSE_FNO")
+    security_id   = body.get("security_id", "13")
+    quantity      = int(body.get("quantity",  75))
+    num_lots      = int(body.get("num_lots",   1))
+
+    dhan = request.app["client"]
+    risk = request.app["risk"]
+
+    # Stop old strategy
+    old = request.app["strategy"]
+    old.stop()
+    old_task = request.app.get("strategy_task")
+    if old_task and not old_task.done():
+        old_task.cancel()
+        await asyncio.gather(old_task, return_exceptions=True)
+
+    # Build new strategy
+    if strategy_name == "scalper":
+        cfg = OptionsScalperConfig(
+            security_id=security_id, exchange_segment="IDX_I",
+            product_type="MARGIN", quantity=quantity, num_lots=num_lots,
+            poll_interval=10.0, paper_trading=PAPER_TRADING,
+        )
+        new_strategy = OptionsScalperStrategy(dhan, risk, cfg)
+    elif strategy_name == "sma_crossover":
+        cfg = SMAConfig(
+            name=f"SMA_9_21_{security_id}", security_id=security_id,
+            exchange_segment=segment, product_type="INTRADAY",
+            quantity=quantity, paper_trading=PAPER_TRADING,
+        )
+        new_strategy = SMACrossoverStrategy(dhan, risk, cfg)
+    else:
+        return web.json_response({"ok": False, "error": f"Unknown strategy: {strategy_name}"}, status=400)
+
+    request.app["strategy"]      = new_strategy
+    request.app["strategy_task"] = asyncio.create_task(new_strategy.run(), name="strategy")
+    request.app["runtime_config"] = {
+        "strategy": strategy_name, "segment": segment,
+        "security_id": security_id, "quantity": quantity, "num_lots": num_lots,
+    }
+    logger.info(f"Strategy switched to {new_strategy.config.name}")
+    return web.json_response({"ok": True, "strategy": strategy_name, "message": f"Switched to {new_strategy.config.name}"})
+
+
+async def instrument_search_handler(request: web.Request) -> web.Response:
+    from core.instruments import InstrumentMaster
+    q       = request.rel_url.query.get("q", "").strip()
+    segment = request.rel_url.query.get("segment", "NSE_EQ")
+    if len(q) < 2:
+        return web.json_response({"ok": False, "error": "Query must be at least 2 characters"}, status=400)
+    loop    = asyncio.get_event_loop()
+    results = await loop.run_in_executor(None, InstrumentMaster.search_instruments, q, segment)
+    return web.json_response({"ok": True, "results": results})
+
+
+async def instrument_price_handler(request: web.Request) -> web.Response:
+    sid     = request.rel_url.query.get("security_id", "")
+    segment = request.rel_url.query.get("segment", "NSE_EQ")
+    if not sid:
+        return web.json_response({"ok": False, "error": "security_id required"}, status=400)
+    seg_map = {"NSE_EQ": "NSE_EQ", "NSE_FNO": "NSE_FNO", "MCX": "MCX_COMM"}
+    api_seg = seg_map.get(segment, segment)
+    try:
+        data  = await request.app["client"].get_ltp({api_seg: [int(sid)]})
+        seg_d = data.get("data", {}).get(api_seg, {})
+        price = seg_d.get(sid, {}).get("last_price", 0.0)
+        return web.json_response({"ok": True, "security_id": sid, "price": price, "segment": segment})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=503)
+
+
+async def killswitch_handler(request: web.Request) -> web.Response:
+    risk     = request.app["risk"]
+    strategy = request.app["strategy"]
+    risk.activate_kill_switch()
+    strategy.stop()
+    task = request.app.get("strategy_task")
+    if task and not task.done():
+        task.cancel()
+
+    oco_cancelled = 0
+    if not PAPER_TRADING and hasattr(strategy, "_oco_order_id") and strategy._oco_order_id:
+        try:
+            await request.app["client"].cancel_forever_order(strategy._oco_order_id)
+            oco_cancelled = 1
+        except Exception as e:
+            logger.warning(f"OCO cancel failed: {e}")
+
+    logger.critical("⛔ KILL SWITCH ACTIVATED via dashboard")
+    return web.json_response({"ok": True, "halted": True, "oco_cancelled": oco_cancelled, "message": "Kill switch activated"})
+
+
+async def payoff_handler(request: web.Request) -> web.Response:
+    strategy = request.app["strategy"]
+    if not hasattr(strategy, "get_scalper_summary"):
+        return web.json_response({"ok": False, "error": "Payoff only for scalper"}, status=404)
+
+    sc  = strategy.get_scalper_summary()
+    cfg = strategy.scalper_cfg
+
+    if sc["state"] == "IN_POSITION":
+        entry  = sc["entry_premium"]
+        bep    = sc["breakeven_premium"]
+        target = round(bep + cfg.target_buffer, 2)
+        stop   = round(entry - cfg.stop_buffer, 2)
+        qty    = cfg.quantity * cfg.num_lots
+        mode   = "live"
+    else:
+        entry  = cfg.max_premium / 2
+        bep    = round(entry + 2.0, 2)
+        target = round(bep + cfg.target_buffer, 2)
+        stop   = round(entry - cfg.stop_buffer, 2)
+        qty    = cfg.quantity * cfg.num_lots
+        mode   = "whatif"
+
+    lo   = min(stop * 0.8, stop - 10)
+    hi   = max(target * 1.2, target + 10)
+    step = (hi - lo) / 19
+    points = [{"premium": round(lo + i * step, 2), "pnl": round((lo + i * step - entry) * qty, 2)} for i in range(20)]
+
+    return web.json_response({"ok": True, "mode": mode, "entry": entry, "breakeven": bep, "target": target, "stop": stop, "points": points})
+
+
 # ── Server startup ────────────────────────────────────────────────────────────
 async def start_server(app: web.Application):
     runner = web.AppRunner(app)
@@ -263,23 +393,37 @@ async def main():
 
         # ── Web app ───────────────────────────────────────────────────────────
         app = web.Application(middlewares=[cors_middleware])
-        app["risk"]         = risk
-        app["strategy"]     = strategy
-        app["client"]       = dhan
-        app["auth_manager"] = _auth_manager
-        app["start_time"]   = time.time()
+        app["risk"]           = risk
+        app["strategy"]       = strategy
+        app["strategy_task"]  = asyncio.create_task(strategy.run(), name="strategy")
+        app["client"]         = dhan
+        app["auth_manager"]   = _auth_manager
+        app["start_time"]     = time.time()
+        app["runtime_config"] = {
+            "strategy":    STRATEGY,
+            "segment":     "NSE_FNO" if STRATEGY == "scalper" else "NSE_EQ",
+            "security_id": cfg.security_id,
+            "quantity":    cfg.quantity,
+            "num_lots":    getattr(cfg, "num_lots", 1),
+        }
 
-        app.router.add_get("/",              dashboard_handler)
-        app.router.add_get("/health",        health_handler)
-        app.router.add_get("/api/status",    status_handler)
-        app.router.add_get("/api/risk",      risk_handler)
-        app.router.add_get("/api/signals",   signals_handler)
-        app.router.add_get("/api/funds",     funds_handler)
-        app.router.add_get("/api/positions", positions_handler)
-        app.router.add_get("/api/scalper",      scalper_handler)
-        app.router.add_get("/api/instruments",  instruments_handler)
-        app.router.add_get("/api/auth",         auth_handler)
-        app.router.add_post("/postback",     postback_handler)
+        app.router.add_get("/",                       dashboard_handler)
+        app.router.add_get("/health",                 health_handler)
+        app.router.add_get("/api/status",             status_handler)
+        app.router.add_get("/api/risk",               risk_handler)
+        app.router.add_get("/api/signals",            signals_handler)
+        app.router.add_get("/api/funds",              funds_handler)
+        app.router.add_get("/api/positions",          positions_handler)
+        app.router.add_get("/api/scalper",            scalper_handler)
+        app.router.add_get("/api/instruments",        instruments_handler)
+        app.router.add_get("/api/auth",               auth_handler)
+        app.router.add_get("/api/config",             config_handler)
+        app.router.add_get("/api/payoff",             payoff_handler)
+        app.router.add_get("/api/instruments/search", instrument_search_handler)
+        app.router.add_get("/api/instruments/price",  instrument_price_handler)
+        app.router.add_post("/api/strategy/switch",   switch_strategy_handler)
+        app.router.add_post("/api/killswitch",        killswitch_handler)
+        app.router.add_post("/postback",              postback_handler)
 
         # Serve React build assets if available
         if (DIST_DIR / "assets").exists():
@@ -303,18 +447,23 @@ async def main():
                 pass
 
         logger.info("🚀 Launching tasks…")
+        strategy_task = app["strategy_task"]
+
         tasks = [
-            asyncio.create_task(risk.run(),         name="risk_monitor"),
-            asyncio.create_task(strategy.run(),     name="strategy"),
-            asyncio.create_task(stop_event.wait(),  name="shutdown_watcher"),
+            asyncio.create_task(risk.run(),        name="risk_monitor"),
+            asyncio.create_task(stop_event.wait(), name="shutdown_watcher"),
         ]
         if _auth_manager:
             tasks.append(asyncio.create_task(_auth_manager.run(), name="auth_manager"))
 
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+        # Cancel strategy task separately
+        if not strategy_task.done():
+            strategy_task.cancel()
         for task in pending:
             task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
+        await asyncio.gather(strategy_task, *pending, return_exceptions=True)
         await server_runner.cleanup()
         logger.info("✅ Platform shut down cleanly")
 
