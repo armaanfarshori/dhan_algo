@@ -37,6 +37,7 @@ from strategies.strategy_base import (
 from strategies.options_scalper import OptionsScalperStrategy, OptionsScalperConfig
 from core.watchlist import WatchlistManager
 from strategies.scanner import MultiStockScanner
+from strategies.index_options import IndexOptionsScanner
 from strategies.backtest_strategies import (
     RSIScalperStrategy, RSIConfig,
     MomentumBreakoutStrategy, MomentumConfig,
@@ -421,6 +422,8 @@ async def scanner_handler(request: web.Request) -> web.Response:
     scanner = request.app.get("scanner")
     if not scanner:
         return web.json_response({"ok": False, "mode": "single_strategy"})
+    if hasattr(scanner, "get_summary"):
+        return web.json_response({"ok": True, **scanner.get_summary()})
     return web.json_response({"ok": True, **scanner.get_scan_summary()})
 
 
@@ -643,18 +646,29 @@ async def main():
             )
             strategy = SMACrossoverStrategy(dhan, risk, cfg)
 
-        # ── Scanner (multi-stock, multi-segment, auto-capital) ───────────────
+        # ── Scanner / Index Options Engine ───────────────────────────────────
         scanner = None
-        if SCANNER_MODE:
+        if STRATEGY == "index_options" or (SCANNER_MODE and "NSE_FNO" in SEGMENTS):
+            # Pure index options: NIFTY / BANKNIFTY / SENSEX / FINNIFTY / etc.
+            scanner = IndexOptionsScanner(
+                client        = dhan,
+                risk_manager  = risk,
+                paper_trading = PAPER_TRADING,
+                capital_pct   = 0.70,
+                poll_interval = 10.0,
+            )
+            logger.info("🔭 Index Options Scanner active (all 6 indices, no equity F&O)")
+        elif SCANNER_MODE:
+            # Equity scanner — top 15 NSE movers across selected segments
             scanner = MultiStockScanner(
                 client        = dhan,
                 risk_manager  = risk,
                 watchlist     = watchlist,
                 strategy_key  = STRATEGY if STRATEGY != "scalper" else "sma_crossover",
-                segments      = [s.strip() for s in SEGMENTS],
+                segments      = [s.strip() for s in SEGMENTS if s.strip() != "NSE_FNO"],
                 paper_trading = PAPER_TRADING,
                 capital_pct   = 0.70,
-                hedge_fno     = True,
+                hedge_fno     = False,
                 max_positions = 5,
             )
 
