@@ -459,9 +459,16 @@ async def scanner_config_handler(request: web.Request) -> web.Response:
     if "hedge_fno" in body:
         scanner.hedge_fno = bool(body["hedge_fno"])
 
-    return web.json_response({"ok": True, "strategy_key": scanner.strategy_key,
-                              "segments": scanner.segments,
-                              "capital_pct": scanner.capital_pct})
+    resp: dict = {"ok": True}
+    if hasattr(scanner, "strategy_key"):
+        resp["strategy_key"] = scanner.strategy_key
+    if hasattr(scanner, "active_segments"):
+        resp["segments"] = scanner.active_segments
+    elif hasattr(scanner, "segments"):
+        resp["segments"] = scanner.segments
+    if hasattr(scanner, "capital_pct"):
+        resp["capital_pct"] = scanner.capital_pct
+    return web.json_response(resp)
 
 
 async def backtest_run_handler(request: web.Request) -> web.Response:
@@ -656,44 +663,45 @@ async def main():
             )
             strategy = SMACrossoverStrategy(dhan, risk, cfg)
 
-        # ── Scanner / Index Options Engine ───────────────────────────────────
-        scanner = None
-        if STRATEGY == "index_options" or (SCANNER_MODE and "NSE_FNO" in SEGMENTS):
-            # Pure index options: NIFTY / BANKNIFTY / SENSEX / FINNIFTY / etc.
-            scanner = IndexOptionsScanner(
-                client        = dhan,
-                risk_manager  = risk,
-                paper_trading = PAPER_TRADING,
-                capital_pct   = 0.70,
-                poll_interval = 10.0,
-            )
-            logger.info("🔭 Index Options Scanner active (all 6 indices, no equity F&O)")
-        elif SCANNER_MODE:
-            # Equity scanner — top 15 NSE movers across selected segments
-            scanner = MultiStockScanner(
-                client        = dhan,
-                risk_manager  = risk,
-                watchlist     = watchlist,
-                strategy_key  = STRATEGY if STRATEGY != "scalper" else "sma_crossover",
-                segments      = [s.strip() for s in SEGMENTS if s.strip() != "NSE_FNO"],
-                paper_trading = PAPER_TRADING,
-                capital_pct   = 0.70,
-                hedge_fno     = False,
-                max_positions = 5,
-            )
+        # ── Both scanners run in parallel ────────────────────────────────────
+        # 1. Index Options Scanner (NSE_FNO + BSE_FNO) — always runs
+        fno_scanner = IndexOptionsScanner(
+            client        = dhan,
+            risk_manager  = risk,
+            paper_trading = PAPER_TRADING,
+            capital_pct   = 0.35,    # 35% each (70% total split across two engines)
+            poll_interval = 10.0,
+        )
+        logger.info("🔭 F&O Scanner: NIFTY · BANKNIFTY · SENSEX · FINNIFTY · NIFTYNXT50 · MIDCPNIFTY")
+
+        # 2. Equity Scanner (NSE_EQ top movers) — always runs
+        equity_scanner = MultiStockScanner(
+            client        = dhan,
+            risk_manager  = risk,
+            watchlist     = watchlist,
+            strategy_key  = STRATEGY if STRATEGY not in ("scalper","index_options") else "sma_crossover",
+            segments      = ["NSE_EQ"],
+            paper_trading = PAPER_TRADING,
+            capital_pct   = 0.35,
+            hedge_fno     = False,
+            max_positions = 3,
+            poll_interval = 30.0,
+        )
+        logger.info("📊 Equity Scanner: top 15 NSE movers · SMA crossover")
 
         # ── Web app ───────────────────────────────────────────────────────────
         app = web.Application(middlewares=[cors_middleware])
         app["risk"]           = risk
-        app["strategy"]       = scanner if scanner else strategy
-        app["strategy_task"]  = asyncio.create_task(
-            (scanner or strategy).run(), name="strategy"
-        )
+        app["strategy"]       = fno_scanner          # primary for /api/status duck-typing
+        app["strategy_task"]  = asyncio.create_task(fno_scanner.run(), name="fno_scanner")
+        app["equity_task"]    = asyncio.create_task(equity_scanner.run(), name="equity_scanner")
         app["client"]         = dhan
         app["auth_manager"]   = _auth_manager
         app["start_time"]     = time.time()
         app["watchlist"]      = watchlist
-        app["scanner"]        = scanner
+        app["fno_scanner"]    = fno_scanner
+        app["equity_scanner"] = equity_scanner
+        app["scanner"]        = fno_scanner          # kept for backwards compat
         app["runtime_config"] = {
             "strategy":    STRATEGY,
             "segment":     "NSE_FNO" if STRATEGY == "scalper" else "NSE_EQ",
@@ -723,6 +731,8 @@ async def main():
         app.router.add_get("/api/watchlist",          watchlist_handler)
         app.router.add_post("/api/watchlist/refresh", watchlist_refresh_handler)
         app.router.add_get("/api/scanner",            scanner_handler)
+        app.router.add_get("/api/scanner/fno",        lambda r: web.json_response({"ok":True, **r.app["fno_scanner"].get_summary()}))
+        app.router.add_get("/api/scanner/equity",     lambda r: web.json_response({"ok":True, **r.app["equity_scanner"].get_scan_summary()}))
         app.router.add_post("/api/scanner/config",    scanner_config_handler)
         app.router.add_post("/postback",              postback_handler)
 
@@ -739,6 +749,8 @@ async def main():
         def _shutdown(sig, frame):
             logger.info(f"Signal {sig.name} received — shutting down…")
             strategy.stop()
+            fno_scanner.stop()
+            equity_scanner.stop()
             stop_event.set()
 
         for s in (signal.SIGINT, signal.SIGTERM):
@@ -748,7 +760,8 @@ async def main():
                 pass
 
         logger.info("🚀 Launching tasks…")
-        strategy_task = app["strategy_task"]
+        strategy_task  = app["strategy_task"]
+        equity_task    = app["equity_task"]
 
         tasks = [
             asyncio.create_task(risk.run(),        name="risk_monitor"),
@@ -759,12 +772,13 @@ async def main():
 
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
-        # Cancel strategy task separately
-        if not strategy_task.done():
-            strategy_task.cancel()
+        # Cancel both scanner tasks
+        for t in [strategy_task, equity_task]:
+            if not t.done():
+                t.cancel()
         for task in pending:
             task.cancel()
-        await asyncio.gather(strategy_task, *pending, return_exceptions=True)
+        await asyncio.gather(strategy_task, equity_task, *pending, return_exceptions=True)
         await server_runner.cleanup()
         logger.info("✅ Platform shut down cleanly")
 

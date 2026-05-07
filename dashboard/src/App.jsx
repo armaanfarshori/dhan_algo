@@ -249,7 +249,7 @@ function Tabs({ active, onChange }) {
 
 // ── Cockpit layout ────────────────────────────────────────────────────────────
 function CockpitTab({ data }) {
-  const { status, risk, signals, funds, positions, scalper, payoff, config, watchlist, scanner } = data
+  const { status, risk, signals, funds, positions, scalper, payoff, config, watchlist, scanner, fnoScanner, equityScanner } = data
 
   return (
     <>
@@ -271,7 +271,10 @@ function CockpitTab({ data }) {
           <ActivePosition scalper={scalper} status={status} />
           <div style={{ marginBottom: 14 }} />
 
-          <Pipeline scalper={scalper} scanner={scanner} />
+          {/* F&O pipeline */}
+        <Pipeline scalper={scalper} scanner={fnoScanner} label="F&O INDEX OPTIONS" />
+        {/* Equity pipeline */}
+        <Pipeline scalper={null} scanner={equityScanner} label="EQUITY TOP MOVERS" />
           <WatchlistPanel watchlist={watchlist} scanner={scanner} />
           <PayoffChart payoff={payoff} />
           <EquityPanel signals={signals} />
@@ -288,7 +291,7 @@ function CockpitTab({ data }) {
         {/* ── RIGHT: sticky sidebar, no internal scrollbar ── */}
         <div style={{ position: 'sticky', top: 16 }}>
           <Panel>
-            <StrategySidebar config={config} scanner={scanner} onSwitch={() => {}} />
+            <StrategySidebar config={config} scanner={fnoScanner} equityScanner={equityScanner} onSwitch={() => {}} />
           </Panel>
         </div>
 

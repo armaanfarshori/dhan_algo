@@ -1,5 +1,14 @@
 import { T } from '../../tokens'
 
+const EQ_STEPS = [
+  { n:'01', label:'FETCH',   name:'Bulk OHLC',     desc:'Top 15 stocks\none call per segment', lat:'~40ms'  },
+  { n:'02', label:'SIGNAL',  name:'SMA / RSI',     desc:'Strategy logic\nper stock',           lat:'<1ms'   },
+  { n:'03', label:'RANK',    name:'Score & Sort',  desc:'|change%| + vol\nhighest first',      lat:'<1ms'   },
+  { n:'04', label:'CAPITAL', name:'Auto-size qty', desc:'70% balance\n÷ open positions',       lat:'<1ms'   },
+  { n:'05', label:'RISK',    name:'check_order',   desc:'Cap, positions\nkill switch',         lat:'<1ms'   },
+  { n:'06', label:'FILL',    name:'place_order',   desc:'MARKET · INTRADAY\nvia Dhan API',     lat:'~700ms' },
+]
+
 const FNO_STEPS = [
   { n:'01', label:'FETCH',   name:'IDX_I Bulk',      desc:'All 6 underlying\nprices · one call',    lat:'~40ms' },
   { n:'02', label:'SIGNAL',  name:'RSI-14',           desc:'Cross 30 oversold\nCross 70 overbought', lat:'<1ms'  },
@@ -65,21 +74,18 @@ function IndexRow({ name, idx }) {
   )
 }
 
-export default function Pipeline({ scalper, scanner }) {
-  const sc  = scanner?.data
-  const isFno = sc?.mode === 'index_options'
+export default function Pipeline({ scalper, scanner, label }) {
+  const sc    = scanner?.data
+  const isFno = sc?.mode === 'index_options' || label?.includes('F&O')
+  const steps = isFno ? FNO_STEPS : EQ_STEPS
 
-  // Determine active pipeline step from scanner state
-  let activeStep = '01'
-  if (isFno && sc?.open_positions > 0) activeStep = '07'
-
-  // Header meta
   const positions = sc?.open_positions ?? 0
   const orders    = sc?.orders_placed  ?? 0
+  const activeStep = positions > 0 ? (isFno ? '07' : '06') : '01'
 
   return (
     <div style={{ marginBottom: 14 }}>
-      {/* Pipeline header */}
+      {/* Header */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 14,
         padding: '10px 14px', borderTop: `1px solid ${T.line}`, borderBottom: `1px solid ${T.line}`,
@@ -87,26 +93,27 @@ export default function Pipeline({ scalper, scanner }) {
         background: T.bg1,
       }}>
         <span style={{ background: T.greenD, color: T.green, padding: '2px 6px', fontSize: 9 }}>LIVE</span>
-        <span style={{ color: T.ink0 }}>
-          {isFno ? 'INDEX OPTIONS PIPELINE · IDX_I → ATM → OCO' : 'SCALPER PIPELINE · _tick → _enter → OCO'}
-        </span>
+        <span style={{ color: T.ink0 }}>{label || (isFno ? 'F&O INDEX OPTIONS PIPELINE' : 'EQUITY SCANNER PIPELINE')}</span>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 18 }}>
           <span>POSITIONS <b style={{ color: positions > 0 ? T.amber : T.ink0 }}>{positions}</b></span>
           <span>ORDERS <b style={{ color: T.ink0 }}>{orders}</b></span>
           {isFno && sc?.active_indices && (
-            <span>SCANNING <b style={{ color: T.cyan }}>{sc.active_indices.join(' · ')}</b></span>
+            <span style={{ color: T.ink2 }}>SCAN <b style={{ color: T.cyan }}>{sc.active_indices.join(' · ')}</b></span>
+          )}
+          {!isFno && sc?.latest_signals?.length > 0 && (
+            <span style={{ color: T.ink2 }}>
+              SIGNAL <b style={{ color: T.green }}>{sc.latest_signals[0]?.symbol}</b>
+            </span>
           )}
         </div>
       </div>
 
-      {/* Pipeline steps */}
+      {/* Steps */}
       <div style={{ display: 'flex', background: T.bg1, borderBottom: `1px solid ${T.line}` }}>
-        {(isFno ? FNO_STEPS : FNO_STEPS.slice(0, 6)).map(step => (
-          <StepCell key={step.n} step={step} activeStep={activeStep} />
-        ))}
+        {steps.map(step => <StepCell key={step.n} step={step} activeStep={activeStep} />)}
       </div>
 
-      {/* Per-index RSI strip (F&O mode only) */}
+      {/* F&O: per-index RSI strip */}
       {isFno && sc?.indices && (
         <div style={{ background: T.bg1 }}>
           <div style={{
@@ -115,10 +122,28 @@ export default function Pipeline({ scalper, scanner }) {
             borderBottom: `1px solid ${T.line}`, display: 'flex', justifyContent: 'space-between',
           }}>
             <span>INDEX · RSI-14 GAUGE</span>
-            <span style={{ color: T.ink3 }}>BELOW 30 = SIGNAL · ABOVE 70 = SIGNAL</span>
+            <span style={{ color: T.ink3 }}>BELOW 30 = CALL BUY · ABOVE 70 = PUT BUY</span>
           </div>
           {Object.entries(sc.indices).map(([name, idx]) => (
             <IndexRow key={name} name={name} idx={idx} />
+          ))}
+        </div>
+      )}
+
+      {/* Equity: top signals strip */}
+      {!isFno && sc?.latest_signals?.length > 0 && (
+        <div style={{ background: T.bg1, borderBottom: `1px solid ${T.line}` }}>
+          <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink2, letterSpacing: '0.18em', textTransform: 'uppercase', padding: '6px 14px 4px', borderBottom: `1px solid ${T.line}` }}>
+            LATEST SIGNALS
+          </div>
+          {sc.latest_signals.slice(0, 5).map((s, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '5px 14px', borderBottom: `1px solid ${T.line}`, fontFamily: T.mono, fontSize: 10 }}>
+              <span style={{ color: T.cyan, width: 100 }}>{s.symbol}</span>
+              <span style={{ color: s.action === 'BUY' ? T.green : T.red, fontWeight: 600, width: 40 }}>{s.action}</span>
+              <span style={{ color: T.ink2, width: 60 }}>{s.segment}</span>
+              <span style={{ color: T.ink0 }}>₹{s.price?.toLocaleString('en-IN')}</span>
+              <span style={{ marginLeft: 'auto', color: T.ink3 }}>score {s.score?.toFixed(1)}</span>
+            </div>
           ))}
         </div>
       )}
