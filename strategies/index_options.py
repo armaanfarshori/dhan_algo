@@ -62,6 +62,8 @@ class IndexState:
     prices:        deque = None
     prev_rsi:      Optional[float] = None
     last_rsi:      float = 0.0
+    last_price:    float = 0.0   # live underlying price
+    price_change:  float = 0.0   # vs first observed price
     # Position
     in_position:   bool  = False
     option_sid:    Optional[str]  = None
@@ -208,7 +210,10 @@ class IndexOptionsScanner:
 
             state.prices.append(price)
             rsi = _rsi(state.prices, self.rsi_period)
-            state.last_rsi = rsi or 0.0
+            state.last_rsi  = rsi or 0.0
+            if state.last_price and state.last_price > 0:
+                state.price_change = round((price - state.prices[0]) / state.prices[0] * 100, 2)
+            state.last_price = price
 
             if state.in_position:
                 await self._check_oco(state)
@@ -433,6 +438,8 @@ class IndexOptionsScanner:
             "indices": {
                 name: {
                     "rsi":          state.last_rsi,
+                    "price":        state.last_price,
+                    "change_pct":   state.price_change,
                     "in_position":  state.in_position,
                     "option_type":  state.option_type,
                     "strike":       state.strike,

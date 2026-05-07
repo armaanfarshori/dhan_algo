@@ -8,12 +8,13 @@ const ALL_SEGMENTS = [
   { value: 'MCX_COMM', label: 'MCX Commodity', desc: 'Top commodity futures' },
 ]
 
-export default function StrategySidebar({ config, scanner, onSwitch }) {
+export default function StrategySidebar({ config, scanner, equityScanner, onSwitch }) {
   const [segments, setSegments] = useState(['NSE_FNO', 'BSE_FNO', 'NSE_EQ'])
   const [capitalPct, setCapPct] = useState(70)
   const [msg, setMsg]           = useState(null)
 
-  const sc = scanner?.data
+  const sc  = scanner?.data         // F&O scanner
+  const eqSc = equityScanner?.data  // Equity scanner
 
   async function toggleSegment(val) {
     const next = segments.includes(val)
@@ -50,25 +51,30 @@ export default function StrategySidebar({ config, scanner, onSwitch }) {
         {msg && <span style={{ fontSize: 9, color: T.red }}>{msg}</span>}
       </div>
 
-      {/* Live scanner status */}
-      {sc?.ok && (
-        <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.line}`, background: T.bg2 }}>
-          <div style={{ ...label, marginBottom: 8 }}>STATUS</div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
-            {[
-              ['MODE',     sc.mode?.replace('_',' ').toUpperCase() || '—', T.cyan],
-              ['BALANCE',  sc.balance ? INR(sc.balance) : '—',             T.green],
-              ['POSITIONS',`${sc.open_positions ?? 0} OPEN`,               sc.open_positions > 0 ? T.amber : T.ink2],
-              ['ORDERS',   `${sc.orders_placed ?? 0} PLACED`,              T.ink0],
-            ].map(([k, v, c]) => (
-              <div key={k} style={{ background: T.bg3, border: `1px solid ${T.line}`, padding: '6px 8px' }}>
-                <div style={{ fontFamily: T.mono, fontSize: 8, color: T.ink3, letterSpacing: '0.16em', marginBottom: 3 }}>{k}</div>
-                <div style={{ fontFamily: T.mono, fontSize: 10, color: c, fontWeight: 600 }}>{v}</div>
-              </div>
-            ))}
+      {/* Dual scanner status */}
+      <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.line}`, background: T.bg2 }}>
+        <div style={{ ...label, marginBottom: 8 }}>RUNNING ENGINES</div>
+        {/* F&O engine */}
+        <div style={{ background: T.bg3, border: `1px solid ${T.line}`, padding: '7px 10px', marginBottom: 6 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+            <span style={{ fontFamily: T.mono, fontSize: 9, color: T.green, letterSpacing: '0.14em' }}>● F&O · INDEX OPTIONS</span>
+            <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink2 }}>{sc?.open_positions ?? 0} pos · {sc?.orders_placed ?? 0} orders</span>
+          </div>
+          <div style={{ fontFamily: T.mono, fontSize: 8, color: T.ink3, letterSpacing: '0.1em' }}>
+            NIFTY · BANKNIFTY · SENSEX · FINNIFTY · NIFTYNXT50 · MIDCPNIFTY
           </div>
         </div>
-      )}
+        {/* Equity engine */}
+        <div style={{ background: T.bg3, border: `1px solid ${T.line}`, padding: '7px 10px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+            <span style={{ fontFamily: T.mono, fontSize: 9, color: T.cyan, letterSpacing: '0.14em' }}>● EQUITY · TOP MOVERS</span>
+            <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink2 }}>{eqSc?.open_positions ?? 0} pos · {eqSc?.orders_placed ?? 0} orders</span>
+          </div>
+          <div style={{ fontFamily: T.mono, fontSize: 8, color: T.ink3, letterSpacing: '0.1em' }}>
+            NSE TOP 15 · SMA CROSSOVER · {eqSc?.capital_pct ? Math.round(eqSc.capital_pct * 100) : 35}% CAPITAL
+          </div>
+        </div>
+      </div>
 
       {/* Segment toggles */}
       <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.line}` }}>
