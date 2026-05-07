@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from core.auth import DhanAuthManager
+from core.trade_log import get_trade_logger
 from core.client import DhanClient
 from core.risk import RiskManager, RiskConfig
 from core.backtest import Backtester
@@ -583,6 +584,21 @@ async def scanner_config_handler(request: web.Request) -> web.Response:
     return web.json_response(resp)
 
 
+async def trades_handler(request: web.Request) -> web.Response:
+    tl      = get_trade_logger()
+    limit   = int(request.rel_url.query.get("limit", 200))
+    engine  = request.rel_url.query.get("engine", "")
+    trades  = tl.get_trades(limit)
+    if engine:
+        trades = [t for t in trades if t.get("engine","").upper() == engine.upper()]
+    return web.json_response({
+        "ok":      True,
+        "count":   len(trades),
+        "summary": tl.get_session_summary(),
+        "trades":  trades,
+    })
+
+
 async def backtest_run_handler(request: web.Request) -> web.Response:
     body        = await request.json()
     strategy_key = body.get("strategy", "sma_crossover")
@@ -816,6 +832,7 @@ async def main():
         app["auth_manager"]   = _auth_manager
         app["start_time"]     = time.time()
         app["paper_trading"]  = PAPER_TRADING   # mutable; updated by /api/mode
+        get_trade_logger()                      # initialise + log session start
         app["watchlist"]      = watchlist
         app["fno_scanner"]    = fno_scanner
         app["equity_scanner"] = equity_scanner
@@ -847,6 +864,7 @@ async def main():
         app.router.add_get("/api/instruments/price",  instrument_price_handler)
         app.router.add_post("/api/strategy/switch",   switch_strategy_handler)
         app.router.add_post("/api/killswitch",        killswitch_handler)
+        app.router.add_get("/api/trades",             trades_handler)
         app.router.add_post("/api/backtest/run",      backtest_run_handler)
         app.router.add_get("/api/market",             market_status_handler)
         app.router.add_get("/api/watchlist",          watchlist_handler)

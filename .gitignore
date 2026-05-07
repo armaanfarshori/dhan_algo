@@ -16,6 +16,9 @@ venv/
 # Cache
 .cache/
 
+# Trade logs (local only — contains real trade history)
+.logs/
+
 # Node / React build
 dashboard/node_modules/
 dashboard/dist/
