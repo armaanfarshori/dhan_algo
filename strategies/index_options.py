@@ -127,6 +127,7 @@ class IndexOptionsScanner:
         # NSE_FNO → NIFTY, BANKNIFTY, FINNIFTY, NIFTYNXT50, MIDCPNIFTY
         # BSE_FNO → SENSEX
         self.active_segments: List[str] = ["NSE_FNO", "BSE_FNO"]  # default: all
+        self.current_step: int = 1  # 1=fetch 2=signal 3=atm 4=premium 5=risk 6=fill 7=oco
 
         # Build index states from InstrumentMaster.INDEX_CONFIGS
         self._indices: Dict[str, IndexState] = {
@@ -194,6 +195,7 @@ class IndexOptionsScanner:
             pass
 
         # Fetch all underlying prices in ONE call
+        self.current_step = 1  # FETCH
         all_ids = [int(s.underlying_id) for s in self._indices.values()]
         try:
             data    = await self.client.get_ohlc({"IDX_I": all_ids})
@@ -201,6 +203,7 @@ class IndexOptionsScanner:
         except Exception as e:
             logger.warning(f"IDX_I fetch error: {e}")
             return
+        self.current_step = 2  # SIGNAL
 
         # Process only indices whose option_segment is in active_segments
         for name, state in self._indices.items():
@@ -264,38 +267,40 @@ class IndexOptionsScanner:
         if not self._master or not state.active_expiry:
             return
 
-        # Find ATM contract
+        # Step 3: Find ATM contract
+        self.current_step = 3
         atm = self._master.find_atm_for_index(state.name, underlying, state.active_expiry)
         contract: Optional[OptionContract] = atm.get(opt_type)
         if not contract:
             logger.warning(f"{state.name}: no ATM {opt_type} found @ {underlying:.0f}")
-            return
+            self.current_step = 1; return
 
-        # Fetch option premium
+        # Step 4: Fetch option premium
+        self.current_step = 4
         try:
             opt_data = await self.client.get_ohlc({state.option_segment: [int(contract.security_id)]})
             premium  = opt_data.get("data", {}).get(state.option_segment, {}).get(
                 contract.security_id, {}).get("last_price", 0.0)
         except Exception as e:
             logger.warning(f"{state.name} premium fetch error: {e}")
-            return
+            self.current_step = 1; return
 
         if not (self.min_premium <= premium <= self.max_premium):
             logger.info(f"{state.name}: {opt_type} premium ₹{premium} outside filter")
-            return
+            self.current_step = 1; return
 
-        # Capital sizing: 70% of balance / number of active or potential positions
+        # Step 5: Risk gate
+        self.current_step = 5
         active = self.position or 1
         budget = (self._balance * self.capital_pct) / max(active, 1)
-        margin_est = premium * contract.lot_size * 0.10   # 10% of notional
+        margin_est = premium * contract.lot_size * 0.10
         num_lots = max(1, int(budget / margin_est)) if margin_est > 0 else 1
         qty = num_lots * contract.lot_size
 
-        # Risk gate
         ok, msg = self.risk.check_order(qty, premium, "BUY")
         if not ok:
             logger.warning(f"{state.name} risk block: {msg}")
-            return
+            self.current_step = 1; return
 
         charges = self._charges.calculate(premium, contract.lot_size, num_lots)
         target_p = round(charges.breakeven_premium + self.target_buffer, 2)
@@ -309,6 +314,7 @@ class IndexOptionsScanner:
         )
 
         if self.paper_trading:
+            self.current_step = 6  # FILL (simulated)
             state.in_position   = True
             state.option_sid    = contract.security_id
             state.option_type   = opt_type
@@ -322,9 +328,14 @@ class IndexOptionsScanner:
                          f"BEP ₹{charges.breakeven_premium:.2f} | T ₹{target_p} S ₹{stop_p}")
             self.signals.append(sig)
             logger.info(f"📝 [PAPER] {state.name} {opt_type} entered @ ₹{premium:.2f}")
+            self.current_step = 7  # OCO (simulated — paper exits monitored each tick)
+            # Reset to scanning after brief pause so pipeline doesn't lock on 07
+            await asyncio.sleep(0.5)
+            self.current_step = 1
             return
 
-        # Live: place market order
+        # Live: place market order (step 6)
+        self.current_step = 6
         try:
             result = await self.client.place_order(
                 transaction_type="BUY",
@@ -348,7 +359,8 @@ class IndexOptionsScanner:
         target_p = round(charges.breakeven_premium + self.target_buffer, 2)
         stop_p   = round(fill_price - self.stop_buffer, 2)
 
-        # Place Forever OCO
+        # Step 7: Place Forever OCO
+        self.current_step = 7
         try:
             oco = await self.client.create_forever_order(
                 order_flag="OCO", transaction_type="SELL",
@@ -374,6 +386,7 @@ class IndexOptionsScanner:
                      f"{state.name} {opt_type} {int(contract.strike)} | "
                      f"BEP ₹{charges.breakeven_premium:.2f}")
         self.signals.append(sig)
+        self.current_step = 1  # Reset — scanner continues on next tick
 
     async def _paper_exit(self, state: IndexState, exit_premium: float, reason: str):
         """Simulate OCO exit in paper mode."""
@@ -469,6 +482,7 @@ class IndexOptionsScanner:
             "open_positions":  self.position,
             "balance":         self._balance,
             "active_segments": self.active_segments,
+            "current_step":    self.current_step,
             "active_indices":  [n for n, s in self._indices.items() if s.option_segment in self.active_segments],
             "indices": {
                 name: {
