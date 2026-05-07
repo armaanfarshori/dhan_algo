@@ -61,12 +61,48 @@ class InstrumentMaster:
 
     # ── Factory ──────────────────────────────────────────────────────────────
 
+    # All tradeable index option configs
+    # underlying_id: IDX_I security ID verified via live API
+    INDEX_CONFIGS = {
+        "NIFTY": {
+            "underlying_id":  "13", "underlying_segment": "IDX_I",
+            "option_segment": "NSE_FNO", "option_prefix": "NIFTY-",
+            "strike_step": 50,  "lot_size": 65,
+        },
+        "BANKNIFTY": {
+            "underlying_id":  "25", "underlying_segment": "IDX_I",
+            "option_segment": "NSE_FNO", "option_prefix": "BANKNIFTY-",
+            "strike_step": 100, "lot_size": 30,
+        },
+        "SENSEX": {
+            "underlying_id":  "51", "underlying_segment": "IDX_I",
+            "option_segment": "BSE_FNO", "option_prefix": "SENSEX",
+            "strike_step": 100, "lot_size": 20,
+        },
+        "FINNIFTY": {
+            "underlying_id":  "27", "underlying_segment": "IDX_I",
+            "option_segment": "NSE_FNO", "option_prefix": "FINNIFTY-",
+            "strike_step": 50,  "lot_size": 60,
+        },
+        "NIFTYNXT50": {
+            "underlying_id":  "38", "underlying_segment": "IDX_I",
+            "option_segment": "NSE_FNO", "option_prefix": "NIFTYNXT50-",
+            "strike_step": 100, "lot_size": 25,
+        },
+        "MIDCPNIFTY": {
+            "underlying_id":  "93", "underlying_segment": "IDX_I",
+            "option_segment": "NSE_FNO", "option_prefix": "MIDCPNIFTY-",
+            "strike_step": 25,  "lot_size": 120,
+        },
+    }
+
     @classmethod
     async def load(cls) -> "InstrumentMaster":
         """Download (or use cache) and parse the scrip master."""
         csv_text = await cls._fetch_csv()
         contracts = cls._parse(csv_text)
-        logger.info(f"Instrument master loaded: {len(contracts)} NIFTY option contracts")
+        logger.info(f"Instrument master loaded: {len(contracts)} index option contracts "
+                    f"(NIFTY + BANKNIFTY + SENSEX)")
         return cls(contracts)
 
     @classmethod
@@ -89,18 +125,24 @@ class InstrumentMaster:
         logger.info(f"Scrip master cached ({len(text)//1024} KB)")
         return text
 
-    @staticmethod
-    def _parse(csv_text: str) -> List[OptionContract]:
-        reader  = csv.DictReader(io.StringIO(csv_text))
-        result  = []
-        today   = date.today().isoformat()
+    # All option symbol prefixes we want to load
+    _VALID_PREFIXES = (
+        "NIFTY-", "BANKNIFTY-", "SENSEX", "FINNIFTY-",
+        "NIFTYNXT50-", "MIDCPNIFTY-",
+    )
+
+    @classmethod
+    def _parse(cls, csv_text: str) -> List[OptionContract]:
+        reader = csv.DictReader(io.StringIO(csv_text))
+        result = []
+        today  = date.today().isoformat()
 
         for row in reader:
             sym = row.get("SEM_TRADING_SYMBOL", "")
             opt = row.get("SEM_OPTION_TYPE", "")
 
-            # Pure NIFTY index options only (excludes BANKNIFTY, NIFTYMID, etc.)
-            if not sym.startswith("NIFTY-"):
+            # All index options (NIFTY, BANKNIFTY, SENSEX, FINNIFTY, etc.)
+            if not any(sym.startswith(p) for p in cls._VALID_PREFIXES):
                 continue
             if opt not in ("CE", "PE"):
                 continue
@@ -109,19 +151,18 @@ class InstrumentMaster:
 
             expiry_raw = row.get("SEM_EXPIRY_DATE", "")[:10]
             if expiry_raw < today:
-                continue  # skip expired contracts
+                continue
 
             try:
-                contract = OptionContract(
+                result.append(OptionContract(
                     security_id    = row["SEM_SMST_SECURITY_ID"].strip(),
                     trading_symbol = sym,
                     strike         = float(row["SEM_STRIKE_PRICE"]),
                     option_type    = opt,
                     expiry         = expiry_raw,
-                    lot_size       = int(float(row.get("SEM_LOT_UNITS", "75"))),
+                    lot_size       = int(float(row.get("SEM_LOT_UNITS", "65"))),
                     expiry_flag    = row.get("SEM_EXPIRY_FLAG", ""),
-                )
-                result.append(contract)
+                ))
             except (ValueError, KeyError):
                 continue
 
@@ -181,6 +222,41 @@ class InstrumentMaster:
         for c in self._contracts:
             if c.security_id == security_id:
                 return c
+        return None
+
+    def find_atm_for_index(
+        self,
+        index_name: str,
+        underlying_price: float,
+        expiry: str,
+    ) -> Dict[str, "OptionContract"]:
+        """
+        Find ATM CE + PE for a named index (NIFTY, BANKNIFTY, SENSEX, etc.).
+        Uses INDEX_CONFIGS to determine the correct strike_step.
+        Returns {"CE": contract, "PE": contract} or {}.
+        """
+        cfg = self.INDEX_CONFIGS.get(index_name.upper())
+        if not cfg:
+            logger.warning(f"Unknown index: {index_name}")
+            return {}
+        return self.find_atm(underlying_price, expiry, cfg["strike_step"])
+
+    def index_expiries(self, index_name: str) -> List[str]:
+        """Return expiries available for a specific index."""
+        prefix = self.INDEX_CONFIGS.get(index_name.upper(), {}).get("option_prefix", "")
+        if not prefix:
+            return self._expiries
+        return sorted({
+            c.expiry for c in self._contracts
+            if c.trading_symbol.startswith(prefix)
+        })
+
+    def nearest_expiry_for_index(self, index_name: str) -> Optional[str]:
+        expiries = self.index_expiries(index_name)
+        today = date.today().isoformat()
+        for e in expiries:
+            if e >= today:
+                return e
         return None
 
     def strikes_for_expiry(self, expiry: str) -> List[float]:
