@@ -146,6 +146,7 @@ function StrategyCard({ s, onSelect, active }) {
 const ALL_SEGMENTS = [
   { value: 'NSE_EQ',   label: 'NSE Equity' },
   { value: 'NSE_FNO',  label: 'NSE F&O' },
+  { value: 'BSE_FNO',  label: 'BSE F&O' },
   { value: 'MCX_COMM', label: 'MCX Commodity' },
 ]
 
@@ -158,11 +159,18 @@ export default function StrategySidebar({ config, onSwitch }) {
   const activeStrategy          = config?.data?.strategy || 'scalper'
   const filtered = cat === 'All' ? STRATEGIES : STRATEGIES.filter(s => s.cat === cat)
 
-  function toggleSegment(val) {
-    setSegments(prev => prev.includes(val)
-      ? (prev.length > 1 ? prev.filter(s => s !== val) : prev)  // keep at least 1
-      : [...prev, val]
-    )
+  async function toggleSegment(val) {
+    const next = segments.includes(val)
+      ? (segments.length > 1 ? segments.filter(s => s !== val) : segments)
+      : [...segments, val]
+    setSegments(next)
+    // Immediately apply to backend
+    try {
+      await fetch('/api/scanner/config', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ segments: next, capital_pct: capitalPct / 100 }),
+      })
+    } catch {}
   }
 
   async function handleSelect(s) {

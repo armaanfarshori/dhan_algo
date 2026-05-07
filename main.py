@@ -441,7 +441,17 @@ async def scanner_config_handler(request: web.Request) -> web.Response:
             scanner._cfg_cls, scanner._cfg_type = STRATEGY_MAP[new_key]
             scanner._strategies.clear()   # reset per-stock instances
     if "segments" in body:
-        scanner.segments = body["segments"]
+        segs = body["segments"]
+        if hasattr(scanner, "active_segments"):
+            # IndexOptionsScanner: map UI segment names to option segments
+            active = []
+            if "NSE_FNO" in segs: active.append("NSE_FNO")
+            if "BSE_FNO" in segs: active.append("BSE_FNO")
+            scanner.active_segments = active or ["NSE_FNO"]
+            active_indices = [n for n, s in scanner._indices.items() if s.option_segment in scanner.active_segments]
+            logger.info(f"Scanner segments updated: {scanner.active_segments} → indices: {active_indices}")
+        elif hasattr(scanner, "segments"):
+            scanner.segments = segs
     if "capital_pct" in body:
         scanner.capital_pct = float(body["capital_pct"])
     if "max_positions" in body:
