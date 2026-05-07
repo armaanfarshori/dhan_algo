@@ -732,10 +732,13 @@ async def main():
         auth_manager=_auth_manager,
     ) as dhan:
 
+        # max_loss_per_trade: for options buyer = premium paid per position
+        # Paper: 10% of paper balance per trade. Live: tighten before going live.
+        _trade_risk = int(PAPER_BALANCE * 0.10) if PAPER_TRADING else 15_000
         risk_cfg = RiskConfig(
             max_daily_loss=MAX_DAILY_LOSS,
-            max_open_positions=5,
-            max_loss_per_trade=15_000,   # 1 NIFTY lot × max premium ₹200
+            max_open_positions=10,
+            max_loss_per_trade=_trade_risk,
             check_interval_seconds=30,
         )
         risk = RiskManager(dhan, risk_cfg)
