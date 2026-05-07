@@ -305,9 +305,9 @@ class IndexOptionsScanner:
             self.current_step = 1; return
 
         # Sanity check: option premium > 20% of underlying = wrong contract
-        pct_of_underlying = (premium / price) * 100 if price > 0 else 0
-        logger.info(f"{state.name}: ATM {opt_type} {contract.strike} | premium ₹{premium:.2f} ({pct_of_underlying:.1f}% of underlying ₹{price:,.0f})")
-        if premium > price * 0.20:
+        pct_of_underlying = (premium / underlying) * 100 if underlying > 0 else 0
+        logger.info(f"{state.name}: ATM {opt_type} {contract.strike} | premium ₹{premium:.2f} ({pct_of_underlying:.1f}% of underlying ₹{underlying:,.0f})")
+        if premium > underlying * 0.20:
             logger.warning(f"{state.name}: premium ₹{premium:.2f} = {pct_of_underlying:.1f}% of underlying — likely wrong contract, skipping")
             self.current_step = 1; return
         if not (self.min_premium <= premium):
