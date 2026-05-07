@@ -119,6 +119,11 @@ class IndexOptionsScanner:
         self._charges      = BreakevenCalculator()
         self._balance      = 0.0
 
+        # active_segments controls which indices are scanned
+        # NSE_FNO → NIFTY, BANKNIFTY, FINNIFTY, NIFTYNXT50, MIDCPNIFTY
+        # BSE_FNO → SENSEX
+        self.active_segments: List[str] = ["NSE_FNO", "BSE_FNO"]  # default: all
+
         # Build index states from InstrumentMaster.INDEX_CONFIGS
         self._indices: Dict[str, IndexState] = {
             name: IndexState(
@@ -193,8 +198,10 @@ class IndexOptionsScanner:
             logger.warning(f"IDX_I fetch error: {e}")
             return
 
-        # Process each index
+        # Process only indices whose option_segment is in active_segments
         for name, state in self._indices.items():
+            if state.option_segment not in self.active_segments:
+                continue
             price = seg.get(state.underlying_id, {}).get("last_price", 0.0)
             if not price:
                 continue
@@ -416,11 +423,13 @@ class IndexOptionsScanner:
 
     def get_summary(self) -> dict:
         return {
-            "mode":           "index_options",
-            "paper_trading":  self.paper_trading,
-            "orders_placed":  self.orders_placed,
-            "open_positions": self.position,
-            "balance":        self._balance,
+            "mode":            "index_options",
+            "paper_trading":   self.paper_trading,
+            "orders_placed":   self.orders_placed,
+            "open_positions":  self.position,
+            "balance":         self._balance,
+            "active_segments": self.active_segments,
+            "active_indices":  [n for n, s in self._indices.items() if s.option_segment in self.active_segments],
             "indices": {
                 name: {
                     "rsi":          state.last_rsi,
