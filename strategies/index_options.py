@@ -62,8 +62,10 @@ class IndexState:
     prices:        deque = None
     prev_rsi:      Optional[float] = None
     last_rsi:      float = 0.0
-    last_price:    float = 0.0   # live underlying price
-    price_change:  float = 0.0   # vs first observed price
+    last_price:      float = 0.0   # live underlying price
+    price_change:    float = 0.0   # vs first observed price
+    current_premium: float = 0.0   # live option premium (for unrealized P&L)
+    unrealized_pnl:  float = 0.0   # current_premium vs entry_premium × lot_size
     # Position
     in_position:   bool  = False
     option_sid:    Optional[str]  = None
@@ -217,6 +219,16 @@ class IndexOptionsScanner:
 
             if state.in_position:
                 await self._check_oco(state)
+                # Fetch current option premium for unrealized P&L
+                if state.option_sid:
+                    try:
+                        opt = await self.client.get_ohlc({state.option_segment: [int(state.option_sid)]})
+                        cur = opt.get("data",{}).get(state.option_segment,{}).get(state.option_sid,{}).get("last_price", 0.0)
+                        if cur:
+                            state.current_premium = cur
+                            state.unrealized_pnl  = round((cur - state.entry_premium) * state.lot_size, 2)
+                    except Exception:
+                        pass
                 state.prev_rsi = rsi
                 continue
 
@@ -437,15 +449,21 @@ class IndexOptionsScanner:
             "active_indices":  [n for n, s in self._indices.items() if s.option_segment in self.active_segments],
             "indices": {
                 name: {
-                    "rsi":          state.last_rsi,
-                    "price":        state.last_price,
-                    "change_pct":   state.price_change,
-                    "in_position":  state.in_position,
-                    "option_type":  state.option_type,
-                    "strike":       state.strike,
-                    "entry":        state.entry_premium,
-                    "breakeven":    state.breakeven,
-                    "expiry":       state.active_expiry,
+                    "rsi":             state.last_rsi,
+                    "price":           state.last_price,
+                    "change_pct":      state.price_change,
+                    "in_position":     state.in_position,
+                    "option_type":     state.option_type,
+                    "strike":          state.strike,
+                    "entry":           state.entry_premium,
+                    "current_premium": state.current_premium,
+                    "unrealized_pnl":  state.unrealized_pnl,
+                    "breakeven":       state.breakeven,
+                    "target":          round(state.breakeven + self.target_buffer, 2) if state.in_position else 0,
+                    "stop":            round(state.entry_premium - self.stop_buffer, 2) if state.in_position else 0,
+                    "lot_size":        state.lot_size,
+                    "expiry":          state.active_expiry,
+                    "option_sid":      state.option_sid,
                 }
                 for name, state in self._indices.items()
             },

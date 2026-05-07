@@ -161,16 +161,22 @@ async def risk_handler(request: web.Request) -> web.Response:
 
 
 async def signals_handler(request: web.Request) -> web.Response:
-    signals = request.app["strategy"].signals[-50:]
-    return web.json_response([
-        {
-            "action":    s.action,
-            "price":     s.price,
-            "reason":    s.reason,
-            "timestamp": s.timestamp.isoformat(),
-        }
-        for s in reversed(signals)
-    ])
+    """Aggregates signals from BOTH scanners, newest first."""
+    fno = request.app.get("fno_scanner")
+    eq  = request.app.get("equity_scanner")
+    all_sigs = []
+    for src, tag in [(fno, "F&O"), (eq, "EQ")]:
+        if src:
+            for s in getattr(src, "signals", []):
+                all_sigs.append({
+                    "action":    s.action,
+                    "price":     s.price,
+                    "reason":    s.reason,
+                    "timestamp": s.timestamp.isoformat(),
+                    "source":    tag,
+                })
+    all_sigs.sort(key=lambda x: x["timestamp"], reverse=True)
+    return web.json_response(all_sigs[:100])
 
 
 async def funds_handler(request: web.Request) -> web.Response:
@@ -211,16 +217,25 @@ async def paper_positions_handler(request: web.Request) -> web.Response:
 
     eq = request.app.get("equity_scanner")
     if eq:
-        stocks = {s.security_id: s for s in (request.app.get("watchlist") or type("W", (), {"get": lambda: []})()).get()}
+        wl = request.app.get("watchlist")
+        stocks = {s.security_id: s for s in (wl.get() if wl else [])}
         for key, entry_price in eq._positions.items():
             seg, sid = key.split(":")
             sym = stocks.get(sid)
+            cur_price = eq._current_prices.get(sid, 0.0)
+            strat = eq._strategies.get(key)
+            qty = strat.config.quantity if strat else 1
+            upnl = round((cur_price - entry_price) * qty, 2) if cur_price else 0.0
             positions.append({
-                "engine":      "EQ",
-                "symbol":      sym.symbol if sym else sid,
-                "segment":     seg,
-                "entry_price": entry_price,
-                "qty":         eq.quantity,
+                "engine":        "EQ",
+                "symbol":        sym.symbol if sym else sid,
+                "name":          sym.name if sym else sid,
+                "segment":       seg,
+                "entry_price":   entry_price,
+                "current_price": cur_price,
+                "qty":           qty,
+                "unrealized_pnl": upnl,
+                "change_pct":    round((cur_price - entry_price) / entry_price * 100, 2) if entry_price else 0,
             })
 
     return web.json_response({
@@ -739,9 +754,9 @@ async def main():
             strategy_key  = STRATEGY if STRATEGY not in ("scalper","index_options") else "sma_crossover",
             segments      = ["NSE_EQ"],
             paper_trading = PAPER_TRADING,
-            capital_pct   = 0.35,
+            capital_pct   = 0.35,          # 35% per position, no hard cap
             hedge_fno     = False,
-            max_positions = 3,
+            max_positions = 999,           # effectively unlimited — capital gates it
             poll_interval = 30.0,
         )
         logger.info("📊 Equity Scanner: top 15 NSE movers · SMA crossover")
