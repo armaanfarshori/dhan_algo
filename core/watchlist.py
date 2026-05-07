@@ -240,20 +240,16 @@ class WatchlistManager:
     # ── Background refresh task ───────────────────────────────────────────────
 
     async def run(self):
-        """Refresh once at 09:05 IST on weekdays, then sleep until next day."""
-        logger.info("Watchlist manager started")
+        """Refresh every 30 minutes on trading days, starting at 09:05 IST."""
+        logger.info("Watchlist manager started — auto-refresh every 30 min")
         while True:
+            await asyncio.sleep(1800)  # 30 minutes
             now = datetime.now(IST)
             wd  = now.weekday()
-            t   = now.time()
-
             from datetime import time as dtime
-            market_open = dtime(9, 5)
-
-            if wd < 5 and t >= market_open:
-                # Already past 09:05 today — refresh now if stale
-                if not self._last_refresh or (time.time() - self._last_refresh) > CACHE_TTL_H * 3600:
+            if wd < 6:  # Mon–Sat (MCX trades on Saturday)
+                logger.info("Watchlist auto-refresh (30 min interval)…")
+                try:
                     await self.refresh()
-
-            # Sleep 30 min between checks
-            await asyncio.sleep(1800)
+                except Exception as e:
+                    logger.warning(f"Auto-refresh failed: {e}")

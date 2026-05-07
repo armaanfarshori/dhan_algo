@@ -15,6 +15,7 @@ import StrategySidebar    from './components/cockpit/StrategySidebar'
 import BacktestTab        from './components/cockpit/BacktestTab'
 import WatchlistPanel     from './components/cockpit/WatchlistPanel'
 import LiveTicker        from './components/cockpit/LiveTicker'
+import { FnoPanel, EqPanel } from './components/cockpit/TradingPanels'
 
 const TABS = ['Cockpit', 'Backtest', 'Risk Console']
 
@@ -288,7 +289,7 @@ function CockpitTab({ data }) {
   return (
     <>
       {/* Full-width: hero + ticker + info strip above the two-column split */}
-      <HeroSection risk={risk} status={status} funds={funds} />
+      <HeroSection risk={risk} status={status} funds={funds} paperPositions={paperPositions} />
       <LiveTicker fnoScanner={fnoScanner} equityScanner={equityScanner} />
       <InfoStrip status={status} risk={risk} funds={funds} scalper={scalper} />
 
@@ -315,9 +316,10 @@ function CockpitTab({ data }) {
           <EquityPanel signals={signals} />
           <div style={{ marginBottom: 14 }} />
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 1fr', gap: 14, marginBottom: 14 }}>
-            <SignalFeed signals={signals} />
-            <PaperPositions paperPositions={paperPositions} />
+          {/* Separate F&O and Equity panels */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }}>
+            <FnoPanel fnoScanner={fnoScanner} signals={signals} />
+            <EqPanel  paperPositions={paperPositions} signals={signals} />
           </div>
 
           <FootBar status={status} risk={risk} />

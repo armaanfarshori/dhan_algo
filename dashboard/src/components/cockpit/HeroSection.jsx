@@ -23,11 +23,13 @@ function StreakOrb({ count }) {
   )
 }
 
-export default function HeroSection({ risk, status }) {
+export default function HeroSection({ risk, status, paperPositions }) {
   const r = risk?.data
   const d = status?.data
   const totalPnl = r?.total_pnl ?? 0
-  const unrealised = r?.unrealised_pnl ?? 0
+  // Live unrealized from actual paper position prices
+  const ppData     = paperPositions?.data?.data ?? []
+  const unrealised = ppData.reduce((sum, p) => sum + (p.unrealized_pnl || 0), 0)
   const pos = d?.position ?? 0
   const orders = d?.orders_placed ?? 0
 

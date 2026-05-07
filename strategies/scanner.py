@@ -101,8 +101,9 @@ class MultiStockScanner:
         self.hedge_offset   = hedge_offset
 
         self._running         = False
-        self._strategies: Dict[str, BaseStrategy] = {}   # "segment:sid" → strategy
-        self._positions:  Dict[str, float]         = {}   # "segment:sid" → entry_price
+        self._strategies:     Dict[str, BaseStrategy] = {}   # "segment:sid" → strategy
+        self._positions:      Dict[str, float]         = {}   # "segment:sid" → entry_price
+        self._current_prices: Dict[str, float]         = {}   # sid → current price
         self._hedge_sids: Dict[str, str]           = {}   # "segment:sid" → hedge_sid
         self.signals:     List[Signal]             = []
         self.orders_placed = 0
@@ -172,6 +173,11 @@ class MultiStockScanner:
             if isinstance(res, dict):
                 all_quotes[seg] = res
 
+        # Store current prices for open positions (unrealized P&L)
+        for seg, seg_quotes in all_quotes.items() if all_quotes else []:
+            for sid, tick in seg_quotes.items():
+                self._current_prices[sid] = tick.get("last_price", 0.0)
+
         # Run signal logic
         scan_results: List[ScanResult] = []
         signal_map: dict = {}
@@ -218,11 +224,9 @@ class MultiStockScanner:
         if not self._in_window():
             return
 
-        # Trade best signals (ranked by score)
+        # Trade best signals — no hard position cap, capital drives quantity
         scan_results.sort(key=lambda r: r.score, reverse=True)
         for result in scan_results:
-            if len(self._positions) >= self.max_positions:
-                break
             key = f"{result.segment}:{result.security_id}"
             if key in self._positions:
                 continue
