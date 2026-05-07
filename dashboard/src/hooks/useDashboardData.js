@@ -11,8 +11,9 @@ export function useDashboardData() {
   const scanner      = usePoller('/api/scanner',         1000)
 
   // Medium (5s) — position data
-  const positions    = usePoller('/api/positions',       5000)
-  const payoff       = usePoller('/api/payoff',          5000)
+  const positions      = usePoller('/api/positions',         5000)
+  const paperPositions = usePoller('/api/paper/positions',   1000)
+  const payoff         = usePoller('/api/payoff',            5000)
 
   // Slow (10-30s) — account / market data
   const funds        = usePoller('/api/funds',           10000)
@@ -20,5 +21,5 @@ export function useDashboardData() {
   const watchlist    = usePoller('/api/watchlist',       15000)
   const market       = usePoller('/api/market',          30000)
 
-  return { status, risk, signals, funds, positions, scalper, payoff, config, watchlist, scanner, fnoScanner, equityScanner, market }
+  return { status, risk, signals, funds, positions, paperPositions, scalper, payoff, config, watchlist, scanner, fnoScanner, equityScanner, market }
 }

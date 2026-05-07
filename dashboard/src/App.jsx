@@ -147,67 +147,100 @@ function SignalFeed({ signals }) {
   )
 }
 
-// ── Equity curve ──────────────────────────────────────────────────────────────
+// ── Equity curve (realised P&L only) ─────────────────────────────────────────
 function EquityPanel({ signals }) {
   const raw = signals?.data ?? []
-  if (raw.length < 2) return (
-    <Panel>
-      <PanelH><span style={{ color: T.ink0 }}>SESSION P&amp;L CURVE</span></PanelH>
-      <div style={{ height: 120, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: T.mono, fontSize: 10, color: T.ink3, letterSpacing: '0.14em' }}>NO TRADE HISTORY YET</div>
-    </Panel>
-  )
 
+  // Build realised P&L: match BUY→EXIT pairs chronologically
+  // Signals are newest-first from the API; reverse to get oldest-first
+  const ordered = [...raw].reverse()
   let equity = 0
-  const pts = []
-  raw.slice().reverse().forEach((s) => {
-    if (s.action === 'BUY')  equity -= (s.price || 0) * 75
-    if (s.action === 'EXIT') equity += (s.price || 0) * 75
-    pts.push({ pnl: Math.round(equity) })
+  const pts = [{ pnl: 0 }]
+  const openTrades = {} // key=action_index → {price, qty}
+  let lastBuyPrice = 0
+  let lastBuyQty = 75
+
+  ordered.forEach(s => {
+    if (s.action === 'BUY') {
+      lastBuyPrice = s.price || 0
+      // Parse lot size from reason if possible, default 65
+      const match = s.reason?.match(/qty=(\d+)/) || s.reason?.match(/(\d+) qty/)
+      lastBuyQty = match ? parseInt(match[1]) : 65
+    } else if (s.action === 'EXIT' && lastBuyPrice > 0) {
+      const pnl = ((s.price || 0) - lastBuyPrice) * lastBuyQty
+      equity += Math.round(pnl)
+      lastBuyPrice = 0
+    }
+    pts.push({ pnl: equity })
   })
-  const isUp = (pts[pts.length - 1]?.pnl ?? 0) >= 0
+
+  const isUp = equity >= 0
+  const hasData = pts.length > 1 && pts.some(p => p.pnl !== 0)
 
   return (
     <Panel>
       <PanelH>
-        <LiveTag /><span style={{ color: T.ink0 }}>SESSION P&amp;L CURVE</span>
+        <LiveTag /><span style={{ color: T.ink0 }}>REALISED P&amp;L CURVE</span>
         <span style={{ marginLeft: 'auto', fontFamily: T.dot, fontSize: 20, color: isUp ? T.green : T.red }}>
-          {isUp ? '+' : ''}{INR0(pts[pts.length - 1]?.pnl || 0)}
+          {hasData ? (isUp ? '+' : '') + INR0(pts[pts.length - 1]?.pnl || 0) : 'AWAITING EXIT'}
         </span>
       </PanelH>
       <div style={{ padding: '12px 16px 16px' }}>
-        <ResponsiveContainer width="100%" height={130}>
-          <LineChart data={pts} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
-            <XAxis hide />
-            <YAxis tickFormatter={v => `₹${v}`} width={60} tick={{ fill: T.ink3, fontSize: 9, fontFamily: 'JetBrains Mono' }} axisLine={false} tickLine={false} />
-            <Tooltip formatter={v => [INR0(v), 'P&L']} contentStyle={{ background: T.bg3, border: `1px solid ${T.line2}`, fontFamily: 'JetBrains Mono', fontSize: 11 }} />
-            <ReferenceLine y={0} stroke={T.line2} strokeDasharray="4 2" />
-            <Line type="monotone" dataKey="pnl" stroke={isUp ? T.green : T.red} dot={false} strokeWidth={1.5} />
-          </LineChart>
-        </ResponsiveContainer>
+        {hasData ? (
+          <ResponsiveContainer width="100%" height={130}>
+            <LineChart data={pts} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+              <XAxis hide />
+              <YAxis tickFormatter={v => `₹${v}`} width={60} tick={{ fill: T.ink3, fontSize: 9, fontFamily: 'JetBrains Mono' }} axisLine={false} tickLine={false} />
+              <Tooltip formatter={v => [INR0(v), 'Realised P&L']} contentStyle={{ background: T.bg3, border: `1px solid ${T.line2}`, fontFamily: 'JetBrains Mono', fontSize: 11 }} />
+              <ReferenceLine y={0} stroke={T.line2} strokeDasharray="4 2" />
+              <Line type="monotone" dataKey="pnl" stroke={isUp ? T.green : T.red} dot={false} strokeWidth={1.5} />
+            </LineChart>
+          </ResponsiveContainer>
+        ) : (
+          <div style={{ height: 80, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: T.mono, fontSize: 10, color: T.ink3, letterSpacing: '0.14em', flexDirection: 'column', gap: 8 }}>
+            <span>{raw.length > 0 ? `${raw.filter(s=>s.action==='BUY').length} POSITION${raw.filter(s=>s.action==='BUY').length!==1?'S':''} OPEN` : 'NO SIGNALS YET'}</span>
+            <span style={{ fontSize: 8, color: T.ink3 }}>P&L REALISES WHEN OCO TARGET OR STOP IS HIT</span>
+          </div>
+        )}
       </div>
     </Panel>
   )
 }
 
-// ── Positions ─────────────────────────────────────────────────────────────────
-function Positions({ positions }) {
-  const pos = (positions?.data?.data ?? []).filter(p => p.netQty !== 0)
+// ── Paper Positions (scanner simulated) ───────────────────────────────────────
+function PaperPositions({ paperPositions }) {
+  const pp = paperPositions?.data
+  const items = pp?.data ?? []
   return (
     <Panel>
-      <PanelH><span style={{ color: T.ink0 }}>LIVE POSITIONS</span></PanelH>
+      <PanelH>
+        <LiveTag />
+        <span style={{ color: T.ink0 }}>PAPER POSITIONS</span>
+        <span style={{ marginLeft: 'auto', fontSize: 9, color: items.length > 0 ? T.amber : T.ink3 }}>
+          {items.length} OPEN
+        </span>
+      </PanelH>
       <div style={{ padding: 14 }}>
-        {!pos.length
-          ? <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3, letterSpacing: '0.14em', textTransform: 'uppercase' }}>NO OPEN POSITIONS</div>
-          : pos.map((p, i) => {
-            const upnl = p.unrealisedProfit || 0
-            return (
-              <div key={i} style={{ background: T.bg2, border: `1px solid ${T.line}`, padding: '10px 12px', marginBottom: 8 }}>
-                <div style={{ fontFamily: T.mono, fontSize: 12, color: T.cyan, fontWeight: 600 }}>{p.tradingSymbol || p.securityId}</div>
-                <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink2, marginTop: 2 }}>QTY {p.netQty} · {p.productType || ''}</div>
-                <div style={{ fontFamily: T.dot, fontSize: 20, color: colorPnl(upnl), marginTop: 4 }}>{INR(upnl)}</div>
+        {!items.length
+          ? <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3, letterSpacing: '0.14em', textTransform: 'uppercase' }}>NO PAPER POSITIONS</div>
+          : items.map((p, i) => (
+            <div key={i} style={{ background: T.bg2, border: `1px solid ${p.engine === 'F&O' ? T.green : T.cyan}`, padding: '10px 12px', marginBottom: 8 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                <span style={{ fontFamily: T.mono, fontSize: 11, color: p.engine === 'F&O' ? T.green : T.cyan, fontWeight: 600 }}>{p.symbol}</span>
+                <span style={{ fontFamily: T.mono, fontSize: 8, color: T.ink3, letterSpacing: '0.14em', background: T.bg3, padding: '1px 5px' }}>{p.engine}</span>
               </div>
-            )
-          })
+              {p.engine === 'F&O' && (
+                <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink2 }}>
+                  Entry ₹{p.entry_premium} · Lot {p.lot_size} · BEP ₹{p.bep?.toFixed(2)} · {p.expiry}
+                </div>
+              )}
+              {p.engine === 'EQ' && (
+                <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink2 }}>
+                  Entry ₹{p.entry_price?.toFixed(2)} · Qty {p.qty} · {p.segment}
+                </div>
+              )}
+            </div>
+          ))
         }
       </div>
     </Panel>
@@ -250,7 +283,7 @@ function Tabs({ active, onChange }) {
 
 // ── Cockpit layout ────────────────────────────────────────────────────────────
 function CockpitTab({ data }) {
-  const { status, risk, signals, funds, positions, scalper, payoff, config, watchlist, scanner, fnoScanner, equityScanner } = data
+  const { status, risk, signals, funds, positions, paperPositions, scalper, payoff, config, watchlist, scanner, fnoScanner, equityScanner } = data
 
   return (
     <>
@@ -284,7 +317,7 @@ function CockpitTab({ data }) {
 
           <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 1fr', gap: 14, marginBottom: 14 }}>
             <SignalFeed signals={signals} />
-            <Positions positions={positions} />
+            <PaperPositions paperPositions={paperPositions} />
           </div>
 
           <FootBar status={status} risk={risk} />
