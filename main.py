@@ -798,7 +798,7 @@ async def main():
             capital_pct   = 0.35,
             hedge_fno     = False,
             max_positions = 999,
-            poll_interval = 30.0,
+            poll_interval = 10.0,   # 10s → SMA warmup = 21×10s = 3.5 min
             paper_balance = PAPER_BALANCE,
         )
         logger.info("📊 Equity Scanner: top 15 NSE movers · SMA crossover")

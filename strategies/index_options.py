@@ -103,8 +103,8 @@ class IndexOptionsScanner:
         target_buffer:  float = 5.0,
         stop_buffer:    float = 5.0,
         poll_interval:  float = 10.0,
-        min_premium:    float = 10.0,
-        max_premium:    float = 500.0,
+        min_premium:    float = 5.0,
+        max_premium:    float = 10_000.0,  # no effective cap — all index options qualify
         rsi_period:     int   = 14,
         paper_balance:  float = 500_000.0,  # simulated capital for paper mode
     ):
@@ -259,16 +259,26 @@ class IndexOptionsScanner:
                 state.prev_rsi = rsi
                 continue
 
-            if rsi is None or state.prev_rsi is None:
+            if rsi is None:
+                continue
+
+            if state.prev_rsi is None:
                 state.prev_rsi = rsi
+                # Already in extreme zone on first valid RSI — fire immediately
+                # (RSI crossed threshold during warmup; don't miss the trade)
+                if rsi >= self.RSI_OB:
+                    logger.info(f"{state.name}: RSI {rsi:.1f} already overbought on warmup → enter PUT")
+                    await self._enter(state, "PE", price, rsi)
+                elif rsi <= self.RSI_OVERSOLD:
+                    logger.info(f"{state.name}: RSI {rsi:.1f} already oversold on warmup → enter CALL")
+                    await self._enter(state, "CE", price, rsi)
                 continue
 
             prev, state.prev_rsi = state.prev_rsi, rsi
 
-            # RSI oversold → BUY Call
+            # RSI crossover signals
             if prev > self.RSI_OVERSOLD >= rsi:
                 await self._enter(state, "CE", price, rsi)
-            # RSI overbought → BUY Put
             elif prev < self.RSI_OB <= rsi:
                 await self._enter(state, "PE", price, rsi)
 
@@ -294,8 +304,9 @@ class IndexOptionsScanner:
             logger.warning(f"{state.name} premium fetch error: {e}")
             self.current_step = 1; return
 
+        logger.info(f"{state.name}: ATM {opt_type} {contract.strike} | premium ₹{premium:.2f} | filter ₹{self.min_premium}-₹{self.max_premium}")
         if not (self.min_premium <= premium <= self.max_premium):
-            logger.info(f"{state.name}: {opt_type} premium ₹{premium} outside filter")
+            logger.warning(f"{state.name}: {opt_type} premium ₹{premium:.2f} REJECTED by filter")
             self.current_step = 1; return
 
         # Step 5: Risk gate
