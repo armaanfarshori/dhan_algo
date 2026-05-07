@@ -14,6 +14,7 @@ import FloatingKillSwitch from './components/cockpit/FloatingKillSwitch'
 import StrategySidebar    from './components/cockpit/StrategySidebar'
 import BacktestTab        from './components/cockpit/BacktestTab'
 import WatchlistPanel     from './components/cockpit/WatchlistPanel'
+import LiveTicker        from './components/cockpit/LiveTicker'
 
 const TABS = ['Cockpit', 'Backtest', 'Risk Console']
 
@@ -253,8 +254,9 @@ function CockpitTab({ data }) {
 
   return (
     <>
-      {/* Full-width: hero + info strip above the two-column split */}
+      {/* Full-width: hero + ticker + info strip above the two-column split */}
       <HeroSection risk={risk} status={status} funds={funds} />
+      <LiveTicker fnoScanner={fnoScanner} equityScanner={equityScanner} />
       <InfoStrip status={status} risk={risk} funds={funds} scalper={scalper} />
 
       {/* Two-column grid starts here — sidebar aligns with account card */}
@@ -292,6 +294,7 @@ function CockpitTab({ data }) {
         <div style={{ position: 'sticky', top: 16 }}>
           <Panel>
             <StrategySidebar config={config} scanner={fnoScanner} equityScanner={equityScanner} onSwitch={() => {}} />
+
           </Panel>
         </div>
 
