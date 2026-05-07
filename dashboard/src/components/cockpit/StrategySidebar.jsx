@@ -93,58 +93,50 @@ function StrategyCard({ s, onSelect, active }) {
       style={{
         background: active ? 'oklch(0.18 0.08 145 / 0.3)' : T.bg2,
         border: `1px solid ${active ? T.green : T.line}`,
-        padding: '12px 14px', marginBottom: 8, cursor: s.comingSoon ? 'default' : 'pointer',
-        opacity: s.comingSoon ? 0.55 : 1,
+        padding: '10px 10px 8px', cursor: s.comingSoon ? 'default' : 'pointer',
+        opacity: s.comingSoon ? 0.5 : 1,
         transition: 'border-color .15s, background .15s',
-        boxShadow: active ? `0 0 12px oklch(0.55 0.18 145 / 0.15)` : 'none',
+        boxShadow: active ? `0 0 10px oklch(0.55 0.18 145 / 0.15)` : 'none',
       }}
       onMouseEnter={e => { if (!s.comingSoon && !active) e.currentTarget.style.borderColor = T.line2 }}
       onMouseLeave={e => { if (!s.comingSoon && !active) e.currentTarget.style.borderColor = T.line }}
     >
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 6 }}>
+      {/* Badge + risk */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
         <span style={{
-          fontFamily: T.mono, fontSize: 9, padding: '2px 7px',
-          background: s.comingSoon ? T.bg3 : 'rgba(255,255,255,0.06)',
+          fontFamily: T.mono, fontSize: 8, padding: '1px 5px',
+          background: s.comingSoon ? T.bg3 : 'rgba(255,255,255,0.05)',
           color: s.comingSoon ? T.ink3 : T.ink1,
           border: `1px solid ${s.comingSoon ? T.line : T.line2}`,
-          letterSpacing: '0.14em', textTransform: 'uppercase',
+          letterSpacing: '0.1em', textTransform: 'uppercase',
         }}>
-          {s.comingSoon ? 'COMING SOON' : s.badge}
+          {s.comingSoon ? 'SOON' : s.badge}
         </span>
-        <span style={{ fontFamily: T.mono, fontSize: 9, color: s.riskColor, letterSpacing: '0.1em' }}>
-          {s.risk}
+        <span style={{ fontFamily: T.mono, fontSize: 8, color: s.riskColor }}>
+          {s.risk.split('-')[0]}
         </span>
       </div>
 
-      <div style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 600, color: active ? T.green : T.ink0, marginBottom: 4 }}>
+      {/* Name */}
+      <div style={{ fontFamily: T.mono, fontSize: 11, fontWeight: 600, color: active ? T.green : T.ink0, marginBottom: 4, lineHeight: 1.3 }}>
         {s.name}
       </div>
-      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink2, lineHeight: 1.5, marginBottom: 8, letterSpacing: '0.04em' }}>
-        {s.desc}
-      </div>
 
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
-        {s.tags.map(tag => (
-          <span key={tag} style={{
-            fontFamily: T.mono, fontSize: 9, color: T.ink2,
-            background: T.bg3, border: `1px solid ${T.line}`,
-            padding: '1px 6px', letterSpacing: '0.1em',
-          }}>{tag}</span>
-        ))}
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', borderTop: `1px solid ${T.line}`, paddingTop: 8, gap: 4 }}>
-        {[['RISK', s.risk, s.riskColor], ['HOLD', s.hold, T.ink0], ['CAPITAL', s.capital, T.cyan]].map(([k, v, c]) => (
-          <div key={k} style={{ textAlign: 'center' }}>
-            <div style={{ fontFamily: T.mono, fontSize: 10, fontWeight: 500, color: c }}>{v}</div>
-            <div style={{ fontFamily: T.mono, fontSize: 8, color: T.ink3, letterSpacing: '0.14em', marginTop: 2 }}>{k}</div>
-          </div>
-        ))}
+      {/* Meta row */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: `1px solid ${T.line}`, paddingTop: 6, marginTop: 4 }}>
+        <div style={{ textAlign: 'left' }}>
+          <div style={{ fontFamily: T.mono, fontSize: 9, color: T.cyan }}>{s.capital}</div>
+          <div style={{ fontFamily: T.mono, fontSize: 7, color: T.ink3, letterSpacing: '0.12em' }}>MIN CAP</div>
+        </div>
+        <div style={{ textAlign: 'right' }}>
+          <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink1 }}>{s.hold}</div>
+          <div style={{ fontFamily: T.mono, fontSize: 7, color: T.ink3, letterSpacing: '0.12em' }}>HOLD</div>
+        </div>
       </div>
 
       {!s.comingSoon && (
-        <div style={{ fontFamily: T.mono, fontSize: 10, color: T.green, marginTop: 8, letterSpacing: '0.12em' }}>
-          {active ? '● ACTIVE' : 'SELECT →'}
+        <div style={{ fontFamily: T.mono, fontSize: 8, color: active ? T.green : T.ink3, marginTop: 5, letterSpacing: '0.12em' }}>
+          {active ? '● ACTIVE' : 'TAP TO SELECT'}
         </div>
       )}
     </div>
@@ -250,16 +242,18 @@ export default function StrategySidebar({ config, onSwitch }) {
         ))}
       </div>
 
-      {/* Strategy cards */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '12px 14px' }}>
+      {/* Strategy cards — 5 rows × 2 columns grid */}
+      <div style={{ padding: '12px 14px' }}>
         {applying && (
           <div style={{ fontFamily: T.mono, fontSize: 10, color: T.amber, letterSpacing: '0.14em', marginBottom: 8 }}>
             SWITCHING STRATEGY…
           </div>
         )}
-        {filtered.map((s, i) => (
-          <StrategyCard key={i} s={s} active={s.strategy === activeStrategy && !s.comingSoon} onSelect={handleSelect} />
-        ))}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          {filtered.map((s, i) => (
+            <StrategyCard key={i} s={s} active={s.strategy === activeStrategy && !s.comingSoon} onSelect={handleSelect} />
+          ))}
+        </div>
       </div>
     </div>
   )

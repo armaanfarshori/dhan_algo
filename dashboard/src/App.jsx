@@ -3,7 +3,7 @@ import { useDashboardData } from './hooks/useDashboardData'
 import { T, INR, INR0, colorPnl, fmtTime } from './tokens'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, CartesianGrid } from 'recharts'
 
-import Intro              from './components/cockpit/Intro'
+// Intro removed per user request
 import TopBar             from './components/cockpit/TopBar'
 import HeroSection        from './components/cockpit/HeroSection'
 import InfoStrip          from './components/cockpit/InfoStrip'
@@ -247,49 +247,53 @@ function Tabs({ active, onChange }) {
   )
 }
 
-// ── Cockpit layout (two-column) ───────────────────────────────────────────────
+// ── Cockpit layout ────────────────────────────────────────────────────────────
 function CockpitTab({ data }) {
   const { status, risk, signals, funds, positions, scalper, payoff, config, watchlist, scanner } = data
-  const halted = risk?.data?.halted ?? false
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 18, alignItems: 'start' }}>
-      {/* ── LEFT: main content ── */}
-      <div>
-        <HeroSection risk={risk} status={status} funds={funds} />
-        <InfoStrip status={status} risk={risk} funds={funds} scalper={scalper} />
+    <>
+      {/* Full-width: hero + info strip above the two-column split */}
+      <HeroSection risk={risk} status={status} funds={funds} />
+      <InfoStrip status={status} risk={risk} funds={funds} scalper={scalper} />
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 14, marginBottom: 14 }}>
-          <AccountBalance funds={funds} />
-          <RiskPanel risk={risk} />
-          <VelocityPanel status={status} />
+      {/* Two-column grid starts here — sidebar aligns with account card */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 18, alignItems: 'start' }}>
+
+        {/* ── LEFT ── */}
+        <div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 14, marginBottom: 14 }}>
+            <AccountBalance funds={funds} />
+            <RiskPanel risk={risk} />
+            <VelocityPanel status={status} />
+          </div>
+
+          <ActivePosition scalper={scalper} status={status} />
+          <div style={{ marginBottom: 14 }} />
+
+          <Pipeline scalper={scalper} />
+          <WatchlistPanel watchlist={watchlist} scanner={scanner} />
+          <PayoffChart payoff={payoff} />
+          <EquityPanel signals={signals} />
+          <div style={{ marginBottom: 14 }} />
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 1fr', gap: 14, marginBottom: 14 }}>
+            <SignalFeed signals={signals} />
+            <Positions positions={positions} />
+          </div>
+
+          <FootBar status={status} risk={risk} />
         </div>
 
-        <ActivePosition scalper={scalper} status={status} />
-        <div style={{ marginBottom: 14 }} />
-
-        <Pipeline scalper={scalper} />
-
-        <WatchlistPanel watchlist={watchlist} scanner={scanner} />
-        <PayoffChart payoff={payoff} />
-        <EquityPanel signals={signals} />
-        <div style={{ marginBottom: 14 }} />
-
-        <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 1fr', gap: 14, marginBottom: 14 }}>
-          <SignalFeed signals={signals} />
-          <Positions positions={positions} />
+        {/* ── RIGHT: sticky sidebar, no internal scrollbar ── */}
+        <div style={{ position: 'sticky', top: 16 }}>
+          <Panel>
+            <StrategySidebar config={config} onSwitch={() => {}} />
+          </Panel>
         </div>
 
-        <FootBar status={status} risk={risk} />
       </div>
-
-      {/* ── RIGHT: strategy sidebar (sticky) ── */}
-      <div style={{ position: 'sticky', top: 16, maxHeight: 'calc(100vh - 32px)', overflowY: 'auto' }}>
-        <Panel style={{ height: '100%' }}>
-          <StrategySidebar config={config} onSwitch={() => {}} />
-        </Panel>
-      </div>
-    </div>
+    </>
   )
 }
 
@@ -313,7 +317,6 @@ export default function App() {
 
   return (
     <>
-      <Intro />
       <FloatingKillSwitch onKill={() => {}} />
       <div style={{ position: 'relative', zIndex: 1, padding: '0 22px 60px', maxWidth: 1520, margin: '0 auto' }}>
         <TopBar status={data.status} halted={halted} />
