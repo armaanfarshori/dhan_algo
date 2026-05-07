@@ -266,28 +266,33 @@ class MultiStockScanner:
 
     def _calc_qty(self, price: float, segment: str, lot_size: int = 1) -> int:
         """
-        Derive quantity from 70% of available balance.
-        NSE_EQ:   qty = floor(0.70 × balance / price)  (min 1 share)
-        NSE_FNO:  lots = floor(0.70 × balance / (premium × lot_size × 0.20 margin approx))
-                  If hedging, actual margin is much lower (~5-8%); use 10% to be safe.
-        MCX:      similar to FNO using 15% margin estimate.
+        Derive quantity from available balance capped by risk limit.
+        The risk check in BaseStrategy.buy() uses qty × price as estimated loss,
+        so we must ensure qty × price ≤ max_loss_per_trade.
         """
-        budget = self._available_balance * self.capital_pct
-        if budget <= 0:
-            return lot_size  # fallback to 1 lot / 1 share
+        budget     = self._available_balance * self.capital_pct
+        risk_limit = self.risk.config.max_loss_per_trade if hasattr(self.risk, "config") else 50_000
+
+        if budget <= 0 or price <= 0:
+            return lot_size
 
         if segment == "NSE_EQ":
-            return max(1, int(budget / price))
+            qty_budget = max(1, int(budget / price))
+            qty_risk   = max(1, int(risk_limit / price))    # cap so qty×price ≤ risk_limit
+            return min(qty_budget, qty_risk)
 
         elif segment in ("NSE_FNO", "MCX_COMM"):
-            margin_pct  = 0.10 if (self.hedge_fno and segment == "NSE_FNO") else 0.20
-            margin_lot  = price * lot_size * margin_pct
-            if margin_lot <= 0:
+            # Equity scanner on F&O uses full premium as cost (options buyer)
+            cost_lot   = price * lot_size
+            if cost_lot <= 0:
                 return lot_size
-            num_lots = max(1, int(budget / margin_lot))
-            return num_lots * lot_size
+            lots_budget = max(1, int(budget / cost_lot))
+            lots_risk   = max(1, int(risk_limit / cost_lot))
+            return min(lots_budget, lots_risk) * lot_size
 
-        return max(1, int(budget / price))
+        qty_budget = max(1, int(budget / price))
+        qty_risk   = max(1, int(risk_limit / price))
+        return min(qty_budget, qty_risk)
 
     # ── Strategy instances ────────────────────────────────────────────────────
 
