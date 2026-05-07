@@ -9,8 +9,10 @@ export function useDashboardData() {
   const scalper   = usePoller('/api/scalper',          5000)
   const payoff    = usePoller('/api/payoff',           5000)
   const config    = usePoller('/api/config',           10000)
-  const watchlist = usePoller('/api/watchlist',        15000)
-  const scanner   = usePoller('/api/scanner',          5000)
-  const market    = usePoller('/api/market',           30000)
-  return { status, risk, signals, funds, positions, scalper, payoff, config, watchlist, scanner, market }
+  const watchlist      = usePoller('/api/watchlist',        15000)
+  const scanner        = usePoller('/api/scanner',          5000)
+  const fnoScanner     = usePoller('/api/scanner/fno',      5000)
+  const equityScanner  = usePoller('/api/scanner/equity',   5000)
+  const market         = usePoller('/api/market',           30000)
+  return { status, risk, signals, funds, positions, scalper, payoff, config, watchlist, scanner, fnoScanner, equityScanner, market }
 }
