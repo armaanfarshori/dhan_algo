@@ -218,8 +218,7 @@ class IndexOptionsScanner:
             state.last_price = price
 
             if state.in_position:
-                await self._check_oco(state)
-                # Fetch current option premium for unrealized P&L
+                # Fetch current option premium
                 if state.option_sid:
                     try:
                         opt = await self.client.get_ohlc({state.option_segment: [int(state.option_sid)]})
@@ -229,6 +228,18 @@ class IndexOptionsScanner:
                             state.unrealized_pnl  = round((cur - state.entry_premium) * state.lot_size, 2)
                     except Exception:
                         pass
+
+                if self.paper_trading:
+                    # Simulate OCO exit in paper mode
+                    cur = state.current_premium
+                    target = state.breakeven + self.target_buffer
+                    stop   = state.entry_premium - self.stop_buffer
+                    if cur >= target:
+                        await self._paper_exit(state, cur, f"TARGET HIT ₹{target:.2f} (current ₹{cur:.2f})")
+                    elif cur > 0 and cur <= stop:
+                        await self._paper_exit(state, cur, f"STOP HIT ₹{stop:.2f} (current ₹{cur:.2f})")
+                else:
+                    await self._check_oco(state)
                 state.prev_rsi = rsi
                 continue
 
@@ -363,6 +374,18 @@ class IndexOptionsScanner:
                      f"{state.name} {opt_type} {int(contract.strike)} | "
                      f"BEP ₹{charges.breakeven_premium:.2f}")
         self.signals.append(sig)
+
+    async def _paper_exit(self, state: IndexState, exit_premium: float, reason: str):
+        """Simulate OCO exit in paper mode."""
+        pnl = round((exit_premium - state.entry_premium) * state.lot_size, 2)
+        logger.info(
+            f"📝 [PAPER EXIT] {state.name} {state.option_type} | {reason} | "
+            f"Entry ₹{state.entry_premium} → Exit ₹{exit_premium:.2f} | PnL ₹{pnl:+.2f}"
+        )
+        sig = Signal("EXIT", exit_premium, f"[PAPER] {state.name} {reason} | PnL ₹{pnl:+.2f}")
+        self.signals.append(sig)
+        self.orders_placed += 1
+        self._go_flat(state)
 
     async def _check_oco(self, state: IndexState):
         if self.paper_trading or not state.oco_order_id:

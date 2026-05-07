@@ -218,6 +218,14 @@ class MultiStockScanner:
                     await self._exit_pos(key, stock.symbol, price, signal.reason, strategy)
                     signal_map[stock.security_id] = {"action": "EXIT", "reason": signal.reason}
 
+                # Paper mode: check 3% stop-loss on open equity positions
+                elif key in self._positions and self.paper_trading:
+                    entry = self._positions[key]
+                    if entry > 0 and price < entry * 0.97:
+                        reason = f"Paper stop-loss hit ({((price-entry)/entry*100):.1f}%)"
+                        await self._exit_pos(key, stock.symbol, price, reason, strategy)
+                        signal_map[stock.security_id] = {"action": "EXIT", "reason": reason}
+
         self.watchlist.update_signals(signal_map)
         self.scan_results = scan_results
 
