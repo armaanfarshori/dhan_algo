@@ -1,268 +1,150 @@
 import { useState } from 'react'
-import { T } from '../../tokens'
-
-const CATEGORIES = ['All', 'Intraday', 'Options', 'Swing', 'Quant']
-
-const STRATEGIES = [
-  {
-    cat: 'Options', risk: 'VERY HIGH', riskColor: '#f85149',
-    name: 'RSI Options Scalper', badge: 'F&O · LIVE',
-    desc: 'Buy ATM NIFTY call/put on RSI-14 crossover (30/70). Forever OCO exit at breakeven + ₹5 buffer. Auto-discovers ATM strike from Dhan master.',
-    tags: ['NSE_FNO', 'NIFTY', 'Weekly', 'OCO'],
-    hold: 'Minutes', capital: '₹50k+',
-    strategy: 'scalper', segment: 'NSE_FNO',
-  },
-  {
-    cat: 'Intraday', risk: 'MEDIUM', riskColor: '#d29922',
-    name: 'SMA Crossover', badge: 'EQUITY · LIVE',
-    desc: 'Go long on 9/21 golden cross, short on death cross. Deque-based SMA with zero external deps. Warm-up: 21 ticks.',
-    tags: ['NSE_EQ', 'Equity', 'Any stock'],
-    hold: 'Hours', capital: '₹25k+',
-    strategy: 'sma_crossover', segment: 'NSE_EQ',
-  },
-  {
-    cat: 'Intraday', risk: 'MEDIUM-HIGH', riskColor: '#d29922',
-    name: 'RSI Equity Scalper', badge: 'EQUITY · LIVE',
-    desc: 'Buy when RSI-14 crosses above oversold (30); sell when crosses below overbought (70). Works on any NSE equity or commodity.',
-    tags: ['NSE_EQ', 'MCX', 'Any stock'],
-    hold: 'Minutes–hrs', capital: '₹20k+',
-    strategy: 'rsi_scalper', segment: 'NSE_EQ',
-  },
-  {
-    cat: 'Intraday', risk: 'MEDIUM-HIGH', riskColor: '#d29922',
-    name: 'Momentum Breakout', badge: 'EQUITY · LIVE',
-    desc: 'Enter long when price breaks 20-day high; enter short on 20-day low break. Exit on reverse break. Trend-following for momentum sessions.',
-    tags: ['NSE_EQ', 'MCX', 'Trending'],
-    hold: 'Minutes–hrs', capital: '₹25k+',
-    strategy: 'momentum_breakout', segment: 'NSE_EQ',
-  },
-  {
-    cat: 'Intraday', risk: 'MEDIUM', riskColor: '#3fb950',
-    name: 'Mean Reversion', badge: 'EQUITY · LIVE',
-    desc: 'Buy extreme RSI oversold (<25); hold until RSI returns to neutral (>55). Exploits short-term overreaction in range-bound stocks.',
-    tags: ['NSE_EQ', 'Range-bound', 'Reversal'],
-    hold: '15–90 min', capital: '₹20k+',
-    strategy: 'mean_reversion', segment: 'NSE_EQ',
-  },
-  {
-    cat: 'Intraday', risk: 'MEDIUM', riskColor: '#3fb950',
-    name: 'Bollinger Reversion', badge: 'EQUITY · LIVE',
-    desc: 'Buy lower Bollinger Band (2σ) touch; exit at upper band or mean. 20-period band. Works best in low-volatility, ranging sessions.',
-    tags: ['NSE_EQ', 'Bollinger', 'Reversion'],
-    hold: '30–120 min', capital: '₹20k+',
-    strategy: 'bollinger', segment: 'NSE_EQ',
-  },
-  {
-    cat: 'Intraday', risk: 'MEDIUM', riskColor: '#3fb950',
-    name: 'VWAP Reversion', badge: 'EQUITY · LIVE',
-    desc: 'Buy when price deviates >0.5% below VWAP; exit when price recovers to VWAP. Classic intraday institutional anchor strategy.',
-    tags: ['NSE_EQ', 'VWAP', 'Institutional'],
-    hold: '15–60 min', capital: '₹20k+',
-    strategy: 'vwap_reversion', segment: 'NSE_EQ',
-  },
-  {
-    cat: 'Options', risk: 'HIGH', riskColor: '#f85149',
-    name: 'Short Straddle', badge: 'F&O · LIVE',
-    desc: 'Sell ATM CE + PE simultaneously to collect theta. Exit both legs on 50% SL or 30% target of combined premium. Requires pre-set call/put security IDs.',
-    tags: ['NSE_FNO', 'Theta', 'Two-leg'],
-    hold: 'Intraday–1wk', capital: '₹3L+',
-    strategy: 'short_straddle', segment: 'NSE_FNO',
-  },
-  {
-    cat: 'Options', risk: 'MEDIUM', riskColor: '#d29922',
-    name: 'Iron Condor', badge: 'COMING SOON',
-    desc: 'Sell OTM call spread + OTM put spread. 4-leg strategy with defined risk on both sides. Profits when index stays range-bound.',
-    tags: ['BankNifty', 'Nifty', '4-leg'],
-    hold: '1–5 days', capital: '₹1.5L+',
-    comingSoon: true,
-  },
-  {
-    cat: 'Quant', risk: 'LOW-MED', riskColor: '#3fb950',
-    name: 'Pairs / Stat Arb', badge: 'COMING SOON',
-    desc: 'Trade the spread between co-integrated instruments. Requires co-integration test + simultaneous two-stock execution.',
-    tags: ['Equity', 'Futures', '2-stock'],
-    hold: '1–10 days', capital: '₹2L+',
-    comingSoon: true,
-  },
-]
-
-function StrategyCard({ s, onSelect, active }) {
-  return (
-    <div
-      onClick={() => !s.comingSoon && onSelect(s)}
-      style={{
-        background: active ? 'oklch(0.18 0.08 145 / 0.3)' : T.bg2,
-        border: `1px solid ${active ? T.green : T.line}`,
-        padding: '10px 10px 8px', cursor: s.comingSoon ? 'default' : 'pointer',
-        opacity: s.comingSoon ? 0.5 : 1,
-        transition: 'border-color .15s, background .15s',
-        boxShadow: active ? `0 0 10px oklch(0.55 0.18 145 / 0.15)` : 'none',
-      }}
-      onMouseEnter={e => { if (!s.comingSoon && !active) e.currentTarget.style.borderColor = T.line2 }}
-      onMouseLeave={e => { if (!s.comingSoon && !active) e.currentTarget.style.borderColor = T.line }}
-    >
-      {/* Badge + risk */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
-        <span style={{
-          fontFamily: T.mono, fontSize: 8, padding: '1px 5px',
-          background: s.comingSoon ? T.bg3 : 'rgba(255,255,255,0.05)',
-          color: s.comingSoon ? T.ink3 : T.ink1,
-          border: `1px solid ${s.comingSoon ? T.line : T.line2}`,
-          letterSpacing: '0.1em', textTransform: 'uppercase',
-        }}>
-          {s.comingSoon ? 'SOON' : s.badge}
-        </span>
-        <span style={{ fontFamily: T.mono, fontSize: 8, color: s.riskColor }}>
-          {s.risk.split('-')[0]}
-        </span>
-      </div>
-
-      {/* Name */}
-      <div style={{ fontFamily: T.mono, fontSize: 11, fontWeight: 600, color: active ? T.green : T.ink0, marginBottom: 4, lineHeight: 1.3 }}>
-        {s.name}
-      </div>
-
-      {/* Meta row */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: `1px solid ${T.line}`, paddingTop: 6, marginTop: 4 }}>
-        <div style={{ textAlign: 'left' }}>
-          <div style={{ fontFamily: T.mono, fontSize: 9, color: T.cyan }}>{s.capital}</div>
-          <div style={{ fontFamily: T.mono, fontSize: 7, color: T.ink3, letterSpacing: '0.12em' }}>MIN CAP</div>
-        </div>
-        <div style={{ textAlign: 'right' }}>
-          <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink1 }}>{s.hold}</div>
-          <div style={{ fontFamily: T.mono, fontSize: 7, color: T.ink3, letterSpacing: '0.12em' }}>HOLD</div>
-        </div>
-      </div>
-
-      {!s.comingSoon && (
-        <div style={{ fontFamily: T.mono, fontSize: 8, color: active ? T.green : T.ink3, marginTop: 5, letterSpacing: '0.12em' }}>
-          {active ? '● ACTIVE' : 'TAP TO SELECT'}
-        </div>
-      )}
-    </div>
-  )
-}
+import { T, INR } from '../../tokens'
 
 const ALL_SEGMENTS = [
-  { value: 'NSE_EQ',   label: 'NSE Equity' },
-  { value: 'NSE_FNO',  label: 'NSE F&O' },
-  { value: 'BSE_FNO',  label: 'BSE F&O' },
-  { value: 'MCX_COMM', label: 'MCX Commodity' },
+  { value: 'NSE_FNO',  label: 'NSE F&O', desc: 'NIFTY · BANKNIFTY · FINNIFTY · NIFTYNXT50 · MIDCPNIFTY' },
+  { value: 'BSE_FNO',  label: 'BSE F&O', desc: 'SENSEX' },
+  { value: 'NSE_EQ',   label: 'NSE Equity', desc: 'Top 15 movers by volume' },
+  { value: 'MCX_COMM', label: 'MCX Commodity', desc: 'Top commodity futures' },
 ]
 
-export default function StrategySidebar({ config, onSwitch }) {
-  const [cat, setCat]           = useState('All')
-  const [applying, setApplying] = useState(false)
-  const [msg, setMsg]           = useState(null)
-  const [segments, setSegments] = useState(['NSE_EQ'])
+export default function StrategySidebar({ config, scanner, onSwitch }) {
+  const [segments, setSegments] = useState(['NSE_FNO', 'BSE_FNO'])
   const [capitalPct, setCapPct] = useState(70)
-  const activeStrategy          = config?.data?.strategy || 'scalper'
-  const filtered = cat === 'All' ? STRATEGIES : STRATEGIES.filter(s => s.cat === cat)
+  const [msg, setMsg]           = useState(null)
+
+  const sc = scanner?.data
 
   async function toggleSegment(val) {
     const next = segments.includes(val)
       ? (segments.length > 1 ? segments.filter(s => s !== val) : segments)
       : [...segments, val]
     setSegments(next)
-    // Immediately apply to backend
+    try {
+      const r = await fetch('/api/scanner/config', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ segments: next, capital_pct: capitalPct / 100 }),
+      })
+      const d = await r.json()
+      setMsg(d.ok ? null : d.error)
+    } catch (e) { setMsg(String(e)) }
+  }
+
+  async function applyCapital(pct) {
+    setCapPct(pct)
     try {
       await fetch('/api/scanner/config', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ segments: next, capital_pct: capitalPct / 100 }),
+        body: JSON.stringify({ capital_pct: pct / 100 }),
       })
     } catch {}
   }
 
-  async function handleSelect(s) {
-    setApplying(true); setMsg(null)
-    try {
-      // Update scanner if running
-      await fetch('/api/scanner/config', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ strategy_key: s.strategy, segments, capital_pct: capitalPct / 100 }),
-      })
-      // Also switch single-strategy engine
-      const r = await fetch('/api/strategy/switch', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ strategy: s.strategy, segment: s.segment, security_id: '13', quantity: 75, num_lots: 1 }),
-      })
-      const d = await r.json()
-      setMsg(d.ok ? `Active: ${s.name}` : d.error)
-      if (d.ok) onSwitch?.()
-    } catch (e) { setMsg(String(e)) }
-    finally { setApplying(false) }
-  }
+  const label = { fontFamily: T.mono, fontSize: 9, color: T.ink2, letterSpacing: '0.18em', textTransform: 'uppercase' }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+    <div style={{ display: 'flex', flexDirection: 'column' }}>
       {/* Header */}
-      <div style={{
-        padding: '10px 14px', borderBottom: `1px solid ${T.line}`,
-        fontFamily: T.mono, fontSize: 10, color: T.ink2, textTransform: 'uppercase', letterSpacing: '0.16em',
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-      }}>
-        <span style={{ color: T.ink0 }}>STRATEGY PANEL</span>
-        {msg && <span style={{ fontSize: 9, color: T.green }}>{msg}</span>}
+      <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.line}`, fontFamily: T.mono, fontSize: 10, color: T.ink2, textTransform: 'uppercase', letterSpacing: '0.16em', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ color: T.ink0 }}>SCANNER CONTROLS</span>
+        {msg && <span style={{ fontSize: 9, color: T.red }}>{msg}</span>}
       </div>
 
-      {/* Segment selector (multi) */}
-      <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.line}`, background: T.bg2 }}>
-        <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink2, letterSpacing: '0.2em', textTransform: 'uppercase', marginBottom: 8 }}>
-          SEGMENTS (multi-select)
+      {/* Live scanner status */}
+      {sc?.ok && (
+        <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.line}`, background: T.bg2 }}>
+          <div style={{ ...label, marginBottom: 8 }}>STATUS</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+            {[
+              ['MODE',     sc.mode?.replace('_',' ').toUpperCase() || '—', T.cyan],
+              ['BALANCE',  sc.balance ? INR(sc.balance) : '—',             T.green],
+              ['POSITIONS',`${sc.open_positions ?? 0} OPEN`,               sc.open_positions > 0 ? T.amber : T.ink2],
+              ['ORDERS',   `${sc.orders_placed ?? 0} PLACED`,              T.ink0],
+            ].map(([k, v, c]) => (
+              <div key={k} style={{ background: T.bg3, border: `1px solid ${T.line}`, padding: '6px 8px' }}>
+                <div style={{ fontFamily: T.mono, fontSize: 8, color: T.ink3, letterSpacing: '0.16em', marginBottom: 3 }}>{k}</div>
+                <div style={{ fontFamily: T.mono, fontSize: 10, color: c, fontWeight: 600 }}>{v}</div>
+              </div>
+            ))}
+          </div>
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-          {ALL_SEGMENTS.map(seg => (
-            <label key={seg.value} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-              <input type="checkbox" checked={segments.includes(seg.value)}
-                onChange={() => toggleSegment(seg.value)}
-                style={{ accentColor: T.green }} />
-              <span style={{ fontFamily: T.mono, fontSize: 10, color: segments.includes(seg.value) ? T.ink0 : T.ink3, letterSpacing: '0.1em' }}>
-                {seg.label}
-              </span>
-            </label>
-          ))}
-        </div>
+      )}
+
+      {/* Segment toggles */}
+      <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.line}` }}>
+        <div style={{ ...label, marginBottom: 10 }}>ACTIVE SEGMENTS</div>
+        {ALL_SEGMENTS.map(seg => {
+          const active = segments.includes(seg.value)
+          return (
+            <div key={seg.value} onClick={() => toggleSegment(seg.value)} style={{
+              display: 'flex', alignItems: 'flex-start', gap: 10,
+              padding: '9px 10px', marginBottom: 6, cursor: 'pointer',
+              background: active ? 'oklch(0.18 0.08 145 / 0.2)' : T.bg2,
+              border: `1px solid ${active ? T.green : T.line}`,
+              transition: 'all .15s',
+            }}>
+              <div style={{
+                width: 14, height: 14, border: `1px solid ${active ? T.green : T.line2}`,
+                background: active ? T.green : 'transparent', flexShrink: 0, marginTop: 1,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>
+                {active && <span style={{ color: T.bg0, fontSize: 10, lineHeight: 1 }}>✓</span>}
+              </div>
+              <div>
+                <div style={{ fontFamily: T.mono, fontSize: 11, color: active ? T.ink0 : T.ink2, fontWeight: active ? 600 : 400 }}>
+                  {seg.label}
+                </div>
+                <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, marginTop: 2, letterSpacing: '0.06em' }}>
+                  {seg.desc}
+                </div>
+              </div>
+            </div>
+          )
+        })}
       </div>
 
-      {/* Capital allocation (auto-calculated, no lot slider) */}
-      <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.line}`, background: T.bg2 }}>
-        <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink2, letterSpacing: '0.2em', textTransform: 'uppercase', marginBottom: 6, display: 'flex', justifyContent: 'space-between' }}>
+      {/* Capital slider */}
+      <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.line}` }}>
+        <div style={{ ...label, display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
           <span>CAPITAL PER TRADE</span>
-          <span style={{ color: T.cyan }}>{capitalPct}% OF BALANCE</span>
+          <span style={{ color: T.cyan }}>{capitalPct}%</span>
         </div>
         <input type="range" min={10} max={90} step={5} value={capitalPct}
-          onChange={e => setCapPct(Number(e.target.value))}
+          onChange={e => applyCapital(Number(e.target.value))}
           style={{ width: '100%', accentColor: T.green, cursor: 'pointer' }} />
-        <div style={{ fontFamily: T.mono, fontSize: 8, color: T.ink3, marginTop: 4, letterSpacing: '0.12em' }}>
-          LOTS & QTY CALCULATED AUTOMATICALLY FROM ACCOUNT BALANCE
+        <div style={{ fontFamily: T.mono, fontSize: 8, color: T.ink3, marginTop: 5, letterSpacing: '0.1em' }}>
+          QUANTITY AUTO-CALCULATED FROM ACCOUNT BALANCE
         </div>
       </div>
 
-      {/* Category filter */}
-      <div style={{ display: 'flex', borderBottom: `1px solid ${T.line}`, overflowX: 'auto' }}>
-        {CATEGORIES.map(c => (
-          <div key={c} onClick={() => setCat(c)} style={{
-            fontFamily: T.mono, fontSize: 9, padding: '8px 12px', cursor: 'pointer',
-            color: cat === c ? T.ink0 : T.ink3, letterSpacing: '0.14em', textTransform: 'uppercase',
-            borderBottom: cat === c ? `1px solid ${T.green}` : '1px solid transparent',
-            marginBottom: -1, whiteSpace: 'nowrap', transition: 'color .15s',
-          }}>{c}</div>
-        ))}
-      </div>
-
-      {/* Strategy cards — 5 rows × 2 columns grid */}
-      <div style={{ padding: '12px 14px' }}>
-        {applying && (
-          <div style={{ fontFamily: T.mono, fontSize: 10, color: T.amber, letterSpacing: '0.14em', marginBottom: 8 }}>
-            SWITCHING STRATEGY…
-          </div>
-        )}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-          {filtered.map((s, i) => (
-            <StrategyCard key={i} s={s} active={s.strategy === activeStrategy && !s.comingSoon} onSelect={handleSelect} />
-          ))}
+      {/* Active indices live RSI */}
+      {sc?.indices && (
+        <div style={{ padding: '12px 14px' }}>
+          <div style={{ ...label, marginBottom: 10 }}>LIVE RSI PER INDEX</div>
+          {Object.entries(sc.indices).map(([name, idx]) => {
+            const rsi   = idx.rsi || 0
+            const inPos = idx.in_position
+            const rsiColor = rsi > 0 && rsi <= 30 ? T.green : rsi >= 70 ? T.red : T.amber
+            const pct   = rsi
+            return (
+              <div key={name} style={{ marginBottom: 8 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: T.mono, fontSize: 9, marginBottom: 3 }}>
+                  <span style={{ color: inPos ? T.green : T.ink2, fontWeight: inPos ? 600 : 400 }}>
+                    {inPos ? '● ' : ''}{name}
+                    {inPos && <span style={{ color: T.amber, marginLeft: 6 }}>{idx.option_type} {idx.strike?.toLocaleString('en-IN')}</span>}
+                  </span>
+                  <span style={{ color: rsiColor, fontFamily: T.dot, fontSize: 14 }}>
+                    {rsi > 0 ? rsi.toFixed(1) : '—'}
+                  </span>
+                </div>
+                <div style={{ height: 4, background: T.bg3, borderRadius: 2, overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${pct}%`, background: rsiColor, borderRadius: 2, transition: 'width .4s, background .3s' }} />
+                </div>
+              </div>
+            )
+          })}
         </div>
-      </div>
+      )}
     </div>
   )
 }

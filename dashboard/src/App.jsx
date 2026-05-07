@@ -271,7 +271,7 @@ function CockpitTab({ data }) {
           <ActivePosition scalper={scalper} status={status} />
           <div style={{ marginBottom: 14 }} />
 
-          <Pipeline scalper={scalper} />
+          <Pipeline scalper={scalper} scanner={scanner} />
           <WatchlistPanel watchlist={watchlist} scanner={scanner} />
           <PayoffChart payoff={payoff} />
           <EquityPanel signals={signals} />
@@ -288,7 +288,7 @@ function CockpitTab({ data }) {
         {/* ── RIGHT: sticky sidebar, no internal scrollbar ── */}
         <div style={{ position: 'sticky', top: 16 }}>
           <Panel>
-            <StrategySidebar config={config} onSwitch={() => {}} />
+            <StrategySidebar config={config} scanner={scanner} onSwitch={() => {}} />
           </Panel>
         </div>
 
