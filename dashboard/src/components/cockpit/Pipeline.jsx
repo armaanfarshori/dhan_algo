@@ -79,9 +79,11 @@ export default function Pipeline({ scalper, scanner, label }) {
   const isFno = sc?.mode === 'index_options' || label?.includes('F&O')
   const steps = isFno ? FNO_STEPS : EQ_STEPS
 
-  const positions = sc?.open_positions ?? 0
-  const orders    = sc?.orders_placed  ?? 0
-  const activeStep = positions > 0 ? (isFno ? '07' : '06') : '01'
+  const positions  = sc?.open_positions ?? 0
+  const orders     = sc?.orders_placed  ?? 0
+  // Use live current_step from scanner; fallback: 01 when flat, 07 briefly on order
+  const stepNum    = sc?.current_step ?? (positions > 0 ? 7 : 1)
+  const activeStep = String(stepNum).padStart(2, '0')
 
   return (
     <div style={{ marginBottom: 14 }}>
