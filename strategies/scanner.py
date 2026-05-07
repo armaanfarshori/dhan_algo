@@ -32,6 +32,7 @@ from strategies.backtest_strategies import (
     VWAPReversionStrategy, VWAPConfig,
 )
 from core.watchlist import WatchlistManager, WatchlistStock
+from core.trade_log import get_trade_logger
 
 logger = logging.getLogger("dhan.scanner")
 IST = ZoneInfo("Asia/Kolkata")
@@ -339,6 +340,13 @@ class MultiStockScanner:
                 f"📊 {result.action} {result.symbol} ({result.segment}) "
                 f"@ ₹{result.price:.2f} qty={result.qty} score={result.score:.1f}"
             )
+            mode = "PAPER" if self.paper_trading else "LIVE"
+            get_trade_logger().log_entry(
+                engine="EQ", symbol=result.symbol, action=result.action,
+                price=result.price, qty=result.qty, mode=mode,
+                segment=result.segment, strategy=self.strategy_key,
+                reason=result.reason,
+            )
 
     async def _place_fno_hedge(self, result: ScanResult):
         """
@@ -389,11 +397,22 @@ class MultiStockScanner:
             logger.warning(f"Hedge placement error: {e}")
 
     async def _exit_pos(self, key: str, symbol: str, price: float, reason: str, strategy: BaseStrategy):
+        entry_price = self._positions.get(key, 0.0)
         await strategy.exit_position(price, reason)
         self._positions.pop(key, None)
         self.orders_placed += 1
+        qty = strategy.config.quantity if strategy else 1
+        pnl = round((price - entry_price) * strategy.position if strategy else 0, 2)
         self.signals.append(Signal(action="EXIT", price=price,
                                    reason=f"[SCAN/{symbol}] {reason}"))
+        mode = "PAPER" if self.paper_trading else "LIVE"
+        seg  = key.split(":")[0]
+        get_trade_logger().log_exit(
+            engine="EQ", symbol=symbol, action="EXIT",
+            price=price, qty=qty, mode=mode,
+            entry_price=entry_price, pnl=pnl,
+            reason=reason, segment=seg, strategy=self.strategy_key,
+        )
         # Exit hedge if any
         hedge_sid = self._hedge_sids.pop(key, None)
         if hedge_sid and not self.paper_trading:

@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 from strategies.strategy_base import Signal
 from core.instruments import InstrumentMaster, OptionContract
 from core.charges import BreakevenCalculator
+from core.trade_log import get_trade_logger
 
 logger = logging.getLogger("dhan.index_options")
 IST = ZoneInfo("Asia/Kolkata")
@@ -370,7 +371,14 @@ class IndexOptionsScanner:
                          f"BEP ₹{charges.breakeven_premium:.2f} | T ₹{target_p} S ₹{stop_p}")
             self.signals.append(sig)
             logger.info(f"📝 [PAPER] {state.name} {opt_type} entered @ ₹{premium:.2f}")
-            self.current_step = 7  # OCO (simulated — paper exits monitored each tick)
+            get_trade_logger().log_entry(
+                engine="F&O", symbol=f"{state.name} {opt_type} {int(contract.strike)}",
+                action="BUY", price=premium, qty=qty, mode="PAPER",
+                lot_size=contract.lot_size, num_lots=num_lots,
+                bep=charges.breakeven_premium, target=target_p, stop=stop_p,
+                rsi=rsi, segment=state.option_segment, strategy="RSI_14",
+            )
+            self.current_step = 7
             # Reset to scanning after brief pause so pipeline doesn't lock on 07
             await asyncio.sleep(0.5)
             self.current_step = 1
@@ -440,6 +448,14 @@ class IndexOptionsScanner:
         sig = Signal("EXIT", exit_premium, f"[PAPER] {state.name} {reason} | PnL ₹{pnl:+.2f}")
         self.signals.append(sig)
         self.orders_placed += 1
+        get_trade_logger().log_exit(
+            engine="F&O",
+            symbol=f"{state.name} {state.option_type} {int(state.strike)}",
+            action="EXIT", price=exit_premium,
+            qty=state.lot_size, mode="PAPER",
+            entry_price=state.entry_premium, pnl=pnl,
+            reason=reason, segment=state.option_segment, strategy="RSI_14",
+        )
         self._go_flat(state)
 
     async def _check_oco(self, state: IndexState):
