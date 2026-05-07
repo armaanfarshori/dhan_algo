@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { T } from '../../tokens'
 
 function Clock() {
@@ -58,6 +58,45 @@ function Pill({ children, color }) {
       <span style={{ width: 5, height: 5, borderRadius: '50%', background: color || T.green, flexShrink: 0 }} />
       {children}
     </div>
+  )
+}
+
+function ModeToggle() {
+  const [paper, setPaper] = useState(true)
+  const [busy,  setBusy]  = useState(false)
+  const [confirm, setConfirm] = useState(false)
+
+  useEffect(() => {
+    fetch('/api/mode').then(r=>r.json()).then(d=>setPaper(d.paper)).catch(()=>{})
+  }, [])
+
+  async function toggle() {
+    if (paper) {
+      // Switching to LIVE — require 2 clicks
+      if (!confirm) { setConfirm(true); setTimeout(() => setConfirm(false), 4000); return }
+    }
+    setBusy(true); setConfirm(false)
+    try {
+      const r = await fetch('/api/mode', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ paper: !paper }) })
+      const d = await r.json()
+      if (d.ok) setPaper(d.paper)
+    } finally { setBusy(false) }
+  }
+
+  const isLive = !paper
+  return (
+    <button onClick={toggle} disabled={busy} style={{
+      fontFamily: T.mono, fontSize: 10, fontWeight: 600, letterSpacing: '0.14em',
+      padding: '5px 12px', cursor: 'pointer',
+      background: isLive ? '#2d0a0a' : '#0d1a0d',
+      border: `1px solid ${isLive ? T.red : T.green}`,
+      color:   isLive ? T.red : T.green,
+      textTransform: 'uppercase',
+      boxShadow: isLive ? `0 0 10px oklch(0.68 0.22 25 / 0.3)` : 'none',
+      transition: 'all .2s',
+    }}>
+      {busy ? '…' : confirm ? '⚠ CONFIRM LIVE?' : isLive ? '🔴 LIVE' : '📝 PAPER'}
+    </button>
   )
 }
 
@@ -130,7 +169,7 @@ export default function TopBar({ status, halted }) {
 
         <div style={{ flex: 1 }} />
         <Pill color={halted ? T.red : T.green}>{halted ? 'HALTED' : 'SESSION OPEN'}</Pill>
-        <Pill color={T.amber}>RSI SCALPER</Pill>
+        <ModeToggle />
         <Clock />
       </div>
     </div>

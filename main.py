@@ -100,6 +100,22 @@ async def health_handler(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", "paper": PAPER_TRADING})
 
 
+async def trading_mode_handler(request: web.Request) -> web.Response:
+    """GET → current mode. POST {paper: true/false} → toggle."""
+    fno = request.app.get("fno_scanner")
+    eq  = request.app.get("equity_scanner")
+    if request.method == "POST":
+        body  = await request.json()
+        paper = bool(body.get("paper", True))
+        if fno: fno.paper_trading = paper
+        if eq:  eq.paper_trading  = paper
+        mode = "PAPER" if paper else "LIVE"
+        logger.warning(f"⚠️  Trading mode switched to {mode}")
+        return web.json_response({"ok": True, "paper": paper, "mode": mode})
+    paper = fno.paper_trading if fno else PAPER_TRADING
+    return web.json_response({"ok": True, "paper": paper, "mode": "PAPER" if paper else "LIVE"})
+
+
 # ── Dashboard (serves React build or fallback to static) ─────────────────────
 async def dashboard_handler(request: web.Request) -> web.Response:
     react_index = DIST_DIR / "index.html"
@@ -171,6 +187,47 @@ async def positions_handler(request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "data": data})
     except Exception as e:
         return web.json_response({"ok": False, "error": str(e)}, status=503)
+
+
+async def paper_positions_handler(request: web.Request) -> web.Response:
+    """Aggregates simulated paper positions from both scanners."""
+    positions = []
+
+    fno: "IndexOptionsScanner" = request.app.get("fno_scanner")
+    if fno:
+        for name, state in fno._indices.items():
+            if state.in_position:
+                positions.append({
+                    "engine":        "F&O",
+                    "symbol":        f"{name} {int(state.strike)} {state.option_type}",
+                    "index":         name,
+                    "option_type":   state.option_type,
+                    "strike":        state.strike,
+                    "entry_premium": state.entry_premium,
+                    "lot_size":      state.lot_size,
+                    "expiry":        state.active_expiry,
+                    "bep":           state.breakeven,
+                })
+
+    eq = request.app.get("equity_scanner")
+    if eq:
+        stocks = {s.security_id: s for s in (request.app.get("watchlist") or type("W", (), {"get": lambda: []})()).get()}
+        for key, entry_price in eq._positions.items():
+            seg, sid = key.split(":")
+            sym = stocks.get(sid)
+            positions.append({
+                "engine":      "EQ",
+                "symbol":      sym.symbol if sym else sid,
+                "segment":     seg,
+                "entry_price": entry_price,
+                "qty":         eq.quantity,
+            })
+
+    return web.json_response({
+        "ok":    True,
+        "count": len(positions),
+        "data":  positions,
+    })
 
 
 async def scalper_handler(request: web.Request) -> web.Response:
@@ -712,11 +769,14 @@ async def main():
 
         app.router.add_get("/",                       dashboard_handler)
         app.router.add_get("/health",                 health_handler)
+        app.router.add_get("/api/mode",               trading_mode_handler)
+        app.router.add_post("/api/mode",              trading_mode_handler)
         app.router.add_get("/api/status",             status_handler)
         app.router.add_get("/api/risk",               risk_handler)
         app.router.add_get("/api/signals",            signals_handler)
         app.router.add_get("/api/funds",              funds_handler)
         app.router.add_get("/api/positions",          positions_handler)
+        app.router.add_get("/api/paper/positions",   paper_positions_handler)
         app.router.add_get("/api/scalper",            scalper_handler)
         app.router.add_get("/api/instruments",        instruments_handler)
         app.router.add_get("/api/auth",               auth_handler)
