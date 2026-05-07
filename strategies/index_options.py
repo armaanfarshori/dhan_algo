@@ -304,18 +304,40 @@ class IndexOptionsScanner:
             logger.warning(f"{state.name} premium fetch error: {e}")
             self.current_step = 1; return
 
-        logger.info(f"{state.name}: ATM {opt_type} {contract.strike} | premium ₹{premium:.2f} | filter ₹{self.min_premium}-₹{self.max_premium}")
-        if not (self.min_premium <= premium <= self.max_premium):
-            logger.warning(f"{state.name}: {opt_type} premium ₹{premium:.2f} REJECTED by filter")
+        # Sanity check: option premium > 20% of underlying = wrong contract
+        pct_of_underlying = (premium / price) * 100 if price > 0 else 0
+        logger.info(f"{state.name}: ATM {opt_type} {contract.strike} | premium ₹{premium:.2f} ({pct_of_underlying:.1f}% of underlying ₹{price:,.0f})")
+        if premium > price * 0.20:
+            logger.warning(f"{state.name}: premium ₹{premium:.2f} = {pct_of_underlying:.1f}% of underlying — likely wrong contract, skipping")
+            self.current_step = 1; return
+        if not (self.min_premium <= premium):
+            logger.warning(f"{state.name}: premium ₹{premium:.2f} below min ₹{self.min_premium}")
             self.current_step = 1; return
 
-        # Step 5: Risk gate
+        # Step 5: Risk gate + capital sizing
+        # Options BUYER pays full premium upfront (no margin like futures)
+        # cost_per_lot = premium × lot_size  (e.g. ₹188 × 65 = ₹12,220)
         self.current_step = 5
-        active = self.position or 1
-        budget = (self._balance * self.capital_pct) / max(active, 1)
-        margin_est = premium * contract.lot_size * 0.10
-        num_lots = max(1, int(budget / margin_est)) if margin_est > 0 else 1
+        cost_per_lot = premium * contract.lot_size
+        if cost_per_lot <= 0:
+            self.current_step = 1; return
+
+        # Budget: fraction of available paper/live balance
+        budget = self._balance * self.capital_pct
+
+        # Lots from budget
+        num_lots_budget = max(1, int(budget / cost_per_lot))
+
+        # Lots from risk limit (max_loss = premium paid for options buyer)
+        risk_limit = self.risk.config.max_loss_per_trade
+        num_lots_risk = max(1, int(risk_limit / cost_per_lot))
+
+        # Use the conservative of the two
+        num_lots = min(num_lots_budget, num_lots_risk)
         qty = num_lots * contract.lot_size
+
+        total_cost = num_lots * cost_per_lot
+        logger.info(f"{state.name}: {num_lots} lot(s) × ₹{cost_per_lot:.0f}/lot = ₹{total_cost:.0f} | budget ₹{budget:.0f} | risk_limit ₹{risk_limit:.0f}")
 
         ok, msg = self.risk.check_order(qty, premium, "BUY")
         if not ok:
