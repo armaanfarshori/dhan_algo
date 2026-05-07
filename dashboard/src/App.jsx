@@ -307,20 +307,22 @@ function CockpitTab({ data }) {
           <ActivePosition scalper={scalper} status={status} />
           <div style={{ marginBottom: 14 }} />
 
-          {/* F&O pipeline */}
-        <Pipeline scalper={scalper} scanner={fnoScanner} label="F&O INDEX OPTIONS" />
-        {/* Equity pipeline */}
-        <Pipeline scalper={null} scanner={equityScanner} label="EQUITY TOP MOVERS" />
-          <WatchlistPanel watchlist={watchlist} scanner={scanner} />
-          <PayoffChart payoff={payoff} />
-          <EquityPanel signals={signals} />
-          <div style={{ marginBottom: 14 }} />
-
-          {/* Separate F&O and Equity panels */}
+          {/* Trading panels immediately after Active Position */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }}>
             <FnoPanel fnoScanner={fnoScanner} signals={signals} />
             <EqPanel  paperPositions={paperPositions} signals={signals} />
           </div>
+
+          <PayoffChart payoff={payoff} />
+          <EquityPanel signals={signals} />
+          <div style={{ marginBottom: 14 }} />
+
+          {/* Pipelines */}
+          <Pipeline scalper={scalper} scanner={fnoScanner} label="F&O INDEX OPTIONS" />
+          <Pipeline scalper={null} scanner={equityScanner} label="EQUITY TOP MOVERS" />
+
+          {/* Watchlist with SMA gauge — no refresh button */}
+          <WatchlistPanel watchlist={watchlist} scanner={scanner} equityScanner={equityScanner} />
 
           <FootBar status={status} risk={risk} />
         </div>

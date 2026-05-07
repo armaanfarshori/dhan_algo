@@ -84,9 +84,10 @@ class MultiStockScanner:
         paper_trading: bool      = True,
         poll_interval: float     = 30.0,
         max_positions: int       = 5,
-        capital_pct: float       = 0.70,   # fraction of available balance per position
-        hedge_fno: bool          = True,   # buy far-OTM hedge for F&O (lowers margin)
-        hedge_offset: int        = 200,    # points OTM for hedge leg
+        capital_pct: float       = 0.70,
+        hedge_fno: bool          = True,
+        hedge_offset: int        = 200,
+        paper_balance: float     = 500_000.0,  # simulated capital for paper mode
     ):
         self.client         = client
         self.risk           = risk_manager
@@ -101,9 +102,10 @@ class MultiStockScanner:
         self.hedge_offset   = hedge_offset
 
         self._running         = False
-        self._strategies:     Dict[str, BaseStrategy] = {}   # "segment:sid" → strategy
-        self._positions:      Dict[str, float]         = {}   # "segment:sid" → entry_price
-        self._current_prices: Dict[str, float]         = {}   # sid → current price
+        self._strategies:     Dict[str, BaseStrategy] = {}
+        self._positions:      Dict[str, float]         = {}
+        self._current_prices: Dict[str, float]         = {}
+        self._paper_balance   = paper_balance
         self._hedge_sids: Dict[str, str]           = {}   # "segment:sid" → hedge_sid
         self.signals:     List[Signal]             = []
         self.orders_placed = 0
@@ -154,12 +156,21 @@ class MultiStockScanner:
             await self._squareoff_all()
             return
 
-        # Refresh available balance every tick (cheap non-trading call)
-        try:
-            funds = await self.client.get_funds()
-            self._available_balance = funds.get("availabelBalance", 0.0)
-        except Exception:
-            pass
+        # Balance: paper uses simulated capital minus deployed; live uses real account
+        if self.paper_trading:
+            deployed = sum(
+                self._current_prices.get(key.split(":")[1], ep) * (
+                    self._strategies[key].config.quantity if key in self._strategies else 1
+                )
+                for key, ep in self._positions.items()
+            )
+            self._available_balance = max(0.0, self._paper_balance - deployed)
+        else:
+            try:
+                funds = await self.client.get_funds()
+                self._available_balance = funds.get("availabelBalance", 0.0)
+            except Exception:
+                pass
 
         stocks = self.watchlist.get()
         if not stocks:
@@ -429,4 +440,41 @@ class MultiStockScanner:
             "positions": [
                 {"key": k, "entry_price": v} for k, v in self._positions.items()
             ],
+            "stock_signals": self._get_stock_signals(),
         }
+
+    def _get_stock_signals(self) -> dict:
+        """Returns per-stock SMA/RSI state for the watchlist gauge display."""
+        result = {}
+        for key, strategy in self._strategies.items():
+            sid = key.split(":")[-1]
+            entry = {
+                "in_position": strategy.position != 0,
+                "signal": "",
+                "fast_sma": 0.0,
+                "slow_sma": 0.0,
+                "gap_pct":  0.0,   # (fast-slow)/slow*100, positive=bullish
+                "warmed_up": False,
+            }
+            # SMA crossover strategy
+            if hasattr(strategy, "_fast_prices") and hasattr(strategy, "_slow_prices"):
+                fp = list(strategy._fast_prices)
+                sp = list(strategy._slow_prices)
+                if len(fp) == strategy._fast_prices.maxlen and fp:
+                    fast = sum(fp) / len(fp)
+                    entry["fast_sma"]  = round(fast, 2)
+                if len(sp) == strategy._slow_prices.maxlen and sp:
+                    slow = sum(sp) / len(sp)
+                    entry["slow_sma"]  = round(slow, 2)
+                if entry["fast_sma"] and entry["slow_sma"]:
+                    entry["warmed_up"] = True
+                    entry["gap_pct"]   = round((entry["fast_sma"] - entry["slow_sma"]) / entry["slow_sma"] * 100, 3)
+                    entry["signal"]    = "BUY" if entry["gap_pct"] > 0 else "SELL"
+            # RSI strategy
+            elif hasattr(strategy, "_prices"):
+                prices = list(getattr(strategy, "_prices", []))
+                if len(prices) > 1:
+                    entry["warmed_up"] = True
+                    entry["signal"]    = "BUY" if strategy.position > 0 else ("SELL" if strategy.position < 0 else "")
+            result[sid] = entry
+        return result
