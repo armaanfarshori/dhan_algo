@@ -9,7 +9,7 @@ const ALL_SEGMENTS = [
 ]
 
 export default function StrategySidebar({ config, scanner, onSwitch }) {
-  const [segments, setSegments] = useState(['NSE_FNO', 'BSE_FNO'])
+  const [segments, setSegments] = useState(['NSE_FNO', 'BSE_FNO', 'NSE_EQ'])
   const [capitalPct, setCapPct] = useState(70)
   const [msg, setMsg]           = useState(null)
 
