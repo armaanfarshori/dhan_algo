@@ -98,14 +98,15 @@ class IndexOptionsScanner:
         self,
         client,
         risk_manager,
-        paper_trading: bool  = True,
-        capital_pct:   float = 0.70,
-        target_buffer: float = 5.0,
-        stop_buffer:   float = 5.0,
-        poll_interval: float = 10.0,
-        min_premium:   float = 10.0,
-        max_premium:   float = 500.0,
-        rsi_period:    int   = 14,
+        paper_trading:  bool  = True,
+        capital_pct:    float = 0.70,
+        target_buffer:  float = 5.0,
+        stop_buffer:    float = 5.0,
+        poll_interval:  float = 10.0,
+        min_premium:    float = 10.0,
+        max_premium:    float = 500.0,
+        rsi_period:     int   = 14,
+        paper_balance:  float = 500_000.0,  # simulated capital for paper mode
     ):
         self.client        = client
         self.risk          = risk_manager
@@ -121,7 +122,8 @@ class IndexOptionsScanner:
         self._running      = False
         self._master: Optional[InstrumentMaster] = None
         self._charges      = BreakevenCalculator()
-        self._balance      = 0.0
+        self._balance      = 0.0          # live account balance (from API)
+        self._paper_balance = paper_balance  # simulated paper capital
 
         # active_segments controls which indices are scanned
         # NSE_FNO → NIFTY, BANKNIFTY, FINNIFTY, NIFTYNXT50, MIDCPNIFTY
@@ -187,12 +189,19 @@ class IndexOptionsScanner:
             await self._squareoff_all()
             return
 
-        # Refresh balance
-        try:
-            funds = await self.client.get_funds()
-            self._balance = funds.get("availabelBalance", 0.0)
-        except Exception:
-            pass
+        # Balance: paper mode uses simulated capital minus deployed; live uses real account
+        if self.paper_trading:
+            deployed = sum(
+                s.entry_premium * s.lot_size
+                for s in self._indices.values() if s.in_position
+            )
+            self._balance = max(0.0, self._paper_balance - deployed)
+        else:
+            try:
+                funds = await self.client.get_funds()
+                self._balance = funds.get("availabelBalance", 0.0)
+            except Exception:
+                pass
 
         # Fetch all underlying prices in ONE call
         self.current_step = 1  # FETCH

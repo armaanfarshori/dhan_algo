@@ -64,6 +64,7 @@ WEBHOOK_PORT   = int(os.getenv("WEBHOOK_PORT",  "8765"))
 STRATEGY       = os.getenv("STRATEGY", "scalper").lower()
 SCANNER_MODE   = os.getenv("SCANNER_MODE", "false").lower() == "true"
 SEGMENTS       = os.getenv("SEGMENTS", "NSE_EQ").split(",")
+PAPER_BALANCE  = float(os.getenv("PAPER_BALANCE", "500000"))  # ₹5L simulated capital for paper mode
 
 # Auth manager available when PIN + TOTP are configured
 _auth_manager: Optional[DhanAuthManager] = None
@@ -101,18 +102,50 @@ async def health_handler(request: web.Request) -> web.Response:
 
 
 async def trading_mode_handler(request: web.Request) -> web.Response:
-    """GET → current mode. POST {paper: true/false} → toggle."""
+    """GET → current mode. POST {paper: true/false} → toggle all engines + child strategies."""
     fno = request.app.get("fno_scanner")
     eq  = request.app.get("equity_scanner")
+
     if request.method == "POST":
         body  = await request.json()
         paper = bool(body.get("paper", True))
-        if fno: fno.paper_trading = paper
-        if eq:  eq.paper_trading  = paper
+
+        # ── F&O scanner ──────────────────────────────────────────────────────
+        if fno:
+            fno.paper_trading = paper
+            # Safe mid-session switch: clear paper positions if switching to live
+            if not paper:
+                for state in fno._indices.values():
+                    if state.in_position:
+                        logger.warning(f"Mode→LIVE: clearing paper position {state.name}")
+                        fno._go_flat(state)
+
+        # ── Equity scanner + ALL child strategy instances ────────────────────
+        if eq:
+            eq.paper_trading = paper
+            for strategy in eq._strategies.values():
+                strategy.config.paper_trading = paper   # propagate to children
+            if not paper:
+                for key in list(eq._positions.keys()):
+                    logger.warning(f"Mode→LIVE: clearing paper equity position {key}")
+                eq._positions.clear()
+                eq._current_prices.clear()
+
+        # ── Primary strategy (app["strategy"]) ───────────────────────────────
+        primary = request.app.get("strategy")
+        if primary and hasattr(primary, "paper_trading"):
+            primary.paper_trading = paper
+        if primary and hasattr(primary, "config"):
+            primary.config.paper_trading = paper
+
+        # ── Update app-level mode flag (fixes status_handler) ────────────────
+        request.app["paper_trading"] = paper
+
         mode = "PAPER" if paper else "LIVE"
         logger.warning(f"⚠️  Trading mode switched to {mode}")
         return web.json_response({"ok": True, "paper": paper, "mode": mode})
-    paper = fno.paper_trading if fno else PAPER_TRADING
+
+    paper = request.app.get("paper_trading", fno.paper_trading if fno else PAPER_TRADING)
     return web.json_response({"ok": True, "paper": paper, "mode": "PAPER" if paper else "LIVE"})
 
 
@@ -129,8 +162,9 @@ async def status_handler(request: web.Request) -> web.Response:
     strategy = request.app["strategy"]
     uptime   = int(time.time() - request.app["start_time"])
 
+    current_paper = request.app.get("paper_trading", PAPER_TRADING)
     payload = {
-        "mode":             "PAPER" if PAPER_TRADING else "LIVE",
+        "mode":             "PAPER" if current_paper else "LIVE",
         "client_id":        CLIENT_ID,
         "uptime_seconds":   uptime,
         "strategy_name":    strategy.config.name,
@@ -196,7 +230,11 @@ async def positions_handler(request: web.Request) -> web.Response:
 
 
 async def paper_positions_handler(request: web.Request) -> web.Response:
-    """Aggregates simulated paper positions from both scanners."""
+    """Aggregates simulated paper positions — only when in paper mode."""
+    current_paper = request.app.get("paper_trading", PAPER_TRADING)
+    if not current_paper:
+        return web.json_response({"ok": True, "count": 0, "data": [],
+                                   "note": "Live mode — see /api/positions for real positions"})
     positions = []
 
     fno: "IndexOptionsScanner" = request.app.get("fno_scanner")
@@ -322,8 +360,10 @@ async def switch_strategy_handler(request: web.Request) -> web.Response:
     quantity      = int(body.get("quantity",  75))
     num_lots      = int(body.get("num_lots",   1))
 
-    dhan = request.app["client"]
-    risk = request.app["risk"]
+    dhan  = request.app["client"]
+    risk  = request.app["risk"]
+    # Always use the current live mode — not the startup global
+    paper = request.app.get("paper_trading", PAPER_TRADING)
 
     # Stop old strategy
     old = request.app["strategy"]
@@ -336,14 +376,14 @@ async def switch_strategy_handler(request: web.Request) -> web.Response:
     # Common equity config kwargs
     equity_kwargs = dict(
         security_id=security_id, exchange_segment=segment,
-        product_type="INTRADAY", quantity=quantity, paper_trading=PAPER_TRADING,
+        product_type="INTRADAY", quantity=quantity, paper_trading=paper,
     )
 
     if strategy_name == "scalper":
         cfg = OptionsScalperConfig(
             security_id=security_id, exchange_segment="IDX_I",
             product_type="MARGIN", quantity=quantity, num_lots=num_lots,
-            poll_interval=10.0, paper_trading=PAPER_TRADING,
+            poll_interval=10.0, paper_trading=paper,
         )
         new_strategy = OptionsScalperStrategy(dhan, risk, cfg)
 
@@ -375,7 +415,7 @@ async def switch_strategy_handler(request: web.Request) -> web.Response:
         cfg = StraddleSellerConfig(
             name="Short_Straddle", security_id=security_id,
             exchange_segment="NSE_FNO", product_type="MARGIN",
-            quantity=quantity, lot_size=quantity, paper_trading=PAPER_TRADING,
+            quantity=quantity, lot_size=quantity, paper_trading=paper,
         )
         new_strategy = StraddleSellerStrategy(dhan, risk, cfg)
 
@@ -741,8 +781,9 @@ async def main():
             client        = dhan,
             risk_manager  = risk,
             paper_trading = PAPER_TRADING,
-            capital_pct   = 0.35,    # 35% each (70% total split across two engines)
+            capital_pct   = 0.35,
             poll_interval = 10.0,
+            paper_balance = PAPER_BALANCE,
         )
         logger.info("🔭 F&O Scanner: NIFTY · BANKNIFTY · SENSEX · FINNIFTY · NIFTYNXT50 · MIDCPNIFTY")
 
@@ -754,10 +795,11 @@ async def main():
             strategy_key  = STRATEGY if STRATEGY not in ("scalper","index_options") else "sma_crossover",
             segments      = ["NSE_EQ"],
             paper_trading = PAPER_TRADING,
-            capital_pct   = 0.35,          # 35% per position, no hard cap
+            capital_pct   = 0.35,
             hedge_fno     = False,
-            max_positions = 999,           # effectively unlimited — capital gates it
+            max_positions = 999,
             poll_interval = 30.0,
+            paper_balance = PAPER_BALANCE,
         )
         logger.info("📊 Equity Scanner: top 15 NSE movers · SMA crossover")
 
@@ -770,6 +812,7 @@ async def main():
         app["client"]         = dhan
         app["auth_manager"]   = _auth_manager
         app["start_time"]     = time.time()
+        app["paper_trading"]  = PAPER_TRADING   # mutable; updated by /api/mode
         app["watchlist"]      = watchlist
         app["fno_scanner"]    = fno_scanner
         app["equity_scanner"] = equity_scanner

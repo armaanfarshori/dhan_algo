@@ -1,29 +1,61 @@
-import { useState } from 'react'
-import { T, INR } from '../../tokens'
+import { T } from '../../tokens'
 
 const ACTION_COLOR = { BUY: T.green, SELL: T.red, EXIT: T.amber }
 
-export default function WatchlistPanel({ watchlist, scanner }) {
-  const [refreshing, setRefreshing] = useState(false)
-  const [msg, setMsg] = useState(null)
+function SmaGauge({ sid, stockSignals }) {
+  const s = stockSignals?.[sid]
+  if (!s) return <span style={{ fontFamily: T.mono, fontSize: 8, color: T.ink3 }}>—</span>
 
-  const wl = watchlist?.data
-  const sc = scanner?.data
-  const stocks = wl?.stocks ?? []
-
-  async function refresh() {
-    setRefreshing(true); setMsg(null)
-    try {
-      const r = await fetch('/api/watchlist/refresh', { method: 'POST', body: '{}', headers: { 'Content-Type': 'application/json' } })
-      const d = await r.json()
-      setMsg(d.ok ? `Refreshed — ${d.count} stocks` : d.error)
-    } catch (e) { setMsg(String(e)) }
-    finally { setRefreshing(false) }
+  if (!s.warmed_up) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+        <div style={{ flex: 1, height: 3, background: T.line, borderRadius: 2, overflow: 'hidden' }}>
+          <div style={{ height: '100%', width: '30%', background: T.ink3, borderRadius: 2, animation: 'pulse 1.5s ease-in-out infinite' }} />
+        </div>
+        <span style={{ fontFamily: T.mono, fontSize: 8, color: T.ink3, whiteSpace: 'nowrap' }}>WARM</span>
+      </div>
+    )
   }
+
+  const gap     = s.gap_pct || 0
+  const isBull  = gap > 0
+  const color   = s.in_position ? T.cyan : isBull ? T.green : T.red
+  // Scale: ±1% = full bar
+  const barPct  = Math.min(Math.abs(gap) / 0.5 * 100, 100)
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+      {/* Bearish side */}
+      <div style={{ width: 36, display: 'flex', justifyContent: 'flex-end' }}>
+        {!isBull && (
+          <div style={{ height: 4, width: `${barPct}%`, background: T.red, borderRadius: '2px 0 0 2px', transition: 'width .4s' }} />
+        )}
+      </div>
+      {/* Centre line */}
+      <div style={{ width: 1, height: 10, background: T.line2, flexShrink: 0 }} />
+      {/* Bullish side */}
+      <div style={{ width: 36 }}>
+        {isBull && (
+          <div style={{ height: 4, width: `${barPct}%`, background: T.green, borderRadius: '0 2px 2px 0', transition: 'width .4s' }} />
+        )}
+      </div>
+      {s.signal && (
+        <span style={{ fontFamily: T.mono, fontSize: 8, color, fontWeight: 600, letterSpacing: '0.1em', width: 28 }}>
+          {s.signal}
+        </span>
+      )}
+    </div>
+  )
+}
+
+export default function WatchlistPanel({ watchlist, scanner, equityScanner }) {
+  const wl          = watchlist?.data
+  const stocks      = wl?.stocks ?? []
+  const stockSignals = equityScanner?.data?.stock_signals || {}
 
   return (
     <div style={{ background: T.bg1, border: `1px solid ${T.line}`, marginBottom: 14 }}>
-      {/* Header */}
+      {/* Header — no refresh button */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 10,
         padding: '10px 14px', borderBottom: `1px solid ${T.line}`,
@@ -34,49 +66,19 @@ export default function WatchlistPanel({ watchlist, scanner }) {
         <span style={{ color: T.ink2, fontSize: 9 }}>{stocks.length} stocks</span>
         {wl?.last_refresh && (
           <span style={{ color: T.ink3, fontSize: 9 }}>
-            · refreshed {new Date(wl.last_refresh).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })}
+            · {new Date(wl.last_refresh).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })}
           </span>
         )}
         <div style={{ flex: 1 }} />
-        {msg && <span style={{ color: T.amber, fontSize: 9 }}>{msg}</span>}
-        <button onClick={refresh} disabled={refreshing} style={{
-          background: 'transparent', border: `1px solid ${T.line2}`, color: T.ink2,
-          fontFamily: T.mono, fontSize: 9, padding: '3px 10px', cursor: 'pointer',
-          letterSpacing: '0.14em', textTransform: 'uppercase',
-        }}>
-          {refreshing ? 'REFRESHING…' : '⟳ REFRESH'}
-        </button>
-        {sc?.open_positions > 0 && (
-          <span style={{ fontFamily: T.mono, fontSize: 9, color: T.cyan }}>
-            {sc.open_positions} POSITIONS OPEN
-          </span>
-        )}
+        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>AUTO-REFRESH 30 MIN</span>
       </div>
-
-      {/* Scanner config strip */}
-      {sc?.ok && (
-        <div style={{
-          display: 'flex', gap: 20, padding: '8px 14px', borderBottom: `1px solid ${T.line}`,
-          fontFamily: T.mono, fontSize: 9, color: T.ink2, textTransform: 'uppercase', letterSpacing: '0.14em',
-          background: T.bg2, flexWrap: 'wrap',
-        }}>
-          <span>STRATEGY <b style={{ color: T.cyan }}>{sc.strategy_key?.toUpperCase()}</b></span>
-          <span>SEGMENTS <b style={{ color: T.ink0 }}>{(sc.segments || []).join(' + ')}</b></span>
-          <span>CAPITAL <b style={{ color: T.green }}>{Math.round((sc.capital_pct || 0.7) * 100)}%</b></span>
-          <span>MAX POS <b style={{ color: T.ink0 }}>{sc.open_positions ?? 0} / {sc.max_positions ?? 5}</b></span>
-          <span>HEDGE <b style={{ color: sc.hedge_fno ? T.green : T.ink3 }}>{sc.hedge_fno ? 'ON' : 'OFF'}</b></span>
-          {sc.available_balance > 0 && (
-            <span>BALANCE <b style={{ color: T.green }}>{INR(sc.available_balance)}</b></span>
-          )}
-        </div>
-      )}
 
       {/* Stocks table */}
       <div style={{ overflowX: 'auto' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
             <tr>
-              {['SYMBOL', 'NAME', 'LTP', 'CHG %', 'VOLUME', 'SOURCE', 'SIGNAL'].map(h => (
+              {['SYMBOL', 'NAME', 'LTP', 'CHG %', 'VOLUME', 'SMA SIGNAL', 'ACTION'].map(h => (
                 <th key={h} style={{
                   textAlign: 'left', fontFamily: T.mono, fontSize: 9, color: T.ink2,
                   padding: '6px 12px', borderBottom: `1px solid ${T.line}`,
@@ -94,25 +96,30 @@ export default function WatchlistPanel({ watchlist, scanner }) {
             ) : stocks.map((s, i) => {
               const isPos = s.change_pct > 0
               const sig   = s.signal
+              const ss    = stockSignals[s.security_id]
               return (
                 <tr key={i} style={{
                   borderBottom: `1px solid ${T.line}`,
-                  background: sig === 'BUY' ? 'oklch(0.18 0.08 145 / 0.1)' :
-                              sig === 'SELL' ? 'oklch(0.18 0.08 25 / 0.1)' : 'transparent',
+                  background: ss?.in_position ? 'oklch(0.18 0.08 200 / 0.1)' :
+                              sig === 'BUY'   ? 'oklch(0.18 0.08 145 / 0.06)' :
+                              sig === 'SELL'  ? 'oklch(0.18 0.08 25  / 0.06)' : 'transparent',
                 }}>
-                  <td style={{ padding: '8px 12px', fontFamily: T.mono, fontSize: 11, color: T.cyan, fontWeight: 600 }}>{s.symbol}</td>
-                  <td style={{ padding: '8px 12px', fontFamily: T.mono, fontSize: 10, color: T.ink2, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</td>
-                  <td style={{ padding: '8px 12px', fontFamily: T.dot, fontSize: 18, color: T.ink0 }}>{s.ltp ? `₹${s.ltp.toLocaleString('en-IN')}` : '—'}</td>
-                  <td style={{ padding: '8px 12px', fontFamily: T.mono, fontSize: 11, color: isPos ? T.green : T.red, fontWeight: 600 }}>
+                  <td style={{ padding: '7px 12px', fontFamily: T.mono, fontSize: 11, color: ss?.in_position ? T.cyan : T.cyan, fontWeight: 600 }}>
+                    {ss?.in_position && <span style={{ color: T.green, marginRight: 4 }}>●</span>}
+                    {s.symbol}
+                  </td>
+                  <td style={{ padding: '7px 12px', fontFamily: T.mono, fontSize: 10, color: T.ink2, maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</td>
+                  <td style={{ padding: '7px 12px', fontFamily: 'VT323', fontSize: 18, color: T.ink0 }}>{s.ltp ? `₹${s.ltp.toLocaleString('en-IN')}` : '—'}</td>
+                  <td style={{ padding: '7px 12px', fontFamily: T.mono, fontSize: 11, color: isPos ? T.green : T.red, fontWeight: 600 }}>
                     {isPos ? '+' : ''}{s.change_pct.toFixed(2)}%
                   </td>
-                  <td style={{ padding: '8px 12px', fontFamily: T.mono, fontSize: 10, color: T.ink2 }}>
+                  <td style={{ padding: '7px 12px', fontFamily: T.mono, fontSize: 10, color: T.ink2 }}>
                     {s.volume > 0 ? (s.volume / 1e6).toFixed(2) + 'M' : '—'}
                   </td>
-                  <td style={{ padding: '8px 12px', fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.12em', textTransform: 'uppercase' }}>
-                    {s.source.replace('_', ' ')}
+                  <td style={{ padding: '7px 12px', minWidth: 140 }}>
+                    <SmaGauge sid={s.security_id} stockSignals={stockSignals} />
                   </td>
-                  <td style={{ padding: '8px 12px' }}>
+                  <td style={{ padding: '7px 12px' }}>
                     {sig ? (
                       <span style={{
                         fontFamily: T.mono, fontSize: 9, fontWeight: 600,
