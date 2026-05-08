@@ -130,7 +130,7 @@ class WatchlistManager:
 
     # ── NSE fetch ─────────────────────────────────────────────────────────────
 
-    async def refresh(self, top_n: int = 15):
+    async def refresh(self, top_n: int = 30):
         logger.info("Refreshing watchlist from NSE…")
         CACHE_DIR.mkdir(exist_ok=True)
 
@@ -207,13 +207,23 @@ class WatchlistManager:
     # ── Fallback: guaranteed liquid names ─────────────────────────────────────
 
     def _fallback_stocks(self) -> List[dict]:
-        """Use if NSE API is unavailable. These are consistently high-volume."""
+        """
+        NIFTY 50 liquid F&O stocks — used when NSE API unavailable.
+        These have guaranteed liquidity, active F&O, and cleaner breakouts
+        than dynamic top-movers which can include illiquid penny stocks.
+        """
         names = [
+            # Large caps — always liquid
             "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK", "INFY",
             "HINDUNILVR", "KOTAKBANK", "LT", "AXISBANK", "BAJFINANCE",
             "SBIN", "MARUTI", "TITAN", "SUNPHARMA", "WIPRO",
+            # Mid-large — active F&O
+            "ADANIENT", "ADANIPORTS", "ASIANPAINT", "BAJAJFINSV", "BHARTIARTL",
+            "BPCL", "COALINDIA", "DIVISLAB", "DRREDDY", "EICHERMOT",
+            "GRASIM", "HCLTECH", "HEROMOTOCO", "HINDALCO", "INDUSINDBK",
+            "ITC", "JSWSTEEL", "M&M", "NESTLEIND", "NTPC",
         ]
-        return [{"symbol": s, "source": "fallback"} for s in names]
+        return [{"symbol": s, "source": "nifty50_static"} for s in names]
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -240,16 +250,36 @@ class WatchlistManager:
     # ── Background refresh task ───────────────────────────────────────────────
 
     async def run(self):
-        """Refresh every 30 minutes on trading days, starting at 09:05 IST."""
-        logger.info("Watchlist manager started — auto-refresh every 30 min")
+        """
+        Pre-market refresh only (08:30–09:10 IST), then LOCK for the session.
+        The list is stable all day so strategies warm up on consistent data.
+        Next refresh happens the following morning — never mid-session.
+        """
+        logger.info("Watchlist manager started — pre-market lock strategy")
+        refreshed_today = False
+
         while True:
-            await asyncio.sleep(1800)  # 30 minutes
+            await asyncio.sleep(60)
             now = datetime.now(IST)
             wd  = now.weekday()
             from datetime import time as dtime
-            if wd < 6:  # Mon–Sat (MCX trades on Saturday)
-                logger.info("Watchlist auto-refresh (30 min interval)…")
+
+            if wd >= 5:   # Weekend — skip
+                refreshed_today = False
+                continue
+
+            t = now.time()
+
+            # Reset flag after market close so next morning can refresh
+            if t >= dtime(15, 30):
+                refreshed_today = False
+
+            # Pre-market window: refresh once between 08:30 and 09:10
+            if dtime(8, 30) <= t < dtime(9, 10) and not refreshed_today:
+                logger.info("Pre-market watchlist refresh (will lock at 09:10)…")
                 try:
                     await self.refresh()
+                    refreshed_today = True
+                    logger.info(f"Watchlist locked for session: {[s.symbol for s in self._stocks]}")
                 except Exception as e:
-                    logger.warning(f"Auto-refresh failed: {e}")
+                    logger.warning(f"Pre-market refresh failed: {e}")
