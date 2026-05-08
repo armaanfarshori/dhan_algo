@@ -814,17 +814,19 @@ async def main():
         logger.info("🔭 F&O Scanner: NIFTY · BANKNIFTY · SENSEX · FINNIFTY · NIFTYNXT50 · MIDCPNIFTY")
 
         # 2. Equity Scanner (NSE_EQ top movers) — always runs
+        # Equity: poll every 60s → SMA 20/50 = 20-min/50-min (institutional standard)
+        # Avoids false crosses on 10s noisy REST data
         equity_scanner = MultiStockScanner(
             client        = dhan,
             risk_manager  = risk,
             watchlist     = watchlist,
-            strategy_key  = STRATEGY if STRATEGY not in ("scalper","index_options") else "sma_crossover",
+            strategy_key  = STRATEGY if STRATEGY not in ("scalper","index_options") else "momentum_breakout",
             segments      = ["NSE_EQ"],
             paper_trading = PAPER_TRADING,
             capital_pct   = 0.35,
             hedge_fno     = False,
             max_positions = 999,
-            poll_interval = 10.0,   # 10s → SMA warmup = 21×10s = 3.5 min
+            poll_interval = 60.0,   # 60s candles → cleaner signals, less noise
             paper_balance = PAPER_BALANCE,
         )
         logger.info("📊 Equity Scanner: top 15 NSE movers · SMA crossover")
