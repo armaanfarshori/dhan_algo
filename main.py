@@ -555,16 +555,23 @@ async def scanner_config_handler(request: web.Request) -> web.Response:
             scanner._strategies.clear()   # reset per-stock instances
     if "segments" in body:
         segs = body["segments"]
-        if hasattr(scanner, "active_segments"):
-            # IndexOptionsScanner: map UI segment names to option segments
+        fno_sc = request.app.get("fno_scanner")
+        eq_sc  = request.app.get("equity_scanner")
+
+        # F&O scanner: map NSE_FNO / BSE_FNO → active_segments
+        if fno_sc and hasattr(fno_sc, "active_segments"):
             active = []
             if "NSE_FNO" in segs: active.append("NSE_FNO")
             if "BSE_FNO" in segs: active.append("BSE_FNO")
-            scanner.active_segments = active or ["NSE_FNO"]
-            active_indices = [n for n, s in scanner._indices.items() if s.option_segment in scanner.active_segments]
-            logger.info(f"Scanner segments updated: {scanner.active_segments} → indices: {active_indices}")
-        elif hasattr(scanner, "segments"):
-            scanner.segments = segs
+            fno_sc.active_segments = active or []
+            # Pause entirely if no F&O segments selected
+            fno_sc._paused = len(active) == 0
+            logger.info(f"F&O scanner segments: {active} | paused={fno_sc._paused}")
+
+        # Equity scanner: pause/resume based on NSE_EQ checkbox
+        if eq_sc and hasattr(eq_sc, "_paused"):
+            eq_sc._paused = "NSE_EQ" not in segs
+            logger.info(f"Equity scanner paused={eq_sc._paused}")
     if "capital_pct" in body:
         scanner.capital_pct = float(body["capital_pct"])
     if "max_positions" in body:

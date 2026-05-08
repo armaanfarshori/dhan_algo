@@ -103,6 +103,7 @@ class MultiStockScanner:
         self.hedge_offset   = hedge_offset
 
         self._running         = False
+        self._paused          = False          # toggled by checkbox
         self._strategies:     Dict[str, BaseStrategy] = {}
         self._positions:      Dict[str, float]         = {}
         self._current_prices: Dict[str, float]         = {}
@@ -153,6 +154,8 @@ class MultiStockScanner:
     # ── Core tick ─────────────────────────────────────────────────────────────
 
     async def _tick(self):
+        if self._paused:
+            return
         if self._past_squareoff():
             await self._squareoff_all()
             return
@@ -176,6 +179,17 @@ class MultiStockScanner:
         stocks = self.watchlist.get()
         if not stocks:
             return
+
+        # Fix 4: include open-position stocks even if they left the watchlist
+        watchlist_sids = {s.security_id for s in stocks}
+        for key in list(self._positions.keys()):
+            seg, sid = key.split(":")
+            if sid not in watchlist_sids:
+                from core.watchlist import WatchlistStock
+                # Re-add as minimal entry so it gets fetched and can EXIT
+                stocks = list(stocks) + [WatchlistStock(
+                    symbol=sid, security_id=sid, segment=seg,
+                )]
 
         # Fetch quotes for all segments simultaneously
         all_quotes: Dict[str, Dict] = {}   # segment → {sid: tick}
@@ -398,11 +412,13 @@ class MultiStockScanner:
 
     async def _exit_pos(self, key: str, symbol: str, price: float, reason: str, strategy: BaseStrategy):
         entry_price = self._positions.get(key, 0.0)
+        # Capture qty and direction BEFORE exit_position() resets strategy.position to 0
+        pre_pos = strategy.position if strategy else 0
+        qty     = abs(pre_pos) if pre_pos else (strategy.config.quantity if strategy else 1)
+        pnl     = round((price - entry_price) * pre_pos, 2) if pre_pos else 0.0
         await strategy.exit_position(price, reason)
         self._positions.pop(key, None)
         self.orders_placed += 1
-        qty = strategy.config.quantity if strategy else 1
-        pnl = round((price - entry_price) * strategy.position if strategy else 0, 2)
         self.signals.append(Signal(action="EXIT", price=price,
                                    reason=f"[SCAN/{symbol}] {reason}"))
         mode = "PAPER" if self.paper_trading else "LIVE"

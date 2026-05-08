@@ -148,42 +148,34 @@ function SignalFeed({ signals }) {
   )
 }
 
-// ── Equity curve (realised P&L only) ─────────────────────────────────────────
-function EquityPanel({ signals }) {
-  const raw = signals?.data ?? []
+// ── Realised P&L curve (from trade log) ──────────────────────────────────────
+function EquityPanel({ tradelog }) {
+  const trades = tradelog?.data?.trades ?? []
 
-  // Build realised P&L: match BUY→EXIT pairs chronologically
-  // Signals are newest-first from the API; reverse to get oldest-first
-  const ordered = [...raw].reverse()
+  // Build cumulative P&L from EXIT records in the trade log (accurate source)
+  const exits = trades
+    .filter(t => t.type === 'EXIT' && t.pnl != null)
+    .sort((a, b) => a.ts.localeCompare(b.ts))
+
   let equity = 0
   const pts = [{ pnl: 0 }]
-  const openTrades = {} // key=action_index → {price, qty}
-  let lastBuyPrice = 0
-  let lastBuyQty = 75
-
-  ordered.forEach(s => {
-    if (s.action === 'BUY') {
-      lastBuyPrice = s.price || 0
-      // Parse lot size from reason if possible, default 65
-      const match = s.reason?.match(/qty=(\d+)/) || s.reason?.match(/(\d+) qty/)
-      lastBuyQty = match ? parseInt(match[1]) : 65
-    } else if (s.action === 'EXIT' && lastBuyPrice > 0) {
-      const pnl = ((s.price || 0) - lastBuyPrice) * lastBuyQty
-      equity += Math.round(pnl)
-      lastBuyPrice = 0
-    }
-    pts.push({ pnl: equity })
+  exits.forEach(t => {
+    equity += t.pnl || 0
+    pts.push({ pnl: Math.round(equity) })
   })
 
-  const isUp = equity >= 0
-  const hasData = pts.length > 1 && pts.some(p => p.pnl !== 0)
+  const isUp   = equity >= 0
+  const hasData = exits.length > 0
+  const summary = tradelog?.data?.summary
 
   return (
     <Panel>
       <PanelH>
         <LiveTag /><span style={{ color: T.ink0 }}>REALISED P&amp;L CURVE</span>
         <span style={{ marginLeft: 'auto', fontFamily: T.dot, fontSize: 20, color: isUp ? T.green : T.red }}>
-          {hasData ? (isUp ? '+' : '') + INR0(pts[pts.length - 1]?.pnl || 0) : 'AWAITING EXIT'}
+          {hasData
+          ? (isUp ? '+' : '') + INR0(pts[pts.length - 1]?.pnl || 0)
+          : summary ? `${summary.total_entries} entries · ${summary.total_exits} exits` : 'AWAITING EXIT'}
         </span>
       </PanelH>
       <div style={{ padding: '12px 16px 16px' }}>
@@ -199,8 +191,8 @@ function EquityPanel({ signals }) {
           </ResponsiveContainer>
         ) : (
           <div style={{ height: 80, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: T.mono, fontSize: 10, color: T.ink3, letterSpacing: '0.14em', flexDirection: 'column', gap: 8 }}>
-            <span>{raw.length > 0 ? `${raw.filter(s=>s.action==='BUY').length} POSITION${raw.filter(s=>s.action==='BUY').length!==1?'S':''} OPEN` : 'NO SIGNALS YET'}</span>
-            <span style={{ fontSize: 8, color: T.ink3 }}>P&L REALISES WHEN OCO TARGET OR STOP IS HIT</span>
+            <span>{summary ? `${summary.total_entries} TRADES · ${summary.open_trades} OPEN` : 'NO TRADES YET'}</span>
+            <span style={{ fontSize: 8 }}>P&L UPDATES ON EVERY EXIT — SOURCE: .logs/trades.jsonl</span>
           </div>
         )}
       </div>
@@ -284,7 +276,7 @@ function Tabs({ active, onChange }) {
 
 // ── Cockpit layout ────────────────────────────────────────────────────────────
 function CockpitTab({ data }) {
-  const { status, risk, signals, funds, positions, paperPositions, scalper, payoff, config, watchlist, scanner, fnoScanner, equityScanner } = data
+  const { status, risk, signals, funds, positions, paperPositions, scalper, payoff, config, watchlist, scanner, fnoScanner, equityScanner, tradelog } = data
 
   return (
     <>
@@ -314,7 +306,7 @@ function CockpitTab({ data }) {
           </div>
 
           <PayoffChart payoff={payoff} />
-          <EquityPanel signals={signals} />
+          <EquityPanel tradelog={tradelog} />
           <div style={{ marginBottom: 14 }} />
 
           {/* Pipelines */}
