@@ -20,6 +20,7 @@ export function useDashboardData() {
   const config       = usePoller('/api/config',          10000)
   const watchlist    = usePoller('/api/watchlist',       15000)
   const market       = usePoller('/api/market',          30000)
+  const tradelog     = usePoller('/api/trades?limit=500', 5000)
 
-  return { status, risk, signals, funds, positions, paperPositions, scalper, payoff, config, watchlist, scanner, fnoScanner, equityScanner, market }
+  return { status, risk, signals, funds, positions, paperPositions, scalper, payoff, config, watchlist, scanner, fnoScanner, equityScanner, market, tradelog }
 }
