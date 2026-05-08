@@ -481,7 +481,35 @@ class MultiStockScanner:
                 {"key": k, "entry_price": v} for k, v in self._positions.items()
             ],
             "stock_signals": self._get_stock_signals(),
+            "warmup":        self._get_warmup_status(),
         }
+
+    def _get_warmup_status(self) -> dict:
+        """Returns warmup progress for all strategies."""
+        result = {}
+        for key, strategy in self._strategies.items():
+            sid = key.split(":")[-1]
+            # MomentumBreakout: needs lookback highs/lows
+            if hasattr(strategy, "_highs"):
+                needed = getattr(strategy, "mom_cfg", None)
+                lookback = needed.lookback if needed else 20
+                current  = len(strategy._highs)
+                result[sid] = {
+                    "current": current, "required": lookback,
+                    "ready":   current >= lookback,
+                    "secs_left": max(0, (lookback - current)) * int(self.poll_interval),
+                }
+            # SMA crossover: slow period
+            elif hasattr(strategy, "_slow_prices"):
+                cfg      = getattr(strategy, "sma_config", None)
+                required = cfg.slow_period if cfg else 21
+                current  = len(strategy._slow_prices)
+                result[sid] = {
+                    "current": current, "required": required,
+                    "ready":   current >= required,
+                    "secs_left": max(0, (required - current)) * int(self.poll_interval),
+                }
+        return result
 
     def _get_stock_signals(self) -> dict:
         """Returns per-stock SMA/RSI state for the watchlist gauge display."""

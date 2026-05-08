@@ -34,3 +34,7 @@ Thumbs.db
 
 # Claude Code
 .claude/settings.local.json
+
+# Graphify
+graphify-out/
+
