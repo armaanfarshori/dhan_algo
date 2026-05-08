@@ -276,7 +276,7 @@ function Tabs({ active, onChange }) {
 
 // ── Cockpit layout ────────────────────────────────────────────────────────────
 function CockpitTab({ data }) {
-  const { status, risk, signals, funds, positions, paperPositions, scalper, payoff, config, watchlist, scanner, fnoScanner, equityScanner, tradelog } = data
+  const { status, risk, signals, funds, positions, paperPositions, scalper, payoff, config, watchlist, scanner, fnoScanner, equityScanner, tradelog, logs } = data
 
   return (
     <>
@@ -296,7 +296,7 @@ function CockpitTab({ data }) {
             <VelocityPanel status={status} />
           </div>
 
-          <ActivePosition scalper={scalper} status={status} />
+          <ActivePosition fnoScanner={fnoScanner} paperPositions={paperPositions} />
           <div style={{ marginBottom: 14 }} />
 
           {/* Trading panels immediately after Active Position */}
@@ -322,8 +322,14 @@ function CockpitTab({ data }) {
         {/* ── RIGHT: sticky sidebar, no internal scrollbar ── */}
         <div style={{ position: 'sticky', top: 16 }}>
           <Panel>
-            <StrategySidebar config={config} scanner={fnoScanner} equityScanner={equityScanner} onSwitch={() => {}} />
-
+            <StrategySidebar
+            config={config}
+            scanner={fnoScanner}
+            fnoScanner={fnoScanner}
+            equityScanner={equityScanner}
+            logs={logs}
+            onSwitch={() => {}}
+          />
           </Panel>
         </div>
 
