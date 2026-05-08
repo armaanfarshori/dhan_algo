@@ -29,6 +29,8 @@ load_dotenv()
 from core.auth import DhanAuthManager
 from core.trade_log import get_trade_logger
 from core.live_feed import LiveFeed
+import core.log_buffer as log_buffer
+log_buffer.install()   # capture all log messages into rolling buffer
 from core.client import DhanClient
 from core.risk import RiskManager, RiskConfig
 from core.backtest import Backtester
@@ -592,6 +594,11 @@ async def scanner_config_handler(request: web.Request) -> web.Response:
     return web.json_response(resp)
 
 
+async def logs_handler(_request: web.Request) -> web.Response:
+    limit = int(_request.rel_url.query.get("limit", 50))
+    return web.json_response({"ok": True, "logs": log_buffer.get_logs(limit)})
+
+
 async def feed_handler(_request: web.Request) -> web.Response:
     feed: LiveFeed = _request.app.get("live_feed")
     if not feed:
@@ -903,6 +910,7 @@ async def main():
         app.router.add_get("/api/instruments/price",  instrument_price_handler)
         app.router.add_post("/api/strategy/switch",   switch_strategy_handler)
         app.router.add_post("/api/killswitch",        killswitch_handler)
+        app.router.add_get("/api/logs",               logs_handler)
         app.router.add_get("/api/feed",               feed_handler)
         app.router.add_get("/api/trades",             trades_handler)
         app.router.add_post("/api/backtest/run",      backtest_run_handler)
