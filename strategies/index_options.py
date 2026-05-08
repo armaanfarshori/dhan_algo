@@ -99,6 +99,7 @@ class IndexOptionsScanner:
         self,
         client,
         risk_manager,
+        live_feed=None,          # core.live_feed.LiveFeed — WebSocket data source
         paper_trading:  bool  = True,
         capital_pct:    float = 0.70,
         target_buffer:  float = 5.0,
@@ -120,6 +121,7 @@ class IndexOptionsScanner:
         self.max_premium   = max_premium
         self.rsi_period    = rsi_period
 
+        self._live_feed    = live_feed
         self._running      = False
         self._master: Optional[InstrumentMaster] = None
         self._charges      = BreakevenCalculator()
@@ -204,15 +206,29 @@ class IndexOptionsScanner:
             except Exception:
                 pass
 
-        # Fetch all underlying prices in ONE call
+        # Fetch underlying prices — WebSocket if connected, REST as fallback
         self.current_step = 1  # FETCH
-        all_ids = [int(s.underlying_id) for s in self._indices.values()]
-        try:
-            data    = await self.client.get_ohlc({"IDX_I": all_ids})
-            seg     = data.get("data", {}).get("IDX_I", {})
-        except Exception as e:
-            logger.warning(f"IDX_I fetch error: {e}")
-            return
+        use_ws = self._live_feed and self._live_feed.is_connected()
+
+        if use_ws:
+            # Build seg dict from live feed (no API call needed)
+            seg = {
+                state.underlying_id: {"last_price": self._live_feed.get_ltp(state.underlying_id)}
+                for state in self._indices.values()
+                if self._live_feed.get_ltp(state.underlying_id) > 0
+            }
+            if not seg:
+                use_ws = False  # feed not populated yet, fall back
+
+        if not use_ws:
+            all_ids = [int(s.underlying_id) for s in self._indices.values()]
+            try:
+                data = await self.client.get_ohlc({"IDX_I": all_ids})
+                seg  = data.get("data", {}).get("IDX_I", {})
+            except Exception as e:
+                logger.warning(f"IDX_I fetch error: {e}")
+                return
+
         self.current_step = 2  # SIGNAL
 
         # Process only indices whose option_segment is in active_segments
