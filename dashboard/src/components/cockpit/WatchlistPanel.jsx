@@ -62,15 +62,15 @@ export default function WatchlistPanel({ watchlist, scanner, equityScanner }) {
         fontFamily: T.mono, fontSize: 10, color: T.ink2, textTransform: 'uppercase', letterSpacing: '0.16em',
       }}>
         <span style={{ background: T.greenD, color: T.green, padding: '2px 6px', fontSize: 9 }}>NSE</span>
-        <span style={{ color: T.ink0 }}>TOP MOVERS · AUTO WATCHLIST</span>
+        <span style={{ color: T.ink0 }}>PRE-MARKET LOCK · SESSION LIST</span>
         <span style={{ color: T.ink2, fontSize: 9 }}>{stocks.length} stocks</span>
         {wl?.last_refresh && (
           <span style={{ color: T.ink3, fontSize: 9 }}>
-            · {new Date(wl.last_refresh).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })}
+            · locked {new Date(wl.last_refresh).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })}
           </span>
         )}
         <div style={{ flex: 1 }} />
-        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>AUTO-REFRESH 30 MIN</span>
+        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>REFRESHES 08:30 IST DAILY</span>
       </div>
 
       {/* Stocks table */}
