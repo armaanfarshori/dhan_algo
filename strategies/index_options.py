@@ -339,22 +339,25 @@ class IndexOptionsScanner:
         if cost_per_lot <= 0:
             self.current_step = 1; return
 
-        # Budget: fraction of available paper/live balance
-        budget = self._balance * self.capital_pct
-
-        # Lots from budget
-        num_lots_budget = max(1, int(budget / cost_per_lot))
-
-        # Lots from risk limit (max_loss = premium paid for options buyer)
         risk_limit = self.risk.config.max_loss_per_trade
-        num_lots_risk = max(1, int(risk_limit / cost_per_lot))
+        budget     = self._balance * self.capital_pct
 
-        # Use the conservative of the two
-        num_lots = min(num_lots_budget, num_lots_risk)
-        qty = num_lots * contract.lot_size
+        # Skip silently if even 1 lot exceeds the risk limit — avoids
+        # NIFTYNXT50/FINNIFTY firing the risk-block warning every 10s
+        if cost_per_lot > risk_limit:
+            logger.debug(
+                f"{state.name}: 1 lot = ₹{cost_per_lot:,.0f} > risk limit ₹{risk_limit:,.0f} — "
+                f"skipping (increase PAPER_BALANCE or risk limit to trade this index)"
+            )
+            self.current_step = 1; return
 
-        total_cost = num_lots * cost_per_lot
-        logger.info(f"{state.name}: {num_lots} lot(s) × ₹{cost_per_lot:.0f}/lot = ₹{total_cost:.0f} | budget ₹{budget:.0f} | risk_limit ₹{risk_limit:.0f}")
+        num_lots_budget = max(1, int(budget / cost_per_lot))
+        num_lots_risk   = max(1, int(risk_limit / cost_per_lot))
+        num_lots        = min(num_lots_budget, num_lots_risk)
+        qty             = num_lots * contract.lot_size
+        total_cost      = num_lots * cost_per_lot
+
+        logger.info(f"{state.name}: {num_lots} lot(s) × ₹{cost_per_lot:.0f}/lot = ₹{total_cost:.0f} | budget ₹{budget:.0f}")
 
         ok, msg = self.risk.check_order(qty, premium, "BUY")
         if not ok:
