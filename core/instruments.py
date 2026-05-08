@@ -51,11 +51,19 @@ class InstrumentMaster:
 
     def __init__(self, contracts: List[OptionContract]):
         self._contracts = contracts
-        # Index: (expiry, strike, option_type) → OptionContract
-        self._idx: Dict[tuple, OptionContract] = {
-            (c.expiry, c.strike, c.option_type): c
-            for c in contracts
-        }
+
+        # Index keyed by (prefix, expiry, strike, option_type) to avoid
+        # collisions between indices sharing the same strike (e.g. BANKNIFTY
+        # and NIFTYNXT50 both had a 56000 CE — flat key caused wrong lookup).
+        self._idx: Dict[tuple, OptionContract] = {}
+        for c in contracts:
+            prefix = next(
+                (p for p in self._VALID_PREFIXES if c.trading_symbol.startswith(p)),
+                ""
+            )
+            key = (prefix, c.expiry, c.strike, c.option_type)
+            self._idx[key] = c
+
         # Sorted unique expiries
         self._expiries: List[str] = sorted({c.expiry for c in contracts})
 
@@ -195,27 +203,24 @@ class InstrumentMaster:
         underlying_price: float,
         expiry: str,
         strike_step: int = 50,
+        prefix: str = "",
     ) -> Dict[str, OptionContract]:
         """
-        Find ATM call and put security IDs for a given underlying price and expiry.
-
-        Returns {"CE": OptionContract, "PE": OptionContract}
-        or {} if not found.
-
-        Tries exact ATM first, then searches ±N strikes if ATM is missing from master.
+        Find ATM CE + PE. `prefix` scopes the lookup to a single index
+        (e.g. "NIFTY-") preventing cross-index strike collisions.
         """
         atm_strike = round(underlying_price / strike_step) * strike_step
 
         for offset in range(0, 5):
             for direction in ([0] if offset == 0 else [offset, -offset]):
                 strike = atm_strike + direction * strike_step
-                ce = self._idx.get((expiry, float(strike), "CE"))
-                pe = self._idx.get((expiry, float(strike), "PE"))
+                ce = self._idx.get((prefix, expiry, float(strike), "CE"))
+                pe = self._idx.get((prefix, expiry, float(strike), "PE"))
                 if ce and pe:
                     logger.info(f"ATM strike {strike} | CE {ce.security_id} | PE {pe.security_id} | expiry {expiry}")
                     return {"CE": ce, "PE": pe}
 
-        logger.warning(f"No ATM contracts found for NIFTY @ {underlying_price:.0f} expiry {expiry}")
+        logger.warning(f"No ATM contracts found @ {underlying_price:.0f} expiry {expiry} prefix={prefix!r}")
         return {}
 
     def get_contract(self, security_id: str) -> Optional[OptionContract]:
@@ -230,16 +235,17 @@ class InstrumentMaster:
         underlying_price: float,
         expiry: str,
     ) -> Dict[str, "OptionContract"]:
-        """
-        Find ATM CE + PE for a named index (NIFTY, BANKNIFTY, SENSEX, etc.).
-        Uses INDEX_CONFIGS to determine the correct strike_step.
-        Returns {"CE": contract, "PE": contract} or {}.
-        """
+        """Find ATM CE + PE for a named index using its specific prefix to avoid
+        cross-index strike collisions (e.g. BANKNIFTY vs NIFTYNXT50 at 56000)."""
         cfg = self.INDEX_CONFIGS.get(index_name.upper())
         if not cfg:
             logger.warning(f"Unknown index: {index_name}")
             return {}
-        return self.find_atm(underlying_price, expiry, cfg["strike_step"])
+        return self.find_atm(
+            underlying_price, expiry,
+            cfg["strike_step"],
+            prefix=cfg["option_prefix"],
+        )
 
     def index_expiries(self, index_name: str) -> List[str]:
         """Return expiries available for a specific index."""
