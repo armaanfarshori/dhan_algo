@@ -28,6 +28,7 @@ load_dotenv()
 
 from core.auth import DhanAuthManager
 from core.trade_log import get_trade_logger
+from core.live_feed import LiveFeed
 from core.client import DhanClient
 from core.risk import RiskManager, RiskConfig
 from core.backtest import Backtester
@@ -591,6 +592,20 @@ async def scanner_config_handler(request: web.Request) -> web.Response:
     return web.json_response(resp)
 
 
+async def feed_handler(_request: web.Request) -> web.Response:
+    feed: LiveFeed = _request.app.get("live_feed")
+    if not feed:
+        return web.json_response({"ok": False, "error": "Live feed not running"})
+    sids   = feed.all_subscribed_sids()
+    sample = {sid: feed.get_ltp(sid) for sid in sids[:6]}
+    return web.json_response({
+        "ok":          True,
+        "connected":   feed.is_connected(),
+        "subscribed":  len(sids),
+        "sample_ltps": sample,
+    })
+
+
 async def trades_handler(request: web.Request) -> web.Response:
     tl      = get_trade_logger()
     limit   = int(request.rel_url.query.get("limit", 200))
@@ -801,11 +816,25 @@ async def main():
             )
             strategy = SMACrossoverStrategy(dhan, risk, cfg)
 
+        # ── Live WebSocket feed (replaces REST polling for all securities) ───
+        live_feed = LiveFeed(CLIENT_ID, access_token)
+
+        # Subscribe all index underlyings (F&O scanner)
+        live_feed.subscribe({"IDX_I": [13, 25, 51, 27, 38, 93]})
+
+        # Subscribe top NSE_EQ stocks from watchlist
+        eq_sids = [int(s.security_id) for s in watchlist.get() if s.security_id.isdigit()]
+        if eq_sids:
+            live_feed.subscribe({"NSE_EQ": eq_sids})
+
+        logger.info(f"🔌 Live feed subscribed: {len(live_feed.all_subscribed_sids())} instruments via WebSocket")
+
         # ── Both scanners run in parallel ────────────────────────────────────
         # 1. Index Options Scanner (NSE_FNO + BSE_FNO) — always runs
         fno_scanner = IndexOptionsScanner(
             client        = dhan,
             risk_manager  = risk,
+            live_feed     = live_feed,      # WebSocket ticks; REST fallback if not connected
             paper_trading = PAPER_TRADING,
             capital_pct   = 0.35,
             poll_interval = 10.0,
@@ -845,7 +874,8 @@ async def main():
         app["watchlist"]      = watchlist
         app["fno_scanner"]    = fno_scanner
         app["equity_scanner"] = equity_scanner
-        app["scanner"]        = fno_scanner          # kept for backwards compat
+        app["scanner"]        = fno_scanner
+        app["live_feed"]      = live_feed
         app["runtime_config"] = {
             "strategy":    STRATEGY,
             "segment":     "NSE_FNO" if STRATEGY == "scalper" else "NSE_EQ",
@@ -873,6 +903,7 @@ async def main():
         app.router.add_get("/api/instruments/price",  instrument_price_handler)
         app.router.add_post("/api/strategy/switch",   switch_strategy_handler)
         app.router.add_post("/api/killswitch",        killswitch_handler)
+        app.router.add_get("/api/feed",               feed_handler)
         app.router.add_get("/api/trades",             trades_handler)
         app.router.add_post("/api/backtest/run",      backtest_run_handler)
         app.router.add_get("/api/market",             market_status_handler)
@@ -910,6 +941,7 @@ async def main():
         logger.info("🚀 Launching tasks…")
         strategy_task  = app["strategy_task"]
         equity_task    = app["equity_task"]
+        feed_task      = asyncio.create_task(live_feed.run(), name="live_feed")
 
         tasks = [
             asyncio.create_task(risk.run(),        name="risk_monitor"),
@@ -920,13 +952,13 @@ async def main():
 
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
-        # Cancel both scanner tasks
-        for t in [strategy_task, equity_task]:
+        live_feed.stop()
+        for t in [strategy_task, equity_task, feed_task]:
             if not t.done():
                 t.cancel()
         for task in pending:
             task.cancel()
-        await asyncio.gather(strategy_task, equity_task, *pending, return_exceptions=True)
+        await asyncio.gather(strategy_task, equity_task, feed_task, *pending, return_exceptions=True)
         await server_runner.cleanup()
         logger.info("✅ Platform shut down cleanly")
 
