@@ -77,6 +77,8 @@ class IndexState:
     active_expiry: str   = ""
     strike:        float = 0.0
     orders_placed: int   = 0
+    consec_ob:     int   = 0   # consecutive overbought ticks (confirmation)
+    consec_os:     int   = 0   # consecutive oversold ticks (confirmation)
 
     def __post_init__(self):
         if self.prices is None:
@@ -92,8 +94,9 @@ class IndexOptionsScanner:
     TRADE_START  = dtime(9, 20)
     TRADE_END    = dtime(15, 0)
     SQUAREOFF    = dtime(15, 15)
-    RSI_OVERSOLD = 30.0
-    RSI_OB       = 70.0
+    RSI_OVERSOLD = 25.0   # tightened from 30 — fewer but higher-conviction entries
+    RSI_OB       = 75.0   # tightened from 70
+    CONFIRM_TICKS = 2     # RSI must stay extreme for N consecutive ticks
 
     def __init__(
         self,
@@ -102,8 +105,10 @@ class IndexOptionsScanner:
         live_feed=None,          # core.live_feed.LiveFeed — WebSocket data source
         paper_trading:  bool  = True,
         capital_pct:    float = 0.70,
-        target_buffer:  float = 5.0,
-        stop_buffer:    float = 5.0,
+        target_buffer:  float = 5.0,   # kept for legacy; target_pct takes priority
+        stop_buffer:    float = 5.0,   # kept for legacy; stop_pct takes priority
+        stop_pct:       float = 0.10,  # stop = entry × (1 - 10%)   e.g. ₹188 → stop ₹169
+        target_pct:     float = 0.15,  # target = BEP  × (1 + 15%)  e.g. BEP ₹190 → ₹218
         poll_interval:  float = 10.0,
         min_premium:    float = 5.0,
         max_premium:    float = 10_000.0,  # no effective cap — all index options qualify
@@ -116,6 +121,8 @@ class IndexOptionsScanner:
         self.capital_pct   = capital_pct
         self.target_buffer = target_buffer
         self.stop_buffer   = stop_buffer
+        self.stop_pct      = stop_pct
+        self.target_pct    = target_pct
         self.poll_interval = poll_interval
         self.min_premium   = min_premium
         self.max_premium   = max_premium
@@ -259,10 +266,10 @@ class IndexOptionsScanner:
                         pass
 
                 if self.paper_trading:
-                    # Simulate OCO exit in paper mode
-                    cur = state.current_premium
-                    target = state.breakeven + self.target_buffer
-                    stop   = state.entry_premium - self.stop_buffer
+                    # Simulate OCO exit in paper mode (% of premium)
+                    cur    = state.current_premium
+                    target = state.breakeven * (1 + self.target_pct)
+                    stop   = state.entry_premium * (1 - self.stop_pct)
                     if cur >= target:
                         await self._paper_exit(state, cur, f"TARGET HIT ₹{target:.2f} (current ₹{cur:.2f})")
                     elif cur > 0 and cur <= stop:
@@ -281,23 +288,28 @@ class IndexOptionsScanner:
 
             if state.prev_rsi is None:
                 state.prev_rsi = rsi
-                # Already in extreme zone on first valid RSI — fire immediately
-                # (RSI crossed threshold during warmup; don't miss the trade)
-                if rsi >= self.RSI_OB:
-                    logger.info(f"{state.name}: RSI {rsi:.1f} already overbought on warmup → enter PUT")
-                    await self._enter(state, "PE", price, rsi)
-                elif rsi <= self.RSI_OVERSOLD:
-                    logger.info(f"{state.name}: RSI {rsi:.1f} already oversold on warmup → enter CALL")
-                    await self._enter(state, "CE", price, rsi)
-                continue
 
-            prev, state.prev_rsi = state.prev_rsi, rsi
+            state.prev_rsi = rsi
 
-            # RSI crossover signals
-            if prev > self.RSI_OVERSOLD >= rsi:
-                await self._enter(state, "CE", price, rsi)
-            elif prev < self.RSI_OB <= rsi:
+            # Track consecutive extreme ticks for confirmation filter
+            if rsi >= self.RSI_OB:
+                state.consec_ob += 1
+                state.consec_os  = 0
+            elif rsi <= self.RSI_OVERSOLD:
+                state.consec_os += 1
+                state.consec_ob  = 0
+            else:
+                state.consec_ob  = 0
+                state.consec_os  = 0
+
+            # Entry: RSI must be extreme for CONFIRM_TICKS consecutive readings
+            # This filters out single-tick spikes that reverse immediately
+            if state.consec_ob >= self.CONFIRM_TICKS and not state.in_position:
+                logger.info(f"{state.name}: RSI {rsi:.1f} overbought ×{state.consec_ob} ticks → enter PUT")
                 await self._enter(state, "PE", price, rsi)
+            elif state.consec_os >= self.CONFIRM_TICKS and not state.in_position:
+                logger.info(f"{state.name}: RSI {rsi:.1f} oversold ×{state.consec_os} ticks → enter CALL")
+                await self._enter(state, "CE", price, rsi)
 
     async def _enter(self, state: IndexState, opt_type: str, underlying: float, rsi: float):
         if not self._master or not state.active_expiry:
@@ -364,9 +376,10 @@ class IndexOptionsScanner:
             logger.warning(f"{state.name} risk block: {msg}")
             self.current_step = 1; return
 
-        charges = self._charges.calculate(premium, contract.lot_size, num_lots)
-        target_p = round(charges.breakeven_premium + self.target_buffer, 2)
-        stop_p   = round(premium - self.stop_buffer, 2)
+        charges  = self._charges.calculate(premium, contract.lot_size, num_lots)
+        # % of premium: stop 10% below entry, target 15% above BEP
+        target_p = round(charges.breakeven_premium * (1 + self.target_pct), 2)
+        stop_p   = round(premium * (1 - self.stop_pct), 2)
 
         logger.info(
             f"📡 {state.name} {opt_type} | RSI {rsi:.1f} | "
@@ -425,8 +438,8 @@ class IndexOptionsScanner:
             return
 
         charges  = self._charges.calculate(fill_price, contract.lot_size, num_lots)
-        target_p = round(charges.breakeven_premium + self.target_buffer, 2)
-        stop_p   = round(fill_price - self.stop_buffer, 2)
+        target_p = round(charges.breakeven_premium * (1 + self.target_pct), 2)
+        stop_p   = round(fill_price * (1 - self.stop_pct), 2)
 
         # Step 7: Place Forever OCO
         self.current_step = 7
@@ -573,8 +586,8 @@ class IndexOptionsScanner:
                     "current_premium": state.current_premium,
                     "unrealized_pnl":  state.unrealized_pnl,
                     "breakeven":       state.breakeven,
-                    "target":          round(state.breakeven + self.target_buffer, 2) if state.in_position else 0,
-                    "stop":            round(state.entry_premium - self.stop_buffer, 2) if state.in_position else 0,
+                    "target":          round(state.breakeven * (1 + self.target_pct), 2) if state.in_position else 0,
+                    "stop":            round(state.entry_premium * (1 - self.stop_pct), 2) if state.in_position else 0,
                     "lot_size":        state.lot_size,
                     "expiry":          state.active_expiry,
                     "option_sid":      state.option_sid,
