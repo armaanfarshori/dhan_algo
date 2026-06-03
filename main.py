@@ -908,33 +908,47 @@ async def main():
         # ── Watchlist (top movers from NSE) ──────────────────────────────────
         watchlist = await WatchlistManager.build()
 
-        # ── Strategy selection ────────────────────────────────────────────────
-        if STRATEGY == "scalper":
-            cfg = OptionsScalperConfig(
-                security_id="13",
-                exchange_segment="IDX_I",
-                product_type="MARGIN",
-                quantity=75,
-                expiry_date=os.getenv("EXPIRY_DATE", ""),   # empty = auto nearest expiry
-                num_lots=int(os.getenv("NUM_LOTS", "1")),
-                poll_interval=10.0,
-                paper_trading=PAPER_TRADING,
-            )
-            strategy = OptionsScalperStrategy(dhan, risk, cfg, db_backend=db, run_id=run_id)
-        else:
-            cfg = SMAConfig(
-                name="SMA_9_21_Reliance",
-                security_id="2885",
-                exchange_segment="NSE_EQ",
+        # ── Strategy: ORB + Kronos (the only active strategy) ────────────────
+        # SMA/scalper/straddle are kept in strategies/ for reference but are
+        # not started here. ORB is the sole execution engine; Kronos gates entries.
+        from strategies.strategy_orb import ORBStrategy, ORBConfig
+        from core.kronos_signal import get_kronos_engine
+
+        kronos = get_kronos_engine()
+        # Pre-load Kronos model in background so it's ready at market open
+        import asyncio as _asyncio
+        _asyncio.create_task(kronos.load())
+
+        # One ORBStrategy instance per watchlist security
+        watchlist_ids = _cfg.watchlist_security_ids
+        orb_cfg = ORBConfig(
+            orb_minutes=_cfg.orb_range_minutes,
+            use_kronos=True,
+            kronos_min_confidence=float(os.getenv("KRONOS_MIN_CONFIDENCE", "0.4")),
+        )
+        strategies_list = []
+        for sid in watchlist_ids:
+            from strategies.strategy_base import StrategyConfig
+            scfg = StrategyConfig(
+                name=f"ORB_{sid}",
+                security_id=sid,
+                exchange_segment=_cfg.watchlist_exchange_segment,
                 product_type="INTRADAY",
-                quantity=1,
-                fast_period=9,
-                slow_period=21,
-                poll_interval=10.0,
+                quantity=int(os.getenv("TRADE_QUANTITY", "1")),
+                poll_interval=float(os.getenv("POLL_INTERVAL", "5.0")),
                 paper_trading=PAPER_TRADING,
-                max_orders=10,
+                max_orders=int(os.getenv("MAX_ORDERS_PER_SESSION", "4")),
             )
-            strategy = SMACrossoverStrategy(dhan, risk, cfg, db_backend=db, run_id=run_id)
+            strategies_list.append(
+                ORBStrategy(dhan, risk, scfg, orb_config=orb_cfg,
+                            trade_logger=get_trade_logger(),
+                            kronos_engine=kronos,
+                            db_backend=db, run_id=run_id)
+            )
+
+        logger.info("ORB+Kronos active on %d securities: %s", len(strategies_list), watchlist_ids)
+        # Use the first strategy as the primary for /api/status duck-typing
+        strategy = strategies_list[0] if strategies_list else None
 
         # ── Live WebSocket feed (replaces REST polling for all securities) ───
         live_feed = LiveFeed(CLIENT_ID, access_token)
@@ -982,10 +996,18 @@ async def main():
 
         # ── Web app ───────────────────────────────────────────────────────────
         app = web.Application(middlewares=[cors_middleware])
+        # ── Launch all ORB strategies concurrently ────────────────────────────
+        orb_tasks = [asyncio.create_task(s.run(), name=f"orb_{s.config.security_id}")
+                     for s in strategies_list]
+        # Legacy scanners kept running for /api/scanner endpoints (read-only)
+        fno_task    = asyncio.create_task(fno_scanner.run(),    name="fno_scanner")
+        equity_task = asyncio.create_task(equity_scanner.run(), name="equity_scanner")
+
         app["risk"]           = risk
-        app["strategy"]       = fno_scanner          # primary for /api/status duck-typing
-        app["strategy_task"]  = asyncio.create_task(fno_scanner.run(), name="fno_scanner")
-        app["equity_task"]    = asyncio.create_task(equity_scanner.run(), name="equity_scanner")
+        app["strategy"]       = strategy              # first ORB instance for /api/status duck-typing
+        app["strategy_task"]  = orb_tasks[0] if orb_tasks else fno_task
+        app["equity_task"]    = equity_task
+        app["orb_tasks"]      = orb_tasks
         app["client"]         = dhan
         app["auth_manager"]   = _auth_manager
         app["start_time"]     = time.time()
