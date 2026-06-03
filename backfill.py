@@ -248,20 +248,29 @@ async def run_backfill(args, cfg):
     refresh_task = None
 
     if cfg.dhan_pin and cfg.totp_secret:
-        from core.auth import DhanAuthManager
-        auth_mgr = DhanAuthManager(
-            client_id=cfg.dhan_client_id,
-            pin=cfg.dhan_pin,
-            totp_secret=cfg.totp_secret,
-        )
-        # Load cached token or generate fresh one via PIN + TOTP
-        access_token = await auth_mgr.load_or_generate()
-        auth_mgr.on_token_refresh(_save_token_to_env)
-        logger.info("Auth manager ready — token auto-refresh active (refreshes 30 min before expiry)")
+        try:
+            from core.auth import DhanAuthManager
+            auth_mgr = DhanAuthManager(
+                client_id=cfg.dhan_client_id,
+                pin=cfg.dhan_pin,
+                totp_secret=cfg.totp_secret,
+            )
+            # Load cached token or generate fresh one via PIN + TOTP
+            access_token = await auth_mgr.load_or_generate()
+            auth_mgr.on_token_refresh(_save_token_to_env)
+            logger.info("Auth manager ready — token auto-refresh active (refreshes 30 min before expiry)")
+        except Exception as exc:
+            logger.warning(
+                "Auth manager init failed (%s) — falling back to static token from .env. "
+                "Token auto-refresh disabled. Verify DHAN_PIN is correct.",
+                exc,
+            )
+            auth_mgr = None
+            access_token = cfg.dhan_access_token
     else:
         logger.warning(
             "DHAN_PIN or DHAN_TOTP_SECRET not set — using static token. "
-            "Backfill will fail after token expires (~24h). Set both to enable auto-refresh."
+            "Backfill will fail after token expires (~24h)."
         )
 
     async with DhanClient(cfg.dhan_client_id, access_token, auth_manager=auth_mgr) as client:
