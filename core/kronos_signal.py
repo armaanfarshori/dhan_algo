@@ -34,15 +34,13 @@ import numpy as np
 
 logger = logging.getLogger("dhan.kronos_signal")
 
-# Model identifiers — swap to kronos-mini for faster inference on CPU
-_TOKENIZER_ID = os.getenv("KRONOS_TOKENIZER", "NeoQuasar/Kronos-Tokenizer-base")
-_MODEL_ID      = os.getenv("KRONOS_MODEL",     "NeoQuasar/Kronos-small")
-
-# Default hyper-params
-_LOOKBACK      = int(os.getenv("KRONOS_LOOKBACK",  "400"))
-_PRED_LEN      = int(os.getenv("KRONOS_PRED_LEN",  "30"))
-_SAMPLE_COUNT  = int(os.getenv("KRONOS_SAMPLES",   "5"))
-_SIGNAL_THRESH = float(os.getenv("KRONOS_THRESH",  "0.001"))  # 0.1% min forecasted move
+# Defaults — overridden by Config at class init time
+_TOKENIZER_ID  = "NeoQuasar/Kronos-Tokenizer-base"
+_MODEL_ID      = "NeoQuasar/Kronos-small"
+_LOOKBACK      = 400
+_PRED_LEN      = 30
+_SAMPLE_COUNT  = 5
+_SIGNAL_THRESH = 0.001
 
 
 class KronosSignalEngine:
@@ -54,6 +52,23 @@ class KronosSignalEngine:
     def __init__(self):
         self._predictor = None
         self._lock = asyncio.Lock()
+        # Read config lazily at instantiation so .env is already loaded
+        try:
+            from config import get_config
+            cfg = get_config()
+            self._tokenizer_id  = os.getenv("KRONOS_TOKENIZER", _TOKENIZER_ID)
+            self._model_id      = os.getenv("KRONOS_MODEL",     _MODEL_ID)
+            self._lookback      = int(os.getenv("KRONOS_LOOKBACK",  str(_LOOKBACK)))
+            self._pred_len      = int(os.getenv("KRONOS_PRED_LEN",  str(_PRED_LEN)))
+            self._sample_count  = int(os.getenv("KRONOS_SAMPLES",   str(_SAMPLE_COUNT)))
+            self._signal_thresh = float(os.getenv("KRONOS_THRESH",  str(_SIGNAL_THRESH)))
+        except Exception:
+            self._tokenizer_id  = _TOKENIZER_ID
+            self._model_id      = _MODEL_ID
+            self._lookback      = _LOOKBACK
+            self._pred_len      = _PRED_LEN
+            self._sample_count  = _SAMPLE_COUNT
+            self._signal_thresh = _SIGNAL_THRESH
 
     async def load(self, device: str = "cpu"):
         """Download and cache the model. Safe to call multiple times."""
@@ -61,7 +76,7 @@ class KronosSignalEngine:
             if self._predictor is not None:
                 return
             loop = asyncio.get_event_loop()
-            logger.info("Loading Kronos from HuggingFace (%s / %s)…", _TOKENIZER_ID, _MODEL_ID)
+            logger.info("Loading Kronos from HuggingFace (%s / %s)…", self._tokenizer_id, self._model_id)
             self._predictor = await loop.run_in_executor(None, self._load_sync, device)
             logger.info("Kronos loaded.")
 

@@ -14,10 +14,12 @@ import FloatingKillSwitch from './components/cockpit/FloatingKillSwitch'
 import StrategySidebar    from './components/cockpit/StrategySidebar'
 import BacktestTab        from './components/cockpit/BacktestTab'
 import WatchlistPanel     from './components/cockpit/WatchlistPanel'
-import LiveTicker        from './components/cockpit/LiveTicker'
+import LiveTicker         from './components/cockpit/LiveTicker'
+import AISignalsTab       from './components/cockpit/AISignalsTab'
+import DataTab            from './components/cockpit/DataTab'
 import { FnoPanel, EqPanel } from './components/cockpit/TradingPanels'
 
-const TABS = ['Cockpit', 'Backtest', 'Risk Console']
+const TABS = ['Cockpit', 'AI Signals', 'Data', 'Backtest', 'Risk Console']
 
 // ── Shared panel primitives ───────────────────────────────────────────────────
 function Panel({ children, style }) {
@@ -363,6 +365,8 @@ export default function App() {
         <TopBar status={data.status} halted={halted} />
         <Tabs active={tab} onChange={setTab} />
         {tab === 'Cockpit'      && <CockpitTab     data={data} />}
+        {tab === 'AI Signals'   && <AISignalsTab   screener={data.screener} signals={data.kronosSignals} />}
+        {tab === 'Data'         && <DataTab        dbStats={data.dbStats} backfill={data.backfill} hermes={data.hermes} />}
         {tab === 'Backtest'     && <BacktestTab />}
         {tab === 'Risk Console' && <RiskConsoleTab data={data} />}
       </div>

@@ -27,10 +27,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from core.auth import DhanAuthManager
-from core.trade_log import get_trade_logger
+from core.journal import get_trade_logger, get_log_buffer, install_log_buffer
 from core.live_feed import LiveFeed
-import core.log_buffer as log_buffer
-log_buffer.install()   # capture all log messages into rolling buffer
+install_log_buffer()   # capture all log messages into rolling buffer
 from core.client import DhanClient
 from core.risk import RiskManager, RiskConfig
 from core.backtest import Backtester
@@ -58,17 +57,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger("dhan.main")
 
-CLIENT_ID      = os.getenv("DHAN_CLIENT_ID",    "DEMO_CLIENT")
-ACCESS_TOKEN   = os.getenv("DHAN_ACCESS_TOKEN", "DEMO_TOKEN")
-DHAN_PIN       = os.getenv("DHAN_PIN",          "")
-TOTP_SECRET    = os.getenv("DHAN_TOTP_SECRET",  "")
-PAPER_TRADING  = os.getenv("PAPER_TRADING",     "true").lower() == "true"
-MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "5000"))
-WEBHOOK_PORT   = int(os.getenv("WEBHOOK_PORT",  "8765"))
-STRATEGY       = os.getenv("STRATEGY", "scalper").lower()
+from config import get_config as _get_cfg
+_cfg = _get_cfg()
+
+CLIENT_ID      = _cfg.dhan_client_id
+ACCESS_TOKEN   = _cfg.dhan_access_token
+DHAN_PIN       = _cfg.dhan_pin
+TOTP_SECRET    = _cfg.totp_secret
+PAPER_TRADING  = _cfg.paper_trading
+MAX_DAILY_LOSS = _cfg.max_daily_loss
+WEBHOOK_PORT   = int(os.getenv("WEBHOOK_PORT", "8765"))
+STRATEGY       = _cfg.strategy.lower()
 SCANNER_MODE   = os.getenv("SCANNER_MODE", "false").lower() == "true"
 SEGMENTS       = os.getenv("SEGMENTS", "NSE_EQ").split(",")
-PAPER_BALANCE  = float(os.getenv("PAPER_BALANCE", "500000"))  # ₹5L simulated capital for paper mode
+PAPER_BALANCE  = float(os.getenv("PAPER_BALANCE", "500000"))
 
 # Auth manager available when PIN + TOTP are configured
 _auth_manager: Optional[DhanAuthManager] = None
@@ -596,7 +598,7 @@ async def scanner_config_handler(request: web.Request) -> web.Response:
 
 async def logs_handler(_request: web.Request) -> web.Response:
     limit = int(_request.rel_url.query.get("limit", 50))
-    return web.json_response({"ok": True, "logs": log_buffer.get_logs(limit)})
+    return web.json_response({"ok": True, "logs": get_log_buffer().get_logs(limit)})
 
 
 async def feed_handler(_request: web.Request) -> web.Response:
@@ -731,6 +733,107 @@ async def backtest_run_handler(request: web.Request) -> web.Response:
     except Exception as e:
         logger.error(f"Backtest error: {e}")
         return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
+# ── New: data pipeline + AI handlers ─────────────────────────────────────────
+
+async def db_stats_handler(_request: web.Request) -> web.Response:
+    """Row counts and date ranges from TimescaleDB."""
+    try:
+        from db import get_engine
+        from sqlalchemy import text
+        with get_engine().connect() as conn:
+            bars = conn.execute(text("""
+                SELECT timeframe, COUNT(*) AS rows,
+                       MIN(time)::date AS earliest, MAX(time)::date AS latest
+                FROM bars GROUP BY timeframe ORDER BY timeframe
+            """)).fetchall()
+            instruments = conn.execute(text(
+                "SELECT exchange_segment, COUNT(*) FROM instruments GROUP BY exchange_segment"
+            )).fetchall()
+            signals_count = conn.execute(text("SELECT COUNT(*) FROM signals")).scalar()
+            trades_count  = conn.execute(text("SELECT COUNT(*) FROM trades")).scalar()
+        return web.json_response({
+            "ok": True,
+            "bars": [{"timeframe": r[0], "rows": r[1], "earliest": str(r[2]), "latest": str(r[3])} for r in bars],
+            "instruments": {r[0]: r[1] for r in instruments},
+            "signals": signals_count,
+            "trades":  trades_count,
+        })
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": str(exc), "bars": [], "instruments": {}})
+
+
+async def kronos_signals_handler(request: web.Request) -> web.Response:
+    """Latest Kronos signals from the signals table."""
+    try:
+        limit = int(request.rel_url.query.get("limit", 50))
+        from db import get_engine
+        from sqlalchemy import text
+        with get_engine().connect() as conn:
+            rows = conn.execute(text("""
+                SELECT security_id, side, score, confidence, strategy, ts, features_snapshot
+                FROM signals ORDER BY ts DESC LIMIT :lim
+            """), {"lim": limit}).fetchall()
+        return web.json_response({"ok": True, "signals": [
+            {"security_id": r[0], "side": r[1], "score": float(r[2] or 0),
+             "confidence": float(r[3] or 0), "strategy": r[4],
+             "ts": str(r[5]), "features": r[6]}
+            for r in rows
+        ]})
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": str(exc), "signals": []})
+
+
+async def kronos_screener_handler(request: web.Request) -> web.Response:
+    """Top N volatile NSE equities from the ATR screener."""
+    try:
+        n = int(request.rel_url.query.get("n", 20))
+        from core.nse_screener import get_top_volatile
+        from db import init_db
+        from config import get_config
+        cfg = get_config()
+        from urllib.parse import quote_plus
+        init_db(f"postgresql+psycopg2://{quote_plus(cfg.db_user)}:{quote_plus(cfg.db_password)}"
+                f"@{cfg.db_host}:{cfg.db_port}/{cfg.db_name}")
+        candidates = get_top_volatile(n=n)
+        return web.json_response({"ok": True, "candidates": candidates, "count": len(candidates)})
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": str(exc), "candidates": []})
+
+
+async def backfill_status_handler(_request: web.Request) -> web.Response:
+    """Live backfill progress from the EC2 log file."""
+    import subprocess
+    log_path = "/tmp/backfill.log"
+    lines: list[str] = []
+    try:
+        result = subprocess.run(["tail", "-15", log_path], capture_output=True, text=True, timeout=3)
+        lines = [l for l in result.stdout.strip().split("\n") if l]
+    except Exception:
+        pass
+    running = bool(subprocess.run(["pgrep", "-f", "backfill.py"], capture_output=True).returncode == 0)
+    return web.json_response({"ok": True, "running": running, "log_tail": lines})
+
+
+async def hermes_status_handler(_request: web.Request) -> web.Response:
+    """Hermes gateway status — PID, model, next cron fires."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["bash", "-c", "export PATH=$HOME/.local/bin:$PATH; hermes gateway status 2>&1 | head -5"],
+            capture_output=True, text=True, timeout=5,
+        )
+        running = "active (running)" in result.stdout
+        return web.json_response({
+            "ok": True,
+            "running": running,
+            "raw": result.stdout.strip()[:300],
+            "model": "meta-llama/llama-3.3-70b-instruct",
+            "provider": "openrouter",
+        })
+    except Exception as exc:
+        return web.json_response({"ok": False, "running": False, "error": str(exc)})
 
 
 # ── Server startup ────────────────────────────────────────────────────────────
@@ -891,6 +994,13 @@ async def main():
             "quantity":    cfg.quantity,
             "num_lots":    getattr(cfg, "num_lots", 1),
         }
+
+        # ── New: data pipeline + AI endpoints ────────────────────────────────
+        app.router.add_get("/api/db/stats",           db_stats_handler)
+        app.router.add_get("/api/kronos/signals",     kronos_signals_handler)
+        app.router.add_get("/api/kronos/screener",    kronos_screener_handler)
+        app.router.add_get("/api/backfill/status",    backfill_status_handler)
+        app.router.add_get("/api/hermes/status",      hermes_status_handler)
 
         app.router.add_get("/",                       dashboard_handler)
         app.router.add_get("/health",                 health_handler)
