@@ -715,68 +715,116 @@ function DBPanel({ dbStats }) {
   )
 }
 
-function BackfillPanel({ backfill }) {
+function BackfillPanel({ backfill, dbStats }) {
   const d       = backfill?.data
   const running = d?.running ?? false
   const logs    = d?.log_tail ?? []
-  const last    = logs[logs.length - 1] ?? ''
-  const secMatch= last.match(/security_id=(\d+)/)
-  const curSec  = secMatch?.[1]
-  const chunkMatch = last.match(/(\d{4}-\d{2}-\d{2}) → (\d{4}-\d{2}-\d{2})/)
+
+  // Extract current security from ANY log line matching the patterns:
+  //   "═══ security_id=1008 ═══"  or  "  [1m] 1008  2023-08-20 ..."
+  const findSec = (lines) => {
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const m = lines[i].match(/security_id=(\d+)/) || lines[i].match(/\[1m\]\s+(\d+)\s+\d{4}/)
+      if (m) return m[1]
+    }
+    return null
+  }
+  const curSec = findSec(logs)
+
+  // Extract current date chunk from log lines like: "[1m] 1008  2023-08-20 → 2023-11-17"
+  const findChunk = (lines) => {
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const m = lines[i].match(/(\d{4}-\d{2}-\d{2})\s+→\s+(\d{4}-\d{2}-\d{2})/)
+      if (m) return `${m[1]} → ${m[2]}`
+    }
+    return null
+  }
+  const curChunk = findChunk(logs)
+
+  // Progress from DB: how many securities actually have bars loaded
+  const loaded = (() => {
+    const bars = dbStats?.data?.bars?.find(b => b.timeframe === '1m')
+    // Can't get distinct security count from dbStats directly,
+    // but we can estimate from the security_id in log (0-indexed position in sorted list)
+    // Better: use loaded count from the DB bars endpoint if available
+    return null  // will show from curSec estimate
+  })()
+
+  const TOTAL    = 22646
+  // Estimate position: sort by security_id is numeric, IDs range 100–~15000
+  // Use curSec as rough index — not perfectly accurate but directional
+  const secNum   = parseInt(curSec ?? '0', 10)
+  const pct      = curSec ? Math.min((secNum / 15000) * 100, 99) : 0
+  // Each security ≈ 21 API calls (20 intraday + 1 daily); rate = 5 req/s
+  const remaining= curSec ? Math.ceil((TOTAL - (TOTAL * pct / 100)) * 21 / 5 / 3600) : null
+
+  const stripPrefix = l => l.replace(/^\d{2}:\d{2}:\d{2}\s+\w+\s+dhan\.\w+\s+[—–]\s+/, '')
 
   return (
-    <SysPanel title="Backfill Progress" right="22,646 NSE equities"
+    <SysPanel title="Backfill Progress" right={`${TOTAL.toLocaleString('en-IN')} NSE equities`}
       accent={running ? T.green : T.ink3}>
-      {/* Status row */}
+
+      {/* Status */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
         <div style={{
           width: 10, height: 10, borderRadius: '50%',
           background: running ? T.green : T.ink3,
-          boxShadow: running ? `0 0 10px ${T.green}` : 'none',
-          flexShrink: 0,
+          boxShadow: running ? `0 0 10px ${T.green}` : 'none', flexShrink: 0,
         }} />
-        <span style={{ fontFamily: T.mono, fontSize: 11, color: running ? T.green : T.ink2,
-          letterSpacing: '0.1em', fontWeight: 600 }}>
+        <span style={{ fontFamily: T.mono, fontSize: 11, fontWeight: 600,
+          color: running ? T.green : T.ink2, letterSpacing: '0.1em' }}>
           {running ? 'RUNNING' : 'IDLE'}
         </span>
         {curSec && (
-          <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink2 }}>
-            · security {curSec}
+          <span style={{ fontFamily: T.dot, fontSize: 18, color: T.ink1 }}>
+            #{curSec}
           </span>
         )}
       </div>
 
-      {/* Progress estimate */}
-      {running && curSec && (
-        <div style={{ marginBottom: 14 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: T.mono, fontSize: 9, color: T.ink3, marginBottom: 5 }}>
-            <span>LOADED</span><span>TARGET</span>
+      {/* Progress bar — always shown when running */}
+      {running && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between',
+            fontFamily: T.mono, fontSize: 9, color: T.ink3, marginBottom: 6 }}>
+            <span>PROGRESS (APPROX)</span>
+            <span style={{ color: pct > 0 ? T.green : T.ink3 }}>
+              {pct.toFixed(1)}%
+            </span>
           </div>
-          <div style={{ height: 4, background: T.bg3 }}>
+          <div style={{ height: 6, background: T.bg3, position: 'relative', overflow: 'hidden' }}>
             <div style={{
-              height: '100%',
-              width: `${Math.min((parseInt(curSec)/22646)*100, 100).toFixed(1)}%`,
-              background: T.green, transition: 'width 1s',
+              height: '100%', width: `${pct}%`,
+              background: `linear-gradient(90deg, ${T.green}, ${T.cyan})`,
+              transition: 'width 2s ease',
             }} />
           </div>
-          <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, marginTop: 4 }}>
-            {((parseInt(curSec)/22646)*100).toFixed(2)}% · ~{Math.ceil((22646-parseInt(curSec))/5/3600)}h remaining
+          <div style={{ display: 'flex', justifyContent: 'space-between',
+            fontFamily: T.mono, fontSize: 9, color: T.ink3, marginTop: 5 }}>
+            {curChunk
+              ? <span style={{ color: T.ink2 }}>{curChunk}</span>
+              : <span>Scanning…</span>
+            }
+            {remaining !== null && remaining > 0 && (
+              <span style={{ color: T.amber }}>~{remaining}h left</span>
+            )}
           </div>
         </div>
       )}
 
-      {/* Recent log lines */}
+      {/* Recent log */}
       <SysLabel>Recent activity</SysLabel>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 180, overflowY: 'auto' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 160, overflowY: 'auto' }}>
         {logs.length === 0
           ? <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>No activity</span>
-          : logs.slice(-8).map((l, i) => (
+          : logs.map((l, i) => (
             <div key={i} style={{
-              fontFamily: T.mono, fontSize: 9, color: T.ink2, lineHeight: 1.8,
-              borderLeft: `2px solid ${l.includes('ERROR') ? T.red : l.includes('done') ? T.green : T.line}`,
+              fontFamily: T.mono, fontSize: 9, lineHeight: 1.8,
+              color: l.includes('ERROR') ? T.red : l.includes('done') || l.includes('upserted') ? T.green : T.ink2,
+              borderLeft: `2px solid ${l.includes('ERROR') ? T.red : l.includes('done') || l.includes('upserted') ? T.green : T.line}`,
               paddingLeft: 8,
             }}>
-              {l.replace(/^\d{2}:\d{2}:\d{2}\s+\w+\s+dhan\.\w+\s+—\s+/, '')}
+              {stripPrefix(l)}
             </div>
           ))
         }
@@ -895,7 +943,7 @@ function SystemTab({ data }) {
       {/* Top row: 3 equal columns */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16, marginBottom: 16 }}>
         <DBPanel       dbStats={data.dbStats} />
-        <BackfillPanel backfill={data.backfill} />
+        <BackfillPanel backfill={data.backfill} dbStats={data.dbStats} />
         <HermesPanel   hermes={data.hermes} />
       </div>
 

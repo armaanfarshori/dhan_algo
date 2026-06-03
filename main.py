@@ -808,7 +808,7 @@ async def backfill_status_handler(_request: web.Request) -> web.Response:
     log_path = "/tmp/backfill.log"
     lines: list[str] = []
     try:
-        result = subprocess.run(["tail", "-15", log_path], capture_output=True, text=True, timeout=3)
+        result = subprocess.run(["tail", "-30", log_path], capture_output=True, text=True, timeout=3)
         lines = [l for l in result.stdout.strip().split("\n") if l]
     except Exception:
         pass
