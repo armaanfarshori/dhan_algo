@@ -1,22 +1,22 @@
 """
-Historical OHLCV Backfill
-=========================
-Pulls historical bars from the Dhan API and upserts into TimescaleDB.
-
+Historical OHLCV Backfill + Instrument Master Sync
+===================================================
 Endpoints used:
   - /v2/charts/intraday  → 1-min bars (max 90 days per call; tested to 2+ years)
   - /v2/charts/historical → daily bars (tested to 5+ years)
 
-All data lands in:
+All OHLCV data lands in:
   - bars  (timeframe='1m' or '1d')  — primary
-  - ohlcv_1min                       — legacy, kept for backwards compat (1m only)
+  - ohlcv_1min                       — legacy mirror (1m only)
 
 Usage:
-    python backfill.py                                # 90d intraday, default watchlist
-    python backfill.py --from 2024-01-01              # extended intraday
-    python backfill.py --daily                        # 5-year daily bars
-    python backfill.py --all                          # 2y intraday + 5y daily
-    python backfill.py --ids 2885,1333 --dry-run      # fetch only, no DB write
+    python backfill.py --instruments                   # load all 224K scrips → instruments table
+    python backfill.py --instruments --force-download  # re-download CSV then load
+
+    python backfill.py                                 # 90d intraday, .env watchlist
+    python backfill.py --from 2021-06-01 --all         # 5y intraday + 5y daily
+    python backfill.py --nse-eq --all --from 2021-06-01  # all 22K NSE equities
+    python backfill.py --ids 2885,1333 --dry-run       # specific IDs, no DB write
 """
 
 import argparse
@@ -234,45 +234,89 @@ async def run_backfill(args, cfg):
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Backfill OHLCV into TimescaleDB")
+    parser = argparse.ArgumentParser(description="Instrument sync + OHLCV backfill")
+
+    # ── Instrument loader ──────────────────────────────────────────────────────
+    parser.add_argument(
+        "--instruments", action="store_true",
+        help="Download Dhan scrip master and upsert all instruments into DB (run before backfill)",
+    )
+    parser.add_argument(
+        "--force-download", action="store_true",
+        help="Force re-download of scrip master CSV even if cached copy is fresh",
+    )
+
+    # ── Security ID selection ──────────────────────────────────────────────────
+    parser.add_argument("--ids",
+        help="Comma-separated security IDs to backfill")
+    parser.add_argument(
+        "--nse-eq", action="store_true",
+        help="Backfill ALL NSE equity instruments (loads from instruments table — run --instruments first)",
+    )
+
+    # ── Date range ─────────────────────────────────────────────────────────────
     parser.add_argument("--from", dest="from_date",
         default=(date.today() - timedelta(days=90)).strftime("%Y-%m-%d"),
         help="Intraday start date (default: 90 days ago)")
     parser.add_argument("--to", dest="to_date",
         default=date.today().strftime("%Y-%m-%d"),
-        help="End date (default: today)")
+        help="End date for both intraday and daily (default: today)")
     parser.add_argument("--daily-from", dest="daily_from",
-        default=(date.today() - timedelta(days=365*5)).strftime("%Y-%m-%d"),
+        default=(date.today() - timedelta(days=365 * 5)).strftime("%Y-%m-%d"),
         help="Daily bars start date (default: 5 years ago)")
-    parser.add_argument("--ids",
-        help="Comma-separated security IDs (default: WATCHLIST_SECURITY_IDS)")
-    parser.add_argument("--segment", default=None)
-    parser.add_argument("--daily",  action="store_true", help="Pull daily bars only")
-    parser.add_argument("--all",    action="store_true", help="Pull intraday + daily")
-    parser.add_argument("--dry-run",action="store_true")
-    raw = parser.parse_args()
 
+    # ── Timeframe selection ────────────────────────────────────────────────────
+    parser.add_argument("--daily",  action="store_true", help="Daily bars only (no 1-min)")
+    parser.add_argument("--all",    action="store_true", help="Both intraday 1-min and daily")
+
+    parser.add_argument("--segment", default=None,
+        help="Exchange segment override (default: WATCHLIST_EXCHANGE_SEGMENT)")
+    parser.add_argument("--dry-run", action="store_true",
+        help="Fetch only — no DB writes")
+
+    raw = parser.parse_args()
     cfg = get_config()
 
-    raw.from_date    = datetime.strptime(raw.from_date,   "%Y-%m-%d").date()
-    raw.to_date      = datetime.strptime(raw.to_date,     "%Y-%m-%d").date()
-    raw.daily_from   = datetime.strptime(raw.daily_from,  "%Y-%m-%d").date()
-    raw.security_ids = (
-        [s.strip() for s in raw.ids.split(",")]
-        if raw.ids else cfg.watchlist_security_ids
-    )
-    raw.exchange_segment = raw.segment or cfg.watchlist_exchange_segment
-    raw.do_intraday = not raw.daily          # intraday unless --daily-only
+    # ── Init DB — always (instruments + --nse-eq both need it; dry-run still reads) ──
+    init_db(cfg.db_url)
+
+    # ── Instrument sync mode ───────────────────────────────────────────────────
+    if raw.instruments:
+        from core.instrument_sync import load_instruments
+        counts = load_instruments(force_download=raw.force_download)
+        total = sum(counts.values())
+        logger.info("Done — %d instruments loaded across %d segments", total, len(counts))
+        return
+
+    # ── OHLCV backfill mode ────────────────────────────────────────────────────
+    raw.from_date  = datetime.strptime(raw.from_date,  "%Y-%m-%d").date()
+    raw.to_date    = datetime.strptime(raw.to_date,    "%Y-%m-%d").date()
+    raw.daily_from = datetime.strptime(raw.daily_from, "%Y-%m-%d").date()
+
+    if raw.nse_eq:
+        # Pull all NSE equity IDs from the instruments table
+        from core.instrument_sync import get_equity_security_ids
+        raw.security_ids = get_equity_security_ids()
+        raw.exchange_segment = "NSE_EQ"
+        if not raw.security_ids:
+            logger.error("No NSE_EQ instruments in DB — run: python backfill.py --instruments first")
+            return
+        logger.info("Loaded %d NSE equity security IDs from instruments table", len(raw.security_ids))
+    elif raw.ids:
+        raw.security_ids = [s.strip() for s in raw.ids.split(",")]
+        raw.exchange_segment = raw.segment or cfg.watchlist_exchange_segment
+    else:
+        raw.security_ids = cfg.watchlist_security_ids
+        raw.exchange_segment = raw.segment or cfg.watchlist_exchange_segment
+
+    raw.do_intraday = not raw.daily
     raw.do_daily    = raw.daily or raw.all
 
-    if not raw.dry_run:
-        init_db(cfg.db_url)
-
     logger.info(
-        "Backfill  intraday=%s (%s→%s)  daily=%s (%s→%s)  ids=%s",
+        "Backfill  intraday=%s (%s→%s)  daily=%s (%s→%s)  ids=%d",
         raw.do_intraday, raw.from_date, raw.to_date,
         raw.do_daily,    raw.daily_from, raw.to_date,
-        raw.security_ids,
+        len(raw.security_ids),
     )
 
     asyncio.run(run_backfill(raw, cfg))
