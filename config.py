@@ -55,8 +55,9 @@ class Config:
 
     @property
     def db_url(self) -> str:
+        from urllib.parse import quote_plus
         return (
-            f"postgresql+psycopg2://{self.db_user}:{self.db_password}"
+            f"postgresql+psycopg2://{quote_plus(self.db_user)}:{quote_plus(self.db_password)}"
             f"@{self.db_host}:{self.db_port}/{self.db_name}"
         )
 

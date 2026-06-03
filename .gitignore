@@ -38,3 +38,9 @@ Thumbs.db
 # Graphify
 graphify-out/
 
+terraform.tfvars
+aws_outputs.local
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.backup
+infra/.terraform.lock.hcl

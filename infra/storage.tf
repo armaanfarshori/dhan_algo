@@ -90,3 +90,11 @@ resource "aws_ssm_parameter" "dhan_pin" {
   value       = var.dhan_pin
   overwrite   = true
 }
+
+resource "aws_ssm_parameter" "groq_api_key" {
+  name        = "/${var.project}/groq_api_key"
+  type        = "SecureString"
+  value       = var.groq_api_key
+  description = "Groq API key for Hermes LLM orchestrator"
+  overwrite   = true
+}

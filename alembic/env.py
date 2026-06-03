@@ -1,6 +1,7 @@
 import os
 import sys
 from logging.config import fileConfig
+from urllib.parse import quote_plus
 
 from sqlalchemy import engine_from_config, pool
 from alembic import context
@@ -12,16 +13,15 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Override sqlalchemy.url from environment if available
-db_url = os.getenv(
-    "DATABASE_URL",
+# Build URL with URL-encoded password (handles @, #, ! and other special chars)
+db_url = os.getenv("DATABASE_URL") or (
     "postgresql+psycopg2://{user}:{pw}@{host}:{port}/{db}".format(
-        user=os.getenv("DB_USER", "trader"),
-        pw=os.getenv("DB_PASSWORD", "trader123"),
+        user=quote_plus(os.getenv("DB_USER", "trader")),
+        pw=quote_plus(os.getenv("DB_PASSWORD", "trader123")),
         host=os.getenv("DB_HOST", "localhost"),
         port=os.getenv("DB_PORT", "5432"),
         db=os.getenv("DB_NAME", "dhan_trading"),
-    ),
+    )
 )
 config.set_main_option("sqlalchemy.url", db_url)
 
