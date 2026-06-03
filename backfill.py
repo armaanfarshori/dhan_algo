@@ -22,7 +22,9 @@ Usage:
 import argparse
 import asyncio
 import logging
+import re
 from datetime import date, timedelta, datetime
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -34,6 +36,8 @@ load_dotenv()
 from config import get_config
 from db import init_db, get_session
 from core.client import DhanClient
+
+_ENV_FILE = Path(__file__).parent / ".env"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -209,26 +213,82 @@ async def backfill_daily(
     return _upsert_bars(df, "1d")
 
 
+# ── Token refresh callback ────────────────────────────────────────────────────
+
+def _save_token_to_env(new_token: str):
+    """Persist refreshed access token to .env so restarts use the latest."""
+    if not _ENV_FILE.exists():
+        return
+    content = _ENV_FILE.read_text()
+    updated = re.sub(
+        r"^DHAN_ACCESS_TOKEN=.*$",
+        f"DHAN_ACCESS_TOKEN={new_token}",
+        content,
+        flags=re.MULTILINE,
+    )
+    _ENV_FILE.write_text(updated)
+    logger.info("Token refreshed and written to .env")
+
+
 # ── Orchestrator ───────────────────────────────────────────────────────────────
 
 async def run_backfill(args, cfg):
-    async with DhanClient(cfg.dhan_client_id, cfg.dhan_access_token) as client:
-        for sid in args.security_ids:
-            logger.info("═══ security_id=%s ═══", sid)
+    """
+    Runs the backfill with automatic token refresh.
 
-            if args.do_intraday:
-                n = await backfill_intraday(
-                    client, sid, args.exchange_segment,
-                    args.from_date, args.to_date, args.dry_run,
-                )
-                logger.info("  1m done — %d rows %s", n, "(dry)" if args.dry_run else "upserted")
+    If DHAN_PIN and DHAN_TOTP_SECRET are set in .env, DhanAuthManager is
+    initialised and runs a background loop that renews the token 30 minutes
+    before expiry — critical for multi-day runs.  The fresh token is also
+    written back to .env so manual restarts pick it up automatically.
 
-            if args.do_daily:
-                n = await backfill_daily(
-                    client, sid, args.exchange_segment,
-                    args.daily_from, args.to_date, args.dry_run,
-                )
-                logger.info("  1d done — %d rows %s", n, "(dry)" if args.dry_run else "upserted")
+    Falls back to static token if PIN/TOTP are not configured.
+    """
+    auth_mgr = None
+    access_token = cfg.dhan_access_token
+    refresh_task = None
+
+    if cfg.dhan_pin and cfg.totp_secret:
+        from core.auth import DhanAuthManager
+        auth_mgr = DhanAuthManager(
+            client_id=cfg.dhan_client_id,
+            pin=cfg.dhan_pin,
+            totp_secret=cfg.totp_secret,
+        )
+        # Load cached token or generate fresh one via PIN + TOTP
+        access_token = await auth_mgr.load_or_generate()
+        auth_mgr.on_token_refresh(_save_token_to_env)
+        logger.info("Auth manager ready — token auto-refresh active (refreshes 30 min before expiry)")
+    else:
+        logger.warning(
+            "DHAN_PIN or DHAN_TOTP_SECRET not set — using static token. "
+            "Backfill will fail after token expires (~24h). Set both to enable auto-refresh."
+        )
+
+    async with DhanClient(cfg.dhan_client_id, access_token, auth_manager=auth_mgr) as client:
+        if auth_mgr:
+            # Background loop checks every 10 min and refreshes 30 min before expiry
+            refresh_task = asyncio.create_task(auth_mgr.run())
+
+        try:
+            for sid in args.security_ids:
+                logger.info("═══ security_id=%s ═══", sid)
+
+                if args.do_intraday:
+                    n = await backfill_intraday(
+                        client, sid, args.exchange_segment,
+                        args.from_date, args.to_date, args.dry_run,
+                    )
+                    logger.info("  1m done — %d rows %s", n, "(dry)" if args.dry_run else "upserted")
+
+                if args.do_daily:
+                    n = await backfill_daily(
+                        client, sid, args.exchange_segment,
+                        args.daily_from, args.to_date, args.dry_run,
+                    )
+                    logger.info("  1d done — %d rows %s", n, "(dry)" if args.dry_run else "upserted")
+        finally:
+            if refresh_task:
+                refresh_task.cancel()
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
