@@ -2,17 +2,14 @@
 Historical OHLCV Backfill
 =========================
 Pulls up to 365 days of 1-min intraday data from Dhan /v2/charts/intraday
-(max 90 days per call) and upserts into the ohlcv_1min TimescaleDB hypertable.
+(max 90 days per call) and upserts into both:
+  - bars (timeframe='1m')  — primary, authoritative price history
+  - ohlcv_1min             — legacy; kept for backwards compatibility
 
 Usage:
-    # Backfill last 90 days for the default watchlist
-    python backfill.py
-
-    # Custom date range and security IDs
+    python backfill.py                        # last 90 days, default watchlist
     python backfill.py --from 2025-01-01 --to 2026-06-03 --ids 2885,1333
-
-    # Dry run (fetch only, no DB write)
-    python backfill.py --dry-run
+    python backfill.py --dry-run              # fetch only, no DB write
 """
 
 import argparse
@@ -50,29 +47,53 @@ def _parse_response(data: dict[str, Any], security_id: str, exchange_segment: st
         return pd.DataFrame()
 
     df = pd.DataFrame({
-        "security_id": security_id,
-        "exchange_segment": exchange_segment,
-        "ts": pd.to_datetime(timestamps, unit="s", utc=True),
-        "open": inner["open"],
-        "high": inner["high"],
-        "low": inner["low"],
+        "security_id":     security_id,
+        "exchange_segment":exchange_segment,
+        "ts":  pd.to_datetime(timestamps, unit="s", utc=True),
+        "open":  inner["open"],
+        "high":  inner["high"],
+        "low":   inner["low"],
         "close": inner["close"],
-        "volume": inner["volume"],
+        "volume":inner["volume"],
     })
     return df
 
 
 def _upsert_candles(df: pd.DataFrame) -> int:
-    """Upsert a DataFrame of candles into ohlcv_1min. Returns rows inserted/updated."""
+    """Upsert candles into bars (primary) and ohlcv_1min (legacy). Returns row count."""
     if df.empty:
         return 0
 
-    rows = df.to_dict(orient="records")
-    upsert_sql = text("""
+    rows_bars = [
+        {
+            "time":        r["ts"],
+            "security_id": r["security_id"],
+            "timeframe":   "1m",
+            "open":   r["open"],
+            "high":   r["high"],
+            "low":    r["low"],
+            "close":  r["close"],
+            "volume": r["volume"],
+        }
+        for r in df.to_dict(orient="records")
+    ]
+
+    bars_sql = text("""
+        INSERT INTO bars (time, security_id, timeframe, open, high, low, close, volume)
+        VALUES (:time, :security_id, :timeframe, :open, :high, :low, :close, :volume)
+        ON CONFLICT (security_id, timeframe, time) DO UPDATE SET
+            open   = EXCLUDED.open,
+            high   = EXCLUDED.high,
+            low    = EXCLUDED.low,
+            close  = EXCLUDED.close,
+            volume = EXCLUDED.volume
+    """)
+
+    legacy_rows = df.rename(columns={"ts": "ts"}).to_dict(orient="records")
+    legacy_sql = text("""
         INSERT INTO ohlcv_1min (security_id, exchange_segment, ts, open, high, low, close, volume)
         VALUES (:security_id, :exchange_segment, :ts, :open, :high, :low, :close, :volume)
         ON CONFLICT (security_id, ts) DO UPDATE SET
-            exchange_segment = EXCLUDED.exchange_segment,
             open   = EXCLUDED.open,
             high   = EXCLUDED.high,
             low    = EXCLUDED.low,
@@ -81,9 +102,10 @@ def _upsert_candles(df: pd.DataFrame) -> int:
     """)
 
     with get_session() as session:
-        session.execute(upsert_sql, rows)
+        session.execute(bars_sql, rows_bars)
+        session.execute(legacy_sql, legacy_rows)
 
-    return len(rows)
+    return len(rows_bars)
 
 
 async def backfill_security(
