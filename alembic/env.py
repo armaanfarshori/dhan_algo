@@ -3,7 +3,7 @@ import sys
 from logging.config import fileConfig
 from urllib.parse import quote_plus
 
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, pool
 from alembic import context
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -13,25 +13,25 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Build URL with URL-encoded password (handles @, #, ! and other special chars)
-db_url = os.getenv("DATABASE_URL") or (
-    "postgresql+psycopg2://{user}:{pw}@{host}:{port}/{db}".format(
+target_metadata = None
+
+
+def _db_url() -> str:
+    """Build connection URL with URL-encoded credentials (handles @, #, ! etc.)."""
+    if url := os.getenv("DATABASE_URL"):
+        return url
+    return "postgresql+psycopg2://{user}:{pw}@{host}:{port}/{db}".format(
         user=quote_plus(os.getenv("DB_USER", "trader")),
         pw=quote_plus(os.getenv("DB_PASSWORD", "trader123")),
         host=os.getenv("DB_HOST", "localhost"),
         port=os.getenv("DB_PORT", "5432"),
         db=os.getenv("DB_NAME", "dhan_trading"),
     )
-)
-config.set_main_option("sqlalchemy.url", db_url)
-
-target_metadata = None
 
 
 def run_migrations_offline() -> None:
-    url = config.get_main_option("sqlalchemy.url")
     context.configure(
-        url=url,
+        url=_db_url(),
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -41,11 +41,8 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    # Build engine directly — avoids configparser's % interpolation issue
+    connectable = create_engine(_db_url(), poolclass=pool.NullPool)
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():
