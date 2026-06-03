@@ -1020,12 +1020,13 @@ async def main():
         app["equity_scanner"] = equity_scanner
         app["scanner"]        = fno_scanner
         app["live_feed"]      = live_feed
+        first_orb = strategies_list[0] if strategies_list else None
         app["runtime_config"] = {
-            "strategy":    STRATEGY,
-            "segment":     "NSE_FNO" if STRATEGY == "scalper" else "NSE_EQ",
-            "security_id": cfg.security_id,
-            "quantity":    cfg.quantity,
-            "num_lots":    getattr(cfg, "num_lots", 1),
+            "strategy":    "orb+kronos",
+            "segment":     _cfg.watchlist_exchange_segment,
+            "security_id": first_orb.config.security_id if first_orb else "",
+            "quantity":    first_orb.config.quantity if first_orb else 1,
+            "num_lots":    1,
         }
 
         # ── New: data pipeline + AI endpoints ────────────────────────────────
