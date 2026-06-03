@@ -1,16 +1,19 @@
 """
-Opening Range Breakout (ORB) Strategy
-======================================
+Opening Range Breakout (ORB) Strategy  [Kronos-enhanced]
+=========================================================
 Logic:
   1. During the first `orb_minutes` minutes of the session (9:15–9:29 for 15-min ORB),
      track the rolling high (OR_HIGH) and low (OR_LOW).
   2. After the opening range is locked:
-     - Price closes ABOVE OR_HIGH  → BUY signal (long breakout)
-     - Price closes BELOW OR_LOW   → SELL signal (short breakout)
-  3. Stop-loss = other side of the OR + buffer.
-  4. Target = entry + 1.5× OR range.
-  5. Exit any open position 15 minutes before market close (3:15 PM IST).
-  6. Only one trade per direction per security per session.
+     - Price closes ABOVE OR_HIGH  → BUY candidate
+     - Price closes BELOW OR_LOW   → SELL candidate
+  3. If `use_kronos=True` (default when DB is available), the Kronos foundation model
+     scores the direction. Trade is only taken if Kronos agrees (same side) AND
+     confidence >= `kronos_min_confidence`.
+  4. Stop-loss = other side of the OR + buffer.
+  5. Target = entry + 1.5× OR range.
+  6. Exit any open position 15 minutes before market close (3:15 PM IST).
+  7. Only one trade per direction per security per session.
 
 Extends BaseStrategy — drop this into the existing strategy engine with:
     strategy = ORBStrategy(client, risk_manager, config, orb_config)
@@ -52,10 +55,15 @@ class ORBConfig:
     # Only trade if OR range is at least this fraction of the stock price
     min_range_pct: float = 0.003
 
+    # Kronos pre-filter: require model agreement before entering
+    use_kronos: bool = True
+    kronos_min_confidence: float = 0.4   # minimum Kronos confidence to allow entry
+
 
 class ORBStrategy(BaseStrategy):
     """
-    Single-security ORB strategy.  Instantiate one per security.
+    Single-security ORB strategy with optional Kronos pre-filter.
+    Instantiate one per security.
     """
 
     def __init__(
@@ -65,10 +73,12 @@ class ORBStrategy(BaseStrategy):
         config: StrategyConfig,
         orb_config: Optional[ORBConfig] = None,
         trade_logger=None,
+        kronos_engine=None,
     ):
         super().__init__(client, risk_manager, config)
         self.orb_cfg = orb_config or ORBConfig()
         self._trade_logger = trade_logger
+        self._kronos = kronos_engine  # KronosSignalEngine instance or None
 
         # Opening range state — reset each session
         self._or_high: float = 0.0
@@ -187,6 +197,9 @@ class ORBStrategy(BaseStrategy):
 
         if not self._long_taken and price > self._or_high:
             logger.info("[%s] Long breakout @ %.2f > OR_HIGH %.2f", self.config.name, price, self._or_high)
+            if not await self._kronos_allows("BUY"):
+                self._long_taken = True  # don't retry same direction
+                return None
             self._long_taken = True
             result = await self.buy(price, f"ORB long breakout  OR={self._or_high:.2f}/{self._or_low:.2f}")
             if result is not None:
@@ -197,6 +210,9 @@ class ORBStrategy(BaseStrategy):
 
         elif not self._short_taken and price < self._or_low:
             logger.info("[%s] Short breakout @ %.2f < OR_LOW %.2f", self.config.name, price, self._or_low)
+            if not await self._kronos_allows("SELL"):
+                self._short_taken = True
+                return None
             self._short_taken = True
             result = await self.sell(price, f"ORB short breakout  OR={self._or_high:.2f}/{self._or_low:.2f}")
             if result is not None:
@@ -206,6 +222,28 @@ class ORBStrategy(BaseStrategy):
                 return sig
 
         return None
+
+    async def _kronos_allows(self, direction: str) -> bool:
+        """Return True if Kronos agrees with the proposed trade direction (or is disabled)."""
+        if not self.orb_cfg.use_kronos or self._kronos is None:
+            return True
+        try:
+            result = await self._kronos.score_from_db(
+                security_id=self.config.security_id,
+                exchange_segment=self.config.exchange_segment,
+            )
+            model_side = result.get("side", "HOLD")
+            confidence = result.get("confidence", 0.0)
+            agrees = (model_side == direction) and (confidence >= self.orb_cfg.kronos_min_confidence)
+            logger.info(
+                "[%s] Kronos says %s (conf=%.2f)  ORB wants %s  → %s",
+                self.config.name, model_side, confidence, direction,
+                "ALLOW" if agrees else "BLOCK",
+            )
+            return agrees
+        except Exception as exc:
+            logger.warning("[%s] Kronos check failed (%s) — allowing trade", self.config.name, exc)
+            return True  # fail-open: don't block trades due to model errors
 
     # ------------------------------------------------------------------
     # Sell (short) — mirrors buy() from BaseStrategy
