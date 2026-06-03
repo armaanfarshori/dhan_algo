@@ -178,7 +178,7 @@ function SignalCard({ sig, atr }) {
       background: T.bg1,
       border: `1px solid ${T.line}`,
       borderLeft: `3px solid ${cfg.border}`,
-      padding: '12px 14px',
+      padding: 16,
       display: 'flex', flexDirection: 'column', gap: 8,
       position: 'relative', overflow: 'hidden',
     }}>
@@ -435,7 +435,7 @@ function PositionStrip({ positions, paperPositions, risk }) {
       {open.length === 0 ? (
         <div style={{
           fontFamily: T.mono, fontSize: 10, color: T.ink3,
-          padding: '10px 14px',
+          padding: 16,
           border: `1px solid ${T.line}`,
           borderLeft: `2px solid ${T.line2}`,
         }}>
@@ -452,7 +452,7 @@ function PositionStrip({ positions, paperPositions, risk }) {
             return (
               <div key={i} style={{
                 display: 'flex', gap: 20, alignItems: 'center',
-                padding: '10px 14px',
+                padding: 16,
                 background: T.bg1,
                 border: `1px solid ${T.line}`,
                 borderLeft: `3px solid ${qty > 0 ? T.green : T.red}`,
@@ -538,7 +538,7 @@ function TradeTable({ tradelog }) {
 
   return (
     <div style={{ background: T.bg1, border: `1px solid ${T.line}` }}>
-      <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.line}`, fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em' }}>
+      <div style={{ padding: '10px 16px', borderBottom: `1px solid ${T.line}`, fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em' }}>
         TRADE HISTORY
       </div>
       {trades.length === 0 ? (
@@ -580,7 +580,7 @@ function RiskMeter({ risk }) {
   const pct   = Math.min(Math.abs(Math.min(pnl, 0)) / limit * 100, 100)
 
   return (
-    <div style={{ background: T.bg1, border: `1px solid ${T.line}`, padding: 14, marginBottom: 16 }}>
+    <div style={{ background: T.bg1, border: `1px solid ${T.line}`, padding: 16, marginBottom: 16 }}>
       <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em', marginBottom: 10 }}>
         DAILY LOSS LIMIT
       </div>
@@ -613,7 +613,7 @@ function PortfolioTab({ data }) {
       </div>
       <div>
         <RiskMeter risk={data.risk} />
-        <div style={{ background: T.bg1, border: `1px solid ${T.line}`, padding: 14 }}>
+        <div style={{ background: T.bg1, border: `1px solid ${T.line}`, padding: 16 }}>
           <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em', marginBottom: 12 }}>ACCOUNT</div>
           {[
             ['AVAILABLE', balance, T.green],
@@ -641,7 +641,7 @@ function LogPanel({ logs }) {
 
   return (
     <div style={{ background: T.bg1, border: `1px solid ${T.line}`, marginTop: 16 }}>
-      <div style={{ padding: '8px 14px', borderBottom: `1px solid ${T.line}`, fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.15em' }}>
+      <div style={{ padding: '8px 16px', borderBottom: `1px solid ${T.line}`, fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em' }}>
         SYSTEM LOGS
       </div>
       <div style={{ maxHeight: 240, overflowY: 'auto', padding: '6px 0' }}>

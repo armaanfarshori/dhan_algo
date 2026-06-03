@@ -26,7 +26,7 @@ function SignalRow({ s, idx }) {
   return (
     <div style={{
       display: 'grid', gridTemplateColumns: '28px 80px 64px 1fr 80px',
-      gap: 10, padding: '9px 14px', alignItems: 'center',
+      gap: 10, padding: '9px 16px', alignItems: 'center',
       background: idx % 2 === 0 ? T.bg1 : T.bg2,
       borderBottom: `1px solid ${T.line}`,
     }}>
@@ -65,9 +65,9 @@ function ScreenerTable({ candidates }) {
     <div>
       <div style={{
         display: 'grid', gridTemplateColumns: '28px 80px 64px 1fr 80px',
-        gap: 10, padding: '7px 14px',
+        gap: 10, padding: '7px 16px',
         fontFamily: T.mono, fontSize: 9, color: T.ink3,
-        textTransform: 'uppercase', letterSpacing: '0.16em',
+        textTransform: 'uppercase', letterSpacing: '0.18em',
         borderBottom: `1px solid ${T.line}`,
       }}>
         <span>#</span><span>SECURITY</span><span>SIGNAL</span>
@@ -85,13 +85,16 @@ function SignalHistory({ signals }) {
   const holds = signals.filter(s => s.side === 'HOLD').length
   const last  = signals[0]
   return (
-    <div style={{ padding: '10px 14px', display: 'flex', gap: 20, alignItems: 'center', borderTop: `1px solid ${T.line}` }}>
-      <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink2 }}>HISTORY</span>
-      <span style={{ fontFamily: T.mono, fontSize: 11, color: T.green }}>{buys} BUY</span>
-      <span style={{ fontFamily: T.mono, fontSize: 11, color: T.red  }}>{sells} SELL</span>
-      <span style={{ fontFamily: T.mono, fontSize: 11, color: T.ink2 }}>{holds} HOLD</span>
+    <div style={{ padding: '10px 16px', display: 'flex', gap: 20, alignItems: 'center', borderTop: `1px solid ${T.line}` }}>
+      <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em', textTransform: 'uppercase' }}>HISTORY</span>
+      <span style={{ fontFamily: T.dot, fontSize: 18, color: T.green }}>{buys}</span>
+      <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>BUY</span>
+      <span style={{ fontFamily: T.dot, fontSize: 18, color: T.red  }}>{sells}</span>
+      <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>SELL</span>
+      <span style={{ fontFamily: T.dot, fontSize: 18, color: T.ink2 }}>{holds}</span>
+      <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>HOLD</span>
       {last && (
-        <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3, marginLeft: 'auto' }}>
+        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, marginLeft: 'auto' }}>
           Last: {fmtTime(last.ts)} · {last.strategy}
         </span>
       )}
@@ -104,16 +107,16 @@ export default function AISignalsTab({ screener, signals }) {
   const signalRows = signals?.data?.signals ?? []
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, padding: 16 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, padding: '20px 24px 60px' }}>
 
       {/* Screener + Kronos table */}
       <div style={{ background: T.bg1, border: `1px solid ${T.line}` }}>
         <div style={{
           display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-          padding: '10px 14px', borderBottom: `1px solid ${T.line}`,
+          padding: '10px 16px', borderBottom: `1px solid ${T.line}`,
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink2, letterSpacing: '0.16em', textTransform: 'uppercase' }}>
+            <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em', textTransform: 'uppercase' }}>
               NSE SCREENER + KRONOS AI
             </span>
             {candidates.length > 0 && (
@@ -122,7 +125,7 @@ export default function AISignalsTab({ screener, signals }) {
               </span>
             )}
           </div>
-          <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>ATR-ranked · 30d lookback</span>
+          <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>ATR-ranked · 30d lookback</span>
         </div>
         <ScreenerTable candidates={candidates} />
         <SignalHistory signals={signalRows} />
@@ -130,15 +133,15 @@ export default function AISignalsTab({ screener, signals }) {
 
       {/* Signal summary stats */}
       {signalRows.length > 0 && (
-        <div style={{ background: T.bg1, border: `1px solid ${T.line}`, padding: '12px 14px' }}>
-          <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink2, letterSpacing: '0.16em', textTransform: 'uppercase', marginBottom: 10 }}>
+        <div style={{ background: T.bg1, border: `1px solid ${T.line}`, padding: 16 }}>
+          <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em', textTransform: 'uppercase', marginBottom: 10 }}>
             RECENT SIGNALS (DB)
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 240, overflowY: 'auto' }}>
             {signalRows.slice(0, 30).map((s, i) => {
               const meta = SIDE_META[s.side] ?? SIDE_META.HOLD
               return (
-                <div key={i} style={{ display: 'flex', gap: 12, fontFamily: T.mono, fontSize: 11, padding: '3px 0', borderBottom: `1px solid ${T.line}` }}>
+                <div key={i} style={{ display: 'flex', gap: 12, fontFamily: T.mono, fontSize: 10, padding: '3px 0', borderBottom: `1px solid ${T.line}` }}>
                   <span style={{ color: T.ink3, minWidth: 55 }}>{fmtTime(s.ts)}</span>
                   <span style={{ color: T.ink1, minWidth: 60 }}>{s.security_id}</span>
                   <span style={{ color: meta.color, minWidth: 36 }}>{s.side}</span>

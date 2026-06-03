@@ -2,10 +2,10 @@ import { T, fmtTime } from '../../tokens'
 
 function Stat({ label, value, sub, color }) {
   return (
-    <div style={{ background: T.bg2, border: `1px solid ${T.line}`, padding: '10px 14px' }}>
-      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, textTransform: 'uppercase', letterSpacing: '0.16em', marginBottom: 4 }}>{label}</div>
+    <div style={{ background: T.bg2, border: `1px solid ${T.line}`, padding: 16 }}>
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, textTransform: 'uppercase', letterSpacing: '0.18em', marginBottom: 4 }}>{label}</div>
       <div style={{ fontFamily: T.dot, fontSize: 26, color: color ?? T.ink0 }}>{value}</div>
-      {sub && <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3, marginTop: 2 }}>{sub}</div>}
+      {sub && <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, marginTop: 4 }}>{sub}</div>}
     </div>
   )
 }
@@ -14,12 +14,12 @@ function PanelHeader({ children, right }) {
   return (
     <div style={{
       display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-      padding: '10px 14px', borderBottom: `1px solid ${T.line}`,
-      fontFamily: T.mono, fontSize: 10, color: T.ink2,
-      textTransform: 'uppercase', letterSpacing: '0.16em',
+      padding: '10px 16px', borderBottom: `1px solid ${T.line}`,
+      fontFamily: T.mono, fontSize: 9, color: T.ink3,
+      textTransform: 'uppercase', letterSpacing: '0.18em',
     }}>
       <span>{children}</span>
-      {right && <span style={{ color: T.ink3, textTransform: 'none', letterSpacing: 0 }}>{right}</span>}
+      {right && <span style={{ color: T.ink3, textTransform: 'none', letterSpacing: 0, fontSize: 9 }}>{right}</span>}
     </div>
   )
 }
@@ -36,7 +36,7 @@ function DBStats({ dbStats }) {
   const nseEq  = data.instruments?.NSE_EQ ?? 0
   const total  = Object.values(data.instruments ?? {}).reduce((a, b) => a + b, 0)
   return (
-    <div style={{ padding: 14, display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
+    <div style={{ padding: 16, display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
       <Stat
         label="1m Bars"
         value={bars1m ? (bars1m.rows / 1000).toFixed(0) + 'K' : '—'}
@@ -76,22 +76,22 @@ function BackfillStatus({ backfill }) {
 
   return (
     <div>
-      <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, borderBottom: `1px solid ${T.line}` }}>
+      <div style={{ padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 10, borderBottom: `1px solid ${T.line}` }}>
         <div style={{
           width: 8, height: 8, borderRadius: '50%',
           background: running ? T.green : T.ink3,
           boxShadow: running ? `0 0 6px ${T.green}` : 'none',
         }} />
-        <span style={{ fontFamily: T.mono, fontSize: 11, color: running ? T.green : T.ink2 }}>
+        <span style={{ fontFamily: T.mono, fontSize: 9, letterSpacing: '0.18em', color: running ? T.green : T.ink2 }}>
           {running ? 'RUNNING' : 'IDLE'}
         </span>
         {running && (
-          <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink2 }}>
+          <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink1 }}>
             · processing security {currentSec}
           </span>
         )}
       </div>
-      <div style={{ padding: '10px 14px', maxHeight: 140, overflowY: 'auto' }}>
+      <div style={{ padding: '10px 16px', maxHeight: 140, overflowY: 'auto' }}>
         {logs.length === 0
           ? <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>No log activity</span>
           : logs.map((l, i) => (
@@ -110,19 +110,19 @@ function HermesStatus({ hermes }) {
   const data    = hermes?.data
   const running = data?.running ?? false
   return (
-    <div style={{ padding: '10px 14px', display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'center' }}>
+    <div style={{ padding: '10px 16px', display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'center' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <div style={{
           width: 8, height: 8, borderRadius: '50%',
           background: running ? T.green : T.red,
           boxShadow: running ? `0 0 6px ${T.green}` : 'none',
         }} />
-        <span style={{ fontFamily: T.mono, fontSize: 11, color: running ? T.green : T.red }}>
+        <span style={{ fontFamily: T.mono, fontSize: 9, letterSpacing: '0.18em', color: running ? T.green : T.red }}>
           {running ? 'GATEWAY ONLINE' : 'GATEWAY OFFLINE'}
         </span>
       </div>
       {data?.model && (
-        <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink2 }}>
+        <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink1 }}>
           {data.model}
         </span>
       )}
@@ -138,8 +138,8 @@ function HermesStatus({ hermes }) {
           ['Health rpt', '09:00 IST', 'weekly'],
         ].map(([name, time, freq]) => (
           <div key={name} style={{ textAlign: 'right' }}>
-            <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>{name}</div>
-            <div style={{ fontFamily: T.mono, fontSize: 10, color: T.amber }}>{time} · {freq}</div>
+            <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em', textTransform: 'uppercase' }}>{name}</div>
+            <div style={{ fontFamily: T.dot, fontSize: 18, color: T.amber }}>{time} · {freq}</div>
           </div>
         ))}
       </div>
@@ -149,7 +149,7 @@ function HermesStatus({ hermes }) {
 
 export default function DataTab({ dbStats, backfill, hermes }) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, padding: 16 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
 
       {/* TimescaleDB */}
       <div style={{ background: T.bg1, border: `1px solid ${T.line}` }}>

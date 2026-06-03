@@ -1,34 +1,48 @@
-import { INR, colorVar } from '../utils'
-
-const s = {
-  card:  { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: 16 },
-  label: { fontSize: 10, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--muted)', marginBottom: 8 },
-  item:  { background: 'var(--bg)', borderRadius: 6, padding: 10, marginTop: 8 },
-  sym:   { fontWeight: 'bold', color: 'var(--blue)' },
-  qty:   { color: 'var(--muted)', fontSize: 11, marginTop: 2 },
-  upnl:  { fontSize: 13, marginTop: 4 },
-  empty: { color: 'var(--muted)', fontSize: 12, marginTop: 8 },
-  err:   { color: 'var(--red)', fontSize: 11, marginTop: 8 },
-}
+import { T, INR, colorPnl } from '../tokens'
 
 export default function PositionsList({ positions }) {
   const pos = positions
-  if (!pos || pos.loading) return <div style={s.card}><div style={s.label}>Live Positions</div><div style={s.empty}>Loading…</div></div>
-  if (pos.error || !pos.data?.ok) return <div style={s.card}><div style={s.label}>Live Positions</div><div style={s.err}>Could not load positions</div></div>
+  if (!pos || pos.loading) return (
+    <div style={{ background: T.bg1, border: `1px solid ${T.line}`, padding: 16 }}>
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, textTransform: 'uppercase', letterSpacing: '0.18em', marginBottom: 8 }}>Live Positions</div>
+      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3, marginTop: 8 }}>Loading…</div>
+    </div>
+  )
+  if (pos.error || !pos.data?.ok) return (
+    <div style={{ background: T.bg1, border: `1px solid ${T.line}`, padding: 16 }}>
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, textTransform: 'uppercase', letterSpacing: '0.18em', marginBottom: 8 }}>Live Positions</div>
+      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.red, marginTop: 8 }}>Could not load positions</div>
+    </div>
+  )
 
   const open = (pos.data.data ?? []).filter(p => p.netQty !== 0)
   return (
-    <div style={s.card}>
-      <div style={s.label}>Live Positions</div>
+    <div style={{ background: T.bg1, border: `1px solid ${T.line}`, padding: 16 }}>
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, textTransform: 'uppercase', letterSpacing: '0.18em', marginBottom: 8 }}>
+        Live Positions
+      </div>
       {open.length === 0
-        ? <div style={s.empty}>No open positions</div>
+        ? <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3, marginTop: 8 }}>No open positions</div>
         : open.map((p, i) => {
             const upnl = p.unrealisedProfit ?? 0
+            const qty  = p.netQty
             return (
-              <div key={i} style={s.item}>
-                <div style={s.sym}>{p.tradingSymbol ?? p.securityId}</div>
-                <div style={s.qty}>Qty: {p.netQty} · {p.productType ?? ''}</div>
-                <div style={{ ...s.upnl, color: colorVar(upnl) }}>uPnL: {INR(upnl)}</div>
+              <div key={i} style={{
+                background: T.bg2,
+                border: `1px solid ${T.line}`,
+                borderLeft: `3px solid ${qty > 0 ? T.green : T.red}`,
+                padding: 16,
+                marginTop: 8,
+              }}>
+                <div style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.cyan }}>
+                  {p.tradingSymbol ?? p.securityId}
+                </div>
+                <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em', marginTop: 4 }}>
+                  QTY: {qty} · {p.productType ?? ''}
+                </div>
+                <div style={{ fontFamily: T.dot, fontSize: 20, color: colorPnl(upnl), marginTop: 4 }}>
+                  {upnl >= 0 ? '+' : ''}{INR(upnl)}
+                </div>
               </div>
             )
           })
