@@ -914,10 +914,12 @@ async def main():
         from strategies.strategy_orb import ORBStrategy, ORBConfig
         from core.kronos_signal import get_kronos_engine
 
+        # Kronos engine is a lazy singleton — model loads from HuggingFace on
+        # first _kronos_allows() call (market open). Don't pre-load here:
+        # backfill (152MB) + Hermes (190MB) already consume most of the 1GB RAM
+        # on t4g.micro. PyTorch adds ~300MB — pre-loading would OOM the instance.
+        # Upgrade to t4g.medium if you want eager model loading.
         kronos = get_kronos_engine()
-        # Pre-load Kronos model in background so it's ready at market open
-        import asyncio as _asyncio
-        _asyncio.create_task(kronos.load())
 
         # One ORBStrategy instance per watchlist security
         watchlist_ids = _cfg.watchlist_security_ids
