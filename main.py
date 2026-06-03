@@ -884,13 +884,22 @@ async def main():
         # Paper: 20% of paper balance → ₹100k with default ₹5L, covers FINNIFTY lots
         # Live:  tighten to ₹25,000 before going live
         _trade_risk = int(PAPER_BALANCE * 0.20) if PAPER_TRADING else 25_000
+        # ── DB backend (non-blocking audit trail) ─────────────────────────────
+        from core.journal import get_db_backend
+        db = get_db_backend()
+        await db.connect()
+        run_id = await db.log_run_start(
+            mode="PAPER" if PAPER_TRADING else "LIVE",
+            strategy=STRATEGY,
+        )
+
         risk_cfg = RiskConfig(
             max_daily_loss=MAX_DAILY_LOSS,
             max_open_positions=10,
             max_loss_per_trade=_trade_risk,
             check_interval_seconds=30,
         )
-        risk = RiskManager(dhan, risk_cfg)
+        risk = RiskManager(dhan, risk_cfg, db_backend=db)
 
         @risk.on_halt
         async def on_risk_halt(reason: str):
@@ -911,7 +920,7 @@ async def main():
                 poll_interval=10.0,
                 paper_trading=PAPER_TRADING,
             )
-            strategy = OptionsScalperStrategy(dhan, risk, cfg)
+            strategy = OptionsScalperStrategy(dhan, risk, cfg, db_backend=db, run_id=run_id)
         else:
             cfg = SMAConfig(
                 name="SMA_9_21_Reliance",
@@ -925,7 +934,7 @@ async def main():
                 paper_trading=PAPER_TRADING,
                 max_orders=10,
             )
-            strategy = SMACrossoverStrategy(dhan, risk, cfg)
+            strategy = SMACrossoverStrategy(dhan, risk, cfg, db_backend=db, run_id=run_id)
 
         # ── Live WebSocket feed (replaces REST polling for all securities) ───
         live_feed = LiveFeed(CLIENT_ID, access_token)
@@ -1079,6 +1088,7 @@ async def main():
             task.cancel()
         await asyncio.gather(strategy_task, equity_task, feed_task, *pending, return_exceptions=True)
         await server_runner.cleanup()
+        await db.log_run_stop(run_id, outcome="stopped")
         logger.info("✅ Platform shut down cleanly")
 
 

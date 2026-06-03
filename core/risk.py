@@ -62,11 +62,12 @@ class RiskManager:
         ok, reason = rm.check_order(quantity=10, price=500)
     """
 
-    def __init__(self, client, config: Optional[RiskConfig] = None):
+    def __init__(self, client, config: Optional[RiskConfig] = None, db_backend=None):
         self.client = client
         self.config = config or RiskConfig()
         self.state = RiskState()
         self._on_halt_callbacks: List[Callable] = []
+        self._db = db_backend   # AsyncDBBackend — optional
 
     def on_halt(self, callback: Callable):
         """Register a callback invoked when the risk halt is triggered."""
@@ -122,6 +123,25 @@ class RiskManager:
                 open_count += 1
             unrealised += pos.get("unrealisedProfit", 0.0)
             realised += pos.get("realisedProfit", 0.0)
+
+        # ── Snapshot to TimescaleDB (non-blocking, fail-silent) ────────────
+        if self._db:
+            cash = float(funds.get("availabelBalance", 0))
+            holdings = sum(
+                abs(p.get("netQty", 0)) * p.get("lastTradedPrice", 0)
+                for p in positions if p.get("netQty", 0) != 0
+            )
+            peak = getattr(self, "_equity_peak", cash + holdings)
+            total_equity = cash + holdings
+            if total_equity > peak:
+                self._equity_peak = total_equity
+            drawdown = (total_equity - peak) / peak if peak > 0 else 0.0
+            await self._db.snapshot_positions(positions)
+            await self._db.snapshot_equity(
+                cash=cash, holdings_value=holdings,
+                realized_pnl=realised, unrealized_pnl=unrealised,
+                drawdown=drawdown,
+            )
 
         self.state.open_position_count = open_count
         self.state.unrealised_pnl = unrealised

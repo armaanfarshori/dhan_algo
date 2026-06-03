@@ -255,6 +255,170 @@ class AsyncDBBackend:
                 losses       = daily_pnl.losses + EXCLUDED.losses
         """, {"date": today, "pnl": pnl, "win": 1 if pnl >= 0 else 0, "loss": 1 if pnl < 0 else 0})
 
+    # ── Orders + fills ─────────────────────────────────────────────────────────
+
+    async def log_order(
+        self,
+        security_id: str,
+        exchange_segment: str,
+        side: str,
+        qty: int,
+        order_type: str,
+        product_type: str,
+        mode: str,
+        price: float = 0.0,
+        dhan_order_id: Optional[str] = None,
+        client_order_id: Optional[str] = None,
+        signal_id: Optional[int] = None,
+        run_id: Optional[int] = None,
+        status: str = "PENDING",
+    ) -> None:
+        await self._run("""
+            INSERT INTO orders
+              (run_id, signal_id, dhan_order_id, client_order_id, created_at,
+               security_id, exchange_segment, side, qty,
+               order_type, product_type, price, mode, status)
+            VALUES
+              (:run_id, :signal_id, :dhan_order_id, :client_order_id, :ts,
+               :security_id, :exchange_segment, :side, :qty,
+               :order_type, :product_type, :price, :mode, :status)
+        """, {
+            "run_id": run_id, "signal_id": signal_id,
+            "dhan_order_id": dhan_order_id, "client_order_id": client_order_id,
+            "ts": datetime.now(timezone.utc),
+            "security_id": security_id, "exchange_segment": exchange_segment,
+            "side": side, "qty": qty, "order_type": order_type,
+            "product_type": product_type, "price": price,
+            "mode": mode, "status": status,
+        })
+
+    async def log_order_event(
+        self,
+        dhan_order_id: str,
+        status: str,
+        raw_payload: Optional[dict] = None,
+    ) -> None:
+        """Append a lifecycle event to order_events (append-only)."""
+        await self._run("""
+            INSERT INTO order_events (order_id, time, status, raw_payload)
+            SELECT id, :ts, :status, :payload
+            FROM orders WHERE dhan_order_id = :oid
+            LIMIT 1
+        """, {
+            "ts": datetime.now(timezone.utc), "status": status,
+            "payload": json.dumps(raw_payload or {}), "oid": dhan_order_id,
+        })
+
+    async def log_fill(
+        self,
+        dhan_order_id: str,
+        qty: int,
+        price: float,
+        fees: float = 0.0,
+        taxes: float = 0.0,
+    ) -> None:
+        await self._run("""
+            INSERT INTO fills (order_id, time, qty, price, fees, taxes)
+            SELECT id, :ts, :qty, :price, :fees, :taxes
+            FROM orders WHERE dhan_order_id = :oid
+            LIMIT 1
+        """, {
+            "ts": datetime.now(timezone.utc), "qty": qty, "price": price,
+            "fees": fees, "taxes": taxes, "oid": dhan_order_id,
+        })
+
+    # ── Position + equity snapshots ────────────────────────────────────────────
+
+    async def snapshot_positions(self, positions: list[dict]) -> None:
+        """Write a periodic snapshot of open positions to the positions hypertable."""
+        ts = datetime.now(timezone.utc)
+        for pos in positions:
+            qty = pos.get("netQty", 0)
+            if qty == 0:
+                continue
+            await self._run("""
+                INSERT INTO positions
+                  (time, security_id, qty, avg_price, ltp, unrealized_pnl, product_type)
+                VALUES
+                  (:ts, :sid, :qty, :avg, :ltp, :upnl, :prod)
+                ON CONFLICT (security_id, time) DO NOTHING
+            """, {
+                "ts":   ts,
+                "sid":  str(pos.get("securityId", pos.get("security_id", ""))),
+                "qty":  qty,
+                "avg":  pos.get("buyAvg", pos.get("avgPrice", 0)),
+                "ltp":  pos.get("lastTradedPrice", pos.get("ltp", 0)),
+                "upnl": pos.get("unrealisedProfit", pos.get("unrealizedProfit", 0)),
+                "prod": pos.get("productType", "INTRADAY"),
+            })
+
+    async def snapshot_equity(
+        self,
+        cash: float,
+        holdings_value: float,
+        realized_pnl: float,
+        unrealized_pnl: float,
+        drawdown: float = 0.0,
+    ) -> None:
+        total = cash + holdings_value
+        await self._run("""
+            INSERT INTO equity_curve
+              (time, cash, holdings_value, total_equity,
+               realized_pnl, unrealized_pnl, drawdown)
+            VALUES
+              (:ts, :cash, :hv, :total, :rpnl, :upnl, :dd)
+            ON CONFLICT (time) DO NOTHING
+        """, {
+            "ts": datetime.now(timezone.utc), "cash": cash, "hv": holdings_value,
+            "total": total, "rpnl": realized_pnl, "upnl": unrealized_pnl, "dd": drawdown,
+        })
+
+    # ── Session runs ───────────────────────────────────────────────────────────
+
+    async def log_run_start(self, mode: str, strategy: str) -> Optional[int]:
+        """Create a new run record. Returns run_id for linking orders/signals."""
+        if not self._enabled:
+            return None
+        import hashlib, subprocess
+        try:
+            git_sha = subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL
+            ).decode().strip()
+        except Exception:
+            git_sha = "unknown"
+        run_id = [None]
+
+        def _insert():
+            from sqlalchemy import text
+            session = self._Session()
+            try:
+                result = session.execute(text("""
+                    INSERT INTO runs (started_at, mode, strategy, version, outcome)
+                    VALUES (:ts, :mode, :strategy, :version, 'running')
+                    RETURNING id
+                """), {
+                    "ts": datetime.now(timezone.utc),
+                    "mode": mode, "strategy": strategy, "version": git_sha,
+                })
+                run_id[0] = result.scalar()
+                session.commit()
+            except Exception:
+                session.rollback()
+            finally:
+                session.close()
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _insert)
+        _log.info("Run %s started — mode=%s strategy=%s version=%s", run_id[0], mode, strategy, git_sha)
+        return run_id[0]
+
+    async def log_run_stop(self, run_id: Optional[int], outcome: str = "stopped") -> None:
+        if run_id is None:
+            return
+        await self._run("""
+            UPDATE runs SET stopped_at = :ts, outcome = :outcome WHERE id = :id
+        """, {"ts": datetime.now(timezone.utc), "outcome": outcome, "id": run_id})
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LogBuffer — rolling in-memory buffer for /api/logs

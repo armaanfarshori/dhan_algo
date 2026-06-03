@@ -47,15 +47,17 @@ class BaseStrategy(ABC):
     Abstract base strategy. Subclass and implement on_tick().
     """
 
-    def __init__(self, client, risk_manager, config: StrategyConfig):
+    def __init__(self, client, risk_manager, config: StrategyConfig, db_backend=None, run_id=None):
         self.client = client
         self.risk = risk_manager
         self.config = config
-        self.position: int = 0          # net qty (+ = long, - = short)
+        self.position: int = 0
         self.entry_price: float = 0.0
         self.orders_placed: int = 0
         self.signals: List[Signal] = []
         self._running = False
+        self._db = db_backend   # AsyncDBBackend — optional, fails silently if None
+        self._run_id = run_id   # links all orders/signals to this agent session
 
     @abstractmethod
     async def on_tick(self, tick: Dict) -> Optional[Signal]:
@@ -81,25 +83,42 @@ class BaseStrategy(ABC):
             logger.warning(f"[{self.config.name}] Max orders reached")
             return None
 
+        mode_str = "PAPER" if self.config.paper_trading else "LIVE"
         if self.config.paper_trading:
             logger.info(f"📝 [PAPER] BUY {self.config.quantity} @ ₹{price:.2f} — {reason}")
             self.position = self.config.quantity
             self.entry_price = price
             self.orders_placed += 1
-            return {"paper": True, "action": "BUY", "price": price}
+            result = {"paper": True, "action": "BUY", "price": price}
+        else:
+            result = await self.client.place_order(
+                transaction_type="BUY",
+                exchange_segment=self.config.exchange_segment,
+                product_type=self.config.product_type,
+                order_type="MARKET",
+                security_id=self.config.security_id,
+                quantity=self.config.quantity,
+            )
+            self.position = self.config.quantity
+            self.entry_price = price
+            self.orders_placed += 1
+            logger.info(f"🟢 BUY order placed: {result}")
 
-        result = await self.client.place_order(
-            transaction_type="BUY",
-            exchange_segment=self.config.exchange_segment,
-            product_type=self.config.product_type,
-            order_type="MARKET",
-            security_id=self.config.security_id,
-            quantity=self.config.quantity,
-        )
-        self.position = self.config.quantity
-        self.entry_price = price
-        self.orders_placed += 1
-        logger.info(f"🟢 BUY order placed: {result}")
+        if self._db:
+            oid = result.get("orderId") if not result.get("paper") else None
+            await self._db.log_order(
+                security_id=self.config.security_id,
+                exchange_segment=self.config.exchange_segment,
+                side="BUY", qty=self.config.quantity,
+                order_type="MARKET", product_type=self.config.product_type,
+                mode=mode_str, price=price, dhan_order_id=oid,
+                run_id=self._run_id, status="TRADED" if self.config.paper_trading else "PENDING",
+            )
+            await self._db.log_trade_entry(
+                security_id=self.config.security_id, side="BUY",
+                qty=self.config.quantity, entry_price=price,
+                strategy=self.config.name, dhan_order_id=oid,
+            )
         return result
 
     async def sell(self, price: float, reason: str = "") -> Optional[Dict]:
@@ -111,25 +130,42 @@ class BaseStrategy(ABC):
             logger.warning(f"[{self.config.name}] Risk block: {msg}")
             return None
 
+        mode_str = "PAPER" if self.config.paper_trading else "LIVE"
         if self.config.paper_trading:
             logger.info(f"📝 [PAPER] SELL {self.config.quantity} @ ₹{price:.2f} — {reason}")
             self.position = -self.config.quantity
             self.entry_price = price
             self.orders_placed += 1
-            return {"paper": True, "action": "SELL", "price": price}
+            result = {"paper": True, "action": "SELL", "price": price}
+        else:
+            result = await self.client.place_order(
+                transaction_type="SELL",
+                exchange_segment=self.config.exchange_segment,
+                product_type=self.config.product_type,
+                order_type="MARKET",
+                security_id=self.config.security_id,
+                quantity=self.config.quantity,
+            )
+            self.position = -self.config.quantity
+            self.entry_price = price
+            self.orders_placed += 1
+            logger.info(f"🔴 SELL order placed: {result}")
 
-        result = await self.client.place_order(
-            transaction_type="SELL",
-            exchange_segment=self.config.exchange_segment,
-            product_type=self.config.product_type,
-            order_type="MARKET",
-            security_id=self.config.security_id,
-            quantity=self.config.quantity,
-        )
-        self.position = -self.config.quantity
-        self.entry_price = price
-        self.orders_placed += 1
-        logger.info(f"🔴 SELL order placed: {result}")
+        if self._db:
+            oid = result.get("orderId") if not result.get("paper") else None
+            await self._db.log_order(
+                security_id=self.config.security_id,
+                exchange_segment=self.config.exchange_segment,
+                side="SELL", qty=self.config.quantity,
+                order_type="MARKET", product_type=self.config.product_type,
+                mode=mode_str, price=price, dhan_order_id=oid,
+                run_id=self._run_id, status="TRADED" if self.config.paper_trading else "PENDING",
+            )
+            await self._db.log_trade_entry(
+                security_id=self.config.security_id, side="SELL",
+                qty=self.config.quantity, entry_price=price,
+                strategy=self.config.name, dhan_order_id=oid,
+            )
         return result
 
     async def exit_position(self, price: float, reason: str = "") -> Optional[Dict]:
@@ -151,7 +187,14 @@ class BaseStrategy(ABC):
             security_id=self.config.security_id,
             quantity=abs(self.position),
         )
+        pnl_realized = pnl
         self.position = 0
+        if self._db:
+            oid = result.get("orderId") if result and not result.get("paper") else None
+            await self._db.log_trade_exit(
+                security_id=self.config.security_id,
+                exit_price=price, pnl=pnl_realized, dhan_order_id=oid,
+            )
         return result
 
     async def run(self):
