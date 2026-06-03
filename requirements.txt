@@ -4,8 +4,8 @@
 # Core async HTTP
 aiohttp>=3.9.0
 
-# Official DhanHQ SDK (optional — our wrapper is standalone but SDK is handy for testing)
-dhanhq>=2.0.0
+# Official DhanHQ SDK
+dhanhq>=2.2.0
 
 # Data & analytics
 pandas>=2.1.0
@@ -16,12 +16,12 @@ scipy>=1.11.0
 python-dotenv>=1.0.0
 
 # Logging & monitoring
-rich>=13.7.0          # pretty terminal output
+rich>=13.7.0
 
 # Testing
 pytest>=7.4.0
 pytest-asyncio>=0.23.0
-aioresponses>=0.7.6   # mock aiohttp in tests
+aioresponses>=0.7.6
 
 # TOTP for auto token refresh
 pyotp>=2.9.0
@@ -29,6 +29,8 @@ pyotp>=2.9.0
 # Brotli decompression (required for NSE India API responses)
 Brotli>=1.1.0
 
-# Optional: Telegram / email alerts
-# httpx>=0.26.0
-# python-telegram-bot>=20.7
+# TimescaleDB / data pipeline
+psycopg2-binary>=2.9
+sqlalchemy>=2.0
+alembic>=1.13
+pytz>=2024.1
