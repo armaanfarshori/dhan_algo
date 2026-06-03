@@ -18,6 +18,7 @@ import LiveTicker         from './components/cockpit/LiveTicker'
 import AISignalsTab       from './components/cockpit/AISignalsTab'
 import DataTab            from './components/cockpit/DataTab'
 import { FnoPanel, EqPanel } from './components/cockpit/TradingPanels'
+import Positions from './components/PositionsList'
 
 const TABS = ['Cockpit', 'AI Signals', 'Data', 'Backtest', 'Risk Console']
 
