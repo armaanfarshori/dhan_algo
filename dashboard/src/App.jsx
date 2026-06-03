@@ -635,7 +635,8 @@ function PortfolioTab({ data }) {
 // System tab — reuse DataTab + add kill switch + logs
 // ─────────────────────────────────────────────────────────────────
 function LogPanel({ logs }) {
-  const rows = (logs?.data ?? []).slice(-20)
+  // logs API: {ok, logs:[...]}  → need .data.logs
+  const rows = (logs?.data?.logs ?? []).slice(-20)
   const COLOR = { WARNING: T.amber, ERROR: T.red, CRITICAL: T.red }
 
   return (
