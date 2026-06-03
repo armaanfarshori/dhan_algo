@@ -1,21 +1,27 @@
 """
 Historical OHLCV Backfill
 =========================
-Pulls up to 365 days of 1-min intraday data from Dhan /v2/charts/intraday
-(max 90 days per call) and upserts into both:
-  - bars (timeframe='1m')  — primary, authoritative price history
-  - ohlcv_1min             — legacy; kept for backwards compatibility
+Pulls historical bars from the Dhan API and upserts into TimescaleDB.
+
+Endpoints used:
+  - /v2/charts/intraday  → 1-min bars (max 90 days per call; tested to 2+ years)
+  - /v2/charts/historical → daily bars (tested to 5+ years)
+
+All data lands in:
+  - bars  (timeframe='1m' or '1d')  — primary
+  - ohlcv_1min                       — legacy, kept for backwards compat (1m only)
 
 Usage:
-    python backfill.py                        # last 90 days, default watchlist
-    python backfill.py --from 2025-01-01 --to 2026-06-03 --ids 2885,1333
-    python backfill.py --dry-run              # fetch only, no DB write
+    python backfill.py                                # 90d intraday, default watchlist
+    python backfill.py --from 2024-01-01              # extended intraday
+    python backfill.py --daily                        # 5-year daily bars
+    python backfill.py --all                          # 2y intraday + 5y daily
+    python backfill.py --ids 2885,1333 --dry-run      # fetch only, no DB write
 """
 
 import argparse
 import asyncio
 import logging
-import sys
 from datetime import date, timedelta, datetime
 from typing import Any
 
@@ -36,39 +42,57 @@ logging.basicConfig(
 )
 logger = logging.getLogger("dhan.backfill")
 
-_MAX_CHUNK_DAYS = 90
+_MAX_INTRADAY_CHUNK = 90  # Dhan hard limit per /v2/charts/intraday call
 
 
-def _parse_response(data: dict[str, Any], security_id: str, exchange_segment: str) -> pd.DataFrame:
-    """Convert the Dhan intraday API response dict to a DataFrame."""
-    inner = data.get("data", data)  # some responses wrap under "data"
+# ── Parsing ────────────────────────────────────────────────────────────────────
+
+def _parse_intraday(data: dict[str, Any], security_id: str, exchange_segment: str) -> pd.DataFrame:
+    inner = data.get("data", data)
     timestamps = inner.get("timestamp", [])
     if not timestamps:
         return pd.DataFrame()
-
-    df = pd.DataFrame({
-        "security_id":     security_id,
-        "exchange_segment":exchange_segment,
-        "ts":  pd.to_datetime(timestamps, unit="s", utc=True),
-        "open":  inner["open"],
-        "high":  inner["high"],
-        "low":   inner["low"],
-        "close": inner["close"],
-        "volume":inner["volume"],
+    return pd.DataFrame({
+        "security_id":      security_id,
+        "exchange_segment": exchange_segment,
+        "ts":     pd.to_datetime(timestamps, unit="s", utc=True),
+        "open":   inner["open"],
+        "high":   inner["high"],
+        "low":    inner["low"],
+        "close":  inner["close"],
+        "volume": inner["volume"],
     })
-    return df
 
 
-def _upsert_candles(df: pd.DataFrame) -> int:
-    """Upsert candles into bars (primary) and ohlcv_1min (legacy). Returns row count."""
+def _parse_daily(data: dict[str, Any], security_id: str, exchange_segment: str) -> pd.DataFrame:
+    inner = data.get("data", data)
+    timestamps = inner.get("timestamp", [])
+    if not timestamps:
+        return pd.DataFrame()
+    return pd.DataFrame({
+        "security_id":      security_id,
+        "exchange_segment": exchange_segment,
+        "ts":     pd.to_datetime(timestamps, unit="s", utc=True),
+        "open":   inner["open"],
+        "high":   inner["high"],
+        "low":    inner["low"],
+        "close":  inner["close"],
+        "volume": inner["volume"],
+    })
+
+
+# ── DB writes ──────────────────────────────────────────────────────────────────
+
+def _upsert_bars(df: pd.DataFrame, timeframe: str) -> int:
+    """Upsert into bars table (and ohlcv_1min for 1m data)."""
     if df.empty:
         return 0
 
-    rows_bars = [
+    rows = [
         {
             "time":        r["ts"],
             "security_id": r["security_id"],
-            "timeframe":   "1m",
+            "timeframe":   timeframe,
             "open":   r["open"],
             "high":   r["high"],
             "low":    r["low"],
@@ -89,26 +113,31 @@ def _upsert_candles(df: pd.DataFrame) -> int:
             volume = EXCLUDED.volume
     """)
 
-    legacy_rows = df.rename(columns={"ts": "ts"}).to_dict(orient="records")
-    legacy_sql = text("""
-        INSERT INTO ohlcv_1min (security_id, exchange_segment, ts, open, high, low, close, volume)
-        VALUES (:security_id, :exchange_segment, :ts, :open, :high, :low, :close, :volume)
-        ON CONFLICT (security_id, ts) DO UPDATE SET
-            open   = EXCLUDED.open,
-            high   = EXCLUDED.high,
-            low    = EXCLUDED.low,
-            close  = EXCLUDED.close,
-            volume = EXCLUDED.volume
-    """)
-
     with get_session() as session:
-        session.execute(bars_sql, rows_bars)
-        session.execute(legacy_sql, legacy_rows)
+        session.execute(bars_sql, rows)
 
-    return len(rows_bars)
+        # also mirror into ohlcv_1min for 1-minute bars (legacy)
+        if timeframe == "1m":
+            legacy_rows = df.to_dict(orient="records")
+            session.execute(text("""
+                INSERT INTO ohlcv_1min
+                    (security_id, exchange_segment, ts, open, high, low, close, volume)
+                VALUES
+                    (:security_id, :exchange_segment, :ts, :open, :high, :low, :close, :volume)
+                ON CONFLICT (security_id, ts) DO UPDATE SET
+                    open   = EXCLUDED.open,
+                    high   = EXCLUDED.high,
+                    low    = EXCLUDED.low,
+                    close  = EXCLUDED.close,
+                    volume = EXCLUDED.volume
+            """), legacy_rows)
+
+    return len(rows)
 
 
-async def backfill_security(
+# ── Intraday backfill (1m) ─────────────────────────────────────────────────────
+
+async def backfill_intraday(
     client: DhanClient,
     security_id: str,
     exchange_segment: str,
@@ -116,19 +145,12 @@ async def backfill_security(
     to_date: date,
     dry_run: bool = False,
 ) -> int:
-    """Backfill one security in 90-day chunks. Returns total candles stored."""
     total = 0
     cursor = from_date
-
     while cursor <= to_date:
-        chunk_end = min(cursor + timedelta(days=_MAX_CHUNK_DAYS - 1), to_date)
-        logger.info(
-            "  %s  %s → %s",
-            security_id,
-            cursor.strftime("%Y-%m-%d"),
-            chunk_end.strftime("%Y-%m-%d"),
-        )
-
+        chunk_end = min(cursor + timedelta(days=_MAX_INTRADAY_CHUNK - 1), to_date)
+        logger.info("  [1m] %s  %s → %s", security_id,
+                    cursor.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d"))
         try:
             data = await client.get_intraday_historical(
                 security_id=security_id,
@@ -139,82 +161,121 @@ async def backfill_security(
                 to_date=chunk_end.strftime("%Y-%m-%d"),
             )
         except Exception as exc:
-            logger.error("  Failed chunk %s→%s: %s", cursor, chunk_end, exc)
+            logger.error("  Chunk failed: %s", exc)
             cursor = chunk_end + timedelta(days=1)
             continue
 
-        df = _parse_response(data, security_id, exchange_segment)
+        df = _parse_intraday(data, security_id, exchange_segment)
         logger.info("  Received %d candles", len(df))
-
         if not dry_run and not df.empty:
-            n = _upsert_candles(df)
-            total += n
-        elif not df.empty:
+            total += _upsert_bars(df, "1m")
+        else:
             total += len(df)
 
         cursor = chunk_end + timedelta(days=1)
-        await asyncio.sleep(0.3)  # respect Dhan data rate limit
+        await asyncio.sleep(0.25)
 
     return total
 
 
-async def run_backfill(
-    security_ids: list[str],
+# ── Daily backfill (1d) ────────────────────────────────────────────────────────
+
+async def backfill_daily(
+    client: DhanClient,
+    security_id: str,
     exchange_segment: str,
     from_date: date,
     to_date: date,
-    dry_run: bool,
-    cfg,
-):
-    async with DhanClient(cfg.dhan_client_id, cfg.dhan_access_token) as client:
-        for sid in security_ids:
-            logger.info("Backfilling security_id=%s", sid)
-            n = await backfill_security(
-                client, sid, exchange_segment, from_date, to_date, dry_run
-            )
-            logger.info("  Done — %d candles %s", n, "(dry run)" if dry_run else "upserted")
+    dry_run: bool = False,
+) -> int:
+    logger.info("  [1d] %s  %s → %s", security_id,
+                from_date.strftime("%Y-%m-%d"), to_date.strftime("%Y-%m-%d"))
+    try:
+        data = await client.get_daily_historical(
+            security_id=security_id,
+            exchange_segment=exchange_segment,
+            instrument="EQUITY",
+            from_date=from_date.strftime("%Y-%m-%d"),
+            to_date=to_date.strftime("%Y-%m-%d"),
+        )
+    except Exception as exc:
+        logger.error("  Daily fetch failed: %s", exc)
+        return 0
 
+    df = _parse_daily(data, security_id, exchange_segment)
+    logger.info("  Received %d daily bars", len(df))
+    if dry_run or df.empty:
+        return len(df)
+    return _upsert_bars(df, "1d")
+
+
+# ── Orchestrator ───────────────────────────────────────────────────────────────
+
+async def run_backfill(args, cfg):
+    async with DhanClient(cfg.dhan_client_id, cfg.dhan_access_token) as client:
+        for sid in args.security_ids:
+            logger.info("═══ security_id=%s ═══", sid)
+
+            if args.do_intraday:
+                n = await backfill_intraday(
+                    client, sid, args.exchange_segment,
+                    args.from_date, args.to_date, args.dry_run,
+                )
+                logger.info("  1m done — %d rows %s", n, "(dry)" if args.dry_run else "upserted")
+
+            if args.do_daily:
+                n = await backfill_daily(
+                    client, sid, args.exchange_segment,
+                    args.daily_from, args.to_date, args.dry_run,
+                )
+                logger.info("  1d done — %d rows %s", n, "(dry)" if args.dry_run else "upserted")
+
+
+# ── CLI ────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Backfill OHLCV data into TimescaleDB")
-    parser.add_argument(
-        "--from", dest="from_date",
+    parser = argparse.ArgumentParser(description="Backfill OHLCV into TimescaleDB")
+    parser.add_argument("--from", dest="from_date",
         default=(date.today() - timedelta(days=90)).strftime("%Y-%m-%d"),
-        help="Start date YYYY-MM-DD (default: 90 days ago)",
-    )
-    parser.add_argument(
-        "--to", dest="to_date",
+        help="Intraday start date (default: 90 days ago)")
+    parser.add_argument("--to", dest="to_date",
         default=date.today().strftime("%Y-%m-%d"),
-        help="End date YYYY-MM-DD (default: today)",
-    )
-    parser.add_argument(
-        "--ids",
-        help="Comma-separated security IDs (default: from .env WATCHLIST_SECURITY_IDS)",
-    )
-    parser.add_argument(
-        "--segment",
-        default=None,
-        help="Exchange segment (default: from .env WATCHLIST_EXCHANGE_SEGMENT)",
-    )
-    parser.add_argument("--dry-run", action="store_true", help="Fetch only, skip DB writes")
-    args = parser.parse_args()
+        help="End date (default: today)")
+    parser.add_argument("--daily-from", dest="daily_from",
+        default=(date.today() - timedelta(days=365*5)).strftime("%Y-%m-%d"),
+        help="Daily bars start date (default: 5 years ago)")
+    parser.add_argument("--ids",
+        help="Comma-separated security IDs (default: WATCHLIST_SECURITY_IDS)")
+    parser.add_argument("--segment", default=None)
+    parser.add_argument("--daily",  action="store_true", help="Pull daily bars only")
+    parser.add_argument("--all",    action="store_true", help="Pull intraday + daily")
+    parser.add_argument("--dry-run",action="store_true")
+    raw = parser.parse_args()
 
     cfg = get_config()
-    from_date = datetime.strptime(args.from_date, "%Y-%m-%d").date()
-    to_date = datetime.strptime(args.to_date, "%Y-%m-%d").date()
-    security_ids = [s.strip() for s in args.ids.split(",")] if args.ids else cfg.watchlist_security_ids
-    exchange_segment = args.segment or cfg.watchlist_exchange_segment
 
-    if not args.dry_run:
-        logger.info("Connecting to TimescaleDB at %s:%s/%s", cfg.db_host, cfg.db_port, cfg.db_name)
+    raw.from_date    = datetime.strptime(raw.from_date,   "%Y-%m-%d").date()
+    raw.to_date      = datetime.strptime(raw.to_date,     "%Y-%m-%d").date()
+    raw.daily_from   = datetime.strptime(raw.daily_from,  "%Y-%m-%d").date()
+    raw.security_ids = (
+        [s.strip() for s in raw.ids.split(",")]
+        if raw.ids else cfg.watchlist_security_ids
+    )
+    raw.exchange_segment = raw.segment or cfg.watchlist_exchange_segment
+    raw.do_intraday = not raw.daily          # intraday unless --daily-only
+    raw.do_daily    = raw.daily or raw.all
+
+    if not raw.dry_run:
         init_db(cfg.db_url)
 
     logger.info(
-        "Backfill  %s → %s  |  %d securities  |  segment=%s  |  dry_run=%s",
-        from_date, to_date, len(security_ids), exchange_segment, args.dry_run,
+        "Backfill  intraday=%s (%s→%s)  daily=%s (%s→%s)  ids=%s",
+        raw.do_intraday, raw.from_date, raw.to_date,
+        raw.do_daily,    raw.daily_from, raw.to_date,
+        raw.security_ids,
     )
 
-    asyncio.run(run_backfill(security_ids, exchange_segment, from_date, to_date, args.dry_run, cfg))
+    asyncio.run(run_backfill(raw, cfg))
     logger.info("Backfill complete.")
 
 
