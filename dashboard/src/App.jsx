@@ -3,7 +3,6 @@ import { useDashboardData } from './hooks/useDashboardData'
 import { T, INR, INR0, colorPnl, fmtTime } from './tokens'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
 import FloatingKillSwitch from './components/cockpit/FloatingKillSwitch'
-import DataTab from './components/cockpit/DataTab'
 
 // ─────────────────────────────────────────────────────────────────
 // Error boundary — prevents blank screen on render errors
@@ -632,27 +631,256 @@ function PortfolioTab({ data }) {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// System tab — reuse DataTab + add kill switch + logs
 // ─────────────────────────────────────────────────────────────────
-function LogPanel({ logs }) {
-  // logs API: {ok, logs:[...]}  → need .data.logs
-  const rows = (logs?.data?.logs ?? []).slice(-20)
-  const COLOR = { WARNING: T.amber, ERROR: T.red, CRITICAL: T.red }
+// System tab — full-width 3-column grid
+// ─────────────────────────────────────────────────────────────────
+
+const LEVEL_COLOR = { WARNING: T.amber, ERROR: T.red, CRITICAL: T.red, INFO: T.ink2, DEBUG: T.ink3 }
+
+function SysLabel({ children }) {
+  return (
+    <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3,
+      letterSpacing: '0.18em', textTransform: 'uppercase', marginBottom: 10 }}>
+      {children}
+    </div>
+  )
+}
+
+function SysPanel({ title, right, accent, children }) {
+  return (
+    <div style={{ background: T.bg1, border: `1px solid ${accent ?? T.line}`, display: 'flex', flexDirection: 'column' }}>
+      <div style={{
+        padding: '10px 16px', borderBottom: `1px solid ${accent ?? T.line}`,
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        background: accent ? `${accent}0a` : 'transparent',
+      }}>
+        <span style={{ fontFamily: T.mono, fontSize: 9, color: accent ?? T.ink3,
+          letterSpacing: '0.18em', textTransform: 'uppercase' }}>{title}</span>
+        {right && <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>{right}</span>}
+      </div>
+      <div style={{ padding: 16, flex: 1 }}>{children}</div>
+    </div>
+  )
+}
+
+function BigStat({ label, value, unit, color, sub }) {
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em', textTransform: 'uppercase', marginBottom: 3 }}>{label}</div>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 4 }}>
+        <span style={{ fontFamily: T.dot, fontSize: 28, color: color ?? T.ink0, lineHeight: 1 }}>{value}</span>
+        {unit && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>{unit}</span>}
+      </div>
+      {sub && <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, marginTop: 3 }}>{sub}</div>}
+    </div>
+  )
+}
+
+function DBPanel({ dbStats }) {
+  const d     = dbStats?.data
+  const b1m   = d?.bars?.find(b => b.timeframe === '1m')
+  const b1d   = d?.bars?.find(b => b.timeframe === '1d')
+  const nseEq = d?.instruments?.NSE_EQ ?? 0
+  const total = Object.values(d?.instruments ?? {}).reduce((a,b) => a+b, 0)
+
+  if (!d) return (
+    <SysPanel title="TimescaleDB" right="10.0.1.155:5432">
+      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>Connecting…</div>
+    </SysPanel>
+  )
 
   return (
-    <div style={{ background: T.bg1, border: `1px solid ${T.line}`, marginTop: 16 }}>
-      <div style={{ padding: '8px 16px', borderBottom: `1px solid ${T.line}`, fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em' }}>
-        SYSTEM LOGS
+    <SysPanel title="TimescaleDB" right="10.0.1.155 / dhan_trading" accent={T.cyan}>
+      <BigStat label="1-min bars" value={b1m ? (b1m.rows/1000).toFixed(0)+'K' : '—'} color={T.cyan}
+        sub={b1m ? `${b1m.earliest} → ${b1m.latest}` : 'No data'} />
+      <BigStat label="Daily bars" value={b1d ? (b1d.rows/1000).toFixed(1)+'K' : '—'} color={T.cyan}
+        sub={b1d ? `${b1d.earliest} → ${b1d.latest}` : 'No data'} />
+
+      <div style={{ height: 1, background: T.line, margin: '12px 0' }} />
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+        {[
+          ['NSE Equities', nseEq.toLocaleString('en-IN'), T.amber],
+          ['Total Instruments', total.toLocaleString('en-IN'), T.ink1],
+          ['Signals recorded', d.signals ?? 0, T.green],
+          ['Trades recorded',  d.trades  ?? 0, T.green],
+        ].map(([label, val, color]) => (
+          <div key={label} style={{ background: T.bg2, border: `1px solid ${T.line}`, padding: '8px 10px' }}>
+            <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 3 }}>{label}</div>
+            <div style={{ fontFamily: T.dot, fontSize: 20, color }}>{val}</div>
+          </div>
+        ))}
       </div>
-      <div style={{ maxHeight: 240, overflowY: 'auto', padding: '6px 0' }}>
+    </SysPanel>
+  )
+}
+
+function BackfillPanel({ backfill }) {
+  const d       = backfill?.data
+  const running = d?.running ?? false
+  const logs    = d?.log_tail ?? []
+  const last    = logs[logs.length - 1] ?? ''
+  const secMatch= last.match(/security_id=(\d+)/)
+  const curSec  = secMatch?.[1]
+  const chunkMatch = last.match(/(\d{4}-\d{2}-\d{2}) → (\d{4}-\d{2}-\d{2})/)
+
+  return (
+    <SysPanel title="Backfill Progress" right="22,646 NSE equities"
+      accent={running ? T.green : T.ink3}>
+      {/* Status row */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+        <div style={{
+          width: 10, height: 10, borderRadius: '50%',
+          background: running ? T.green : T.ink3,
+          boxShadow: running ? `0 0 10px ${T.green}` : 'none',
+          flexShrink: 0,
+        }} />
+        <span style={{ fontFamily: T.mono, fontSize: 11, color: running ? T.green : T.ink2,
+          letterSpacing: '0.1em', fontWeight: 600 }}>
+          {running ? 'RUNNING' : 'IDLE'}
+        </span>
+        {curSec && (
+          <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink2 }}>
+            · security {curSec}
+          </span>
+        )}
+      </div>
+
+      {/* Progress estimate */}
+      {running && curSec && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: T.mono, fontSize: 9, color: T.ink3, marginBottom: 5 }}>
+            <span>LOADED</span><span>TARGET</span>
+          </div>
+          <div style={{ height: 4, background: T.bg3 }}>
+            <div style={{
+              height: '100%',
+              width: `${Math.min((parseInt(curSec)/22646)*100, 100).toFixed(1)}%`,
+              background: T.green, transition: 'width 1s',
+            }} />
+          </div>
+          <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, marginTop: 4 }}>
+            {((parseInt(curSec)/22646)*100).toFixed(2)}% · ~{Math.ceil((22646-parseInt(curSec))/5/3600)}h remaining
+          </div>
+        </div>
+      )}
+
+      {/* Recent log lines */}
+      <SysLabel>Recent activity</SysLabel>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 180, overflowY: 'auto' }}>
+        {logs.length === 0
+          ? <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>No activity</span>
+          : logs.slice(-8).map((l, i) => (
+            <div key={i} style={{
+              fontFamily: T.mono, fontSize: 9, color: T.ink2, lineHeight: 1.8,
+              borderLeft: `2px solid ${l.includes('ERROR') ? T.red : l.includes('done') ? T.green : T.line}`,
+              paddingLeft: 8,
+            }}>
+              {l.replace(/^\d{2}:\d{2}:\d{2}\s+\w+\s+dhan\.\w+\s+—\s+/, '')}
+            </div>
+          ))
+        }
+      </div>
+    </SysPanel>
+  )
+}
+
+function HermesPanel({ hermes }) {
+  const d       = hermes?.data
+  const running = d?.running ?? false
+  const CRONS = [
+    ['Pre-market brief',   '08:45 IST', 'Mon–Fri', T.cyan],
+    ['Drawdown check',     'Every 5min','Market hrs', T.amber],
+    ['Position reconcile', 'Every 30min','Market hrs', T.green],
+    ['Backfill watchdog',  'Every 15min','Always',    T.green],
+    ['EOD trade review',   '15:45 IST', 'Mon–Fri',   T.cyan],
+    ['Data quality scan',  '02:00 IST', 'Nightly',   T.ink2],
+    ['Gap scan',           '02:30 IST', 'Nightly',   T.ink2],
+    ['Strategy perf.',     '09:00 IST', 'Sunday',    T.amber],
+    ['Signal calibration', '09:30 IST', 'Sunday',    T.amber],
+    ['Health report',      '09:00 IST', 'Sunday',    T.cyan],
+  ]
+
+  return (
+    <SysPanel title="Hermes Gateway · @farshoribot"
+      accent={running ? T.cyan : T.red}>
+      {/* Status */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+        <div style={{
+          width: 10, height: 10, borderRadius: '50%',
+          background: running ? T.green : T.red,
+          boxShadow: running ? `0 0 10px ${T.green}` : 'none', flexShrink: 0,
+        }} />
+        <span style={{ fontFamily: T.mono, fontSize: 11, color: running ? T.green : T.red,
+          letterSpacing: '0.1em', fontWeight: 600 }}>
+          {running ? 'ONLINE' : 'OFFLINE'}
+        </span>
+      </div>
+
+      {/* Model info */}
+      {d?.model && (
+        <div style={{ background: T.bg2, border: `1px solid ${T.line}`, padding: '8px 12px', marginBottom: 14 }}>
+          <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.14em', marginBottom: 3 }}>MODEL</div>
+          <div style={{ fontFamily: T.mono, fontSize: 10, color: T.cyan }}>{d.model}</div>
+          {d.provider && <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, marginTop: 2 }}>via {d.provider}</div>}
+        </div>
+      )}
+
+      {/* Cron schedule */}
+      <SysLabel>Autonomous schedules ({CRONS.length})</SysLabel>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {CRONS.map(([name, time, freq, color]) => (
+          <div key={name} style={{
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            padding: '5px 8px',
+            borderLeft: `2px solid ${color}`,
+            background: T.bg2,
+          }}>
+            <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink1 }}>{name}</span>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+              <span style={{ fontFamily: T.dot, fontSize: 15, color }}>{time}</span>
+              <span style={{ fontFamily: T.mono, fontSize: 8, color: T.ink3, minWidth: 55, textAlign: 'right' }}>{freq}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </SysPanel>
+  )
+}
+
+function FullLogPanel({ logs }) {
+  const all  = logs?.data?.logs ?? []
+  const rows = all.slice(-50)
+
+  return (
+    <div style={{ background: T.bg1, border: `1px solid ${T.line}`, display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div style={{
+        padding: '10px 16px', borderBottom: `1px solid ${T.line}`,
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+      }}>
+        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em', textTransform: 'uppercase' }}>
+          SYSTEM LOG
+        </span>
+        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>{rows.length} lines</span>
+      </div>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0', minHeight: 0 }}>
         {rows.length === 0
-          ? <div style={{ padding: '10px 14px', fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>No log output</div>
+          ? <div style={{ padding: 16, fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>No log output</div>
           : rows.map((l, i) => (
-            <div key={i} style={{ display: 'flex', gap: 10, padding: '2px 14px', fontFamily: T.mono, fontSize: 10 }}>
-              <span style={{ color: T.ink3, minWidth: 55 }}>{fmtTime(l.ts)}</span>
-              <span style={{ color: T.ink3, minWidth: 10 }}>{l.icon}</span>
-              <span style={{ color: T.ink3, minWidth: 60 }}>{l.name}</span>
-              <span style={{ color: COLOR[l.level] ?? T.ink2 }}>{l.msg}</span>
+            <div key={i} style={{
+              display: 'grid',
+              gridTemplateColumns: '58px 14px 70px 1fr',
+              gap: 8,
+              padding: '2px 16px',
+              fontFamily: T.mono, fontSize: 10,
+              background: l.level === 'ERROR' || l.level === 'CRITICAL' ? `${T.red}08` :
+                          l.level === 'WARNING' ? `${T.amber}06` : 'transparent',
+              borderLeft: `2px solid ${LEVEL_COLOR[l.level] ?? 'transparent'}`,
+            }}>
+              <span style={{ color: T.ink3, whiteSpace: 'nowrap' }}>{fmtTime(l.ts)}</span>
+              <span style={{ color: LEVEL_COLOR[l.level] ?? T.ink3 }}>{l.icon}</span>
+              <span style={{ color: T.ink3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{l.name}</span>
+              <span style={{ color: LEVEL_COLOR[l.level] ?? T.ink2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{l.msg}</span>
             </div>
           ))
         }
@@ -663,9 +891,18 @@ function LogPanel({ logs }) {
 
 function SystemTab({ data }) {
   return (
-    <div style={{ padding: '20px 24px 60px', maxWidth: 900 }}>
-      <DataTab dbStats={data.dbStats} backfill={data.backfill} hermes={data.hermes} />
-      <LogPanel logs={data.logs} />
+    <div style={{ padding: '20px 24px 40px' }}>
+      {/* Top row: 3 equal columns */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16, marginBottom: 16 }}>
+        <DBPanel       dbStats={data.dbStats} />
+        <BackfillPanel backfill={data.backfill} />
+        <HermesPanel   hermes={data.hermes} />
+      </div>
+
+      {/* Bottom: full-width log, taller */}
+      <div style={{ height: 420 }}>
+        <FullLogPanel logs={data.logs} />
+      </div>
     </div>
   )
 }
