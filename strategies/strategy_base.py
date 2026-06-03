@@ -251,8 +251,8 @@ class SMACrossoverStrategy(BaseStrategy):
     Suitable for equity intraday (CNC/MIS) or futures.
     """
 
-    def __init__(self, client, risk_manager, config: SMAConfig):
-        super().__init__(client, risk_manager, config)
+    def __init__(self, client, risk_manager, config: SMAConfig, db_backend=None, run_id=None):
+        super().__init__(client, risk_manager, config, db_backend=db_backend, run_id=run_id)
         self.sma_config: SMAConfig = config
         fp = config.fast_period
         sp = config.slow_period
@@ -345,8 +345,8 @@ class StraddleSellerStrategy(BaseStrategy):
     before starting the strategy.
     """
 
-    def __init__(self, client, risk_manager, config: StraddleSellerConfig):
-        super().__init__(client, risk_manager, config)
+    def __init__(self, client, risk_manager, config: StraddleSellerConfig, db_backend=None, run_id=None):
+        super().__init__(client, risk_manager, config, db_backend=db_backend, run_id=run_id)
         self.straddle_cfg        = config
         self.premium_collected   = 0.0   # CE premium + PE premium at entry
         self.call_entry_premium  = 0.0

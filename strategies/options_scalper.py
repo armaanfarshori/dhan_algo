@@ -101,8 +101,8 @@ class OptionsScalperStrategy(BaseStrategy):
     Overrides BaseStrategy.run() to handle two-security polling.
     """
 
-    def __init__(self, client, risk_manager, config: OptionsScalperConfig):
-        super().__init__(client, risk_manager, config)
+    def __init__(self, client, risk_manager, config: OptionsScalperConfig, db_backend=None, run_id=None):
+        super().__init__(client, risk_manager, config, db_backend=db_backend, run_id=run_id)
         self.scalper_cfg: OptionsScalperConfig = config
 
         # RSI state (on underlying)
