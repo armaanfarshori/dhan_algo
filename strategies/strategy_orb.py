@@ -74,8 +74,10 @@ class ORBStrategy(BaseStrategy):
         orb_config: Optional[ORBConfig] = None,
         trade_logger=None,
         kronos_engine=None,
+        db_backend=None,
+        run_id=None,
     ):
-        super().__init__(client, risk_manager, config)
+        super().__init__(client, risk_manager, config, db_backend=db_backend, run_id=run_id)
         self.orb_cfg = orb_config or ORBConfig()
         self._trade_logger = trade_logger
         self._kronos = kronos_engine  # KronosSignalEngine instance or None
