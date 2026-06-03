@@ -1,219 +1,201 @@
-# DhanHQ Algo Platform
+# DhanAIBot — Algorithmic Trading Platform for NSE
 
-> Async algorithmic trading platform for the Indian equity and F&O markets, built on DhanHQ v2 REST API.
+A self-hosted algorithmic trading platform for NSE (National Stock Exchange of India) equities and index options. It combines rule-based strategies with an OHLCV foundation model (Kronos) for AI signal filtering, a Hermes agent running on Groq LLM for orchestration, and TimescaleDB for all market data and trade history.
 
-[![Python](https://img.shields.io/badge/Python-3.14-blue?logo=python&logoColor=white)](https://www.python.org/)
-[![aiohttp](https://img.shields.io/badge/aiohttp-3.9%2B-teal)](https://docs.aiohttp.org/)
-[![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://react.dev/)
-[![Vite](https://img.shields.io/badge/Vite-5-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
-[![DhanHQ](https://img.shields.io/badge/DhanHQ-v2%20API-orange)](https://dhanhq.co/docs/v2/)
-[![License](https://img.shields.io/badge/License-Private-red)](LICENSE)
-[![Status](https://img.shields.io/badge/Status-Active-brightgreen)]()
+**All execution happens on AWS EC2 (ap-south-1, Mumbai). The Mac is an editor only.**
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                      main.py  (asyncio)                         │
-│                                                                 │
-│   ┌──────────────┐     ┌─────────────────┐     ┌────────────┐  │
-│   │  DhanClient  │────▶│   RiskManager   │────▶│  Strategy  │  │
-│   │  (aiohttp)   │     │  (background    │     │  Engine    │  │
-│   │              │     │   loop, 30s)    │     │            │  │
-│   │  Rate limiter│     │                 │     │ ┌────────┐ │  │
-│   │  Retry logic │     │  Daily loss cap │     │ │Scalper │ │  │
-│   │  Auth headers│     │  Position limit │     │ │RSI-14  │ │  │
-│   └──────┬───────┘     │  Kill switch    │     │ │OCO exit│ │  │
-│          │             │  Halt callbacks │     │ └────────┘ │  │
-│          │             └─────────────────┘     │ ┌────────┐ │  │
-│          │                                     │ │  SMA   │ │  │
-│          │                                     │ │  9/21  │ │  │
-│          │                                     │ └────────┘ │  │
-│          │                                     └────────────┘  │
-│          │                                                      │
-│          ▼                                                       │
-│   ┌──────────────┐     ┌──────────────────────┐                │
-│   │  Instrument  │     │   aiohttp Web App     │                │
-│   │  Master      │     │   (port 8765)         │                │
-│   │              │     │                       │                │
-│   │  CSV cache   │     │   React 18 + Vite     │                │
-│   │  6h TTL      │     │   dashboard           │                │
-│   │  4120 NIFTY  │     │                       │                │
-│   │  contracts   │     │   /api/* REST JSON    │                │
-│   └──────────────┘     └──────────────────────┘                │
-└─────────────────────────────────────────────────────────────────┘
-          │
-          ▼
-  DhanHQ v2 REST API  ──▶  NSE / BSE
-  api.dhan.co/v2
+  Mac (VS Code + Claude Code)
+         │ git push
+         ▼
+     GitHub (main)
+         │ git pull
+         ▼
+  AWS ap-south-1
+  ┌──────────────────────────────────────────────────────────────────┐
+  │  agent EC2  t4g.micro  (13.206.66.237 Elastic IP)               │
+  │                                                                  │
+  │  main.py (asyncio)                                               │
+  │  ┌──────────────┐  ┌─────────────────┐  ┌────────────────────┐  │
+  │  │  DhanClient  │  │  RiskManager    │  │  Strategy Engine   │  │
+  │  │  aiohttp     │  │  30s monitor    │  │                    │  │
+  │  │  5 req/s     │  │  kill-switch    │  │  IndexOptionsScanner│ │
+  │  │  TOTP refresh│  │  daily loss cap │  │  (6 indices, RSI)  │  │
+  │  └──────┬───────┘  └─────────────────┘  │                    │  │
+  │         │                               │  MultiStockScanner │  │
+  │         │          ┌─────────────────┐  │  (top 15 movers)   │  │
+  │         │          │  LiveFeed       │  │                    │  │
+  │         │          │  WebSocket ticks│  │  ORBStrategy       │  │
+  │         │          │  6 indices +    │  │  (Kronos-gated)    │  │
+  │         │          │  top 15 equities│  └────────────────────┘  │
+  │         │          └─────────────────┘                          │
+  │         │                                                        │
+  │  ┌──────▼─────────────────────────────────────────────────────┐ │
+  │  │  aiohttp web server :8765  (React dashboard + /api/*)      │ │
+  │  └────────────────────────────────────────────────────────────┘ │
+  │                                                                  │
+  │  hermes agent  ──  @farshoribot (Telegram)                      │
+  │  groq llama-3.3-70b-versatile via OpenRouter                    │
+  └──────────────────────────────────────────────────────────────────┘
+         │ private subnet (10.0.0.0/16)
+         ▼
+  ┌──────────────────────────────────┐
+  │  db EC2  t4g.medium  (private)   │
+  │  TimescaleDB 19 tables           │
+  │  5 hypertables  ~4.8M bars       │
+  └──────────────────────────────────┘
+         │
+         ▼
+  DhanHQ v2 REST  api.dhan.co/v2  →  NSE / BSE
 ```
 
 ---
 
-## Features
+## Tech Stack
 
-**Two production-ready strategies**
-- **Options Scalper** — RSI-14 on NIFTY index, buys ATM options, places Forever OCO immediately after fill. Auto-discovers security IDs from the Dhan scrip master CSV.
-- **SMA 9/21 Crossover** — Golden/death cross on any NSE equity. Configurable fast and slow periods.
+| Layer | Technology | Notes |
+|---|---|---|
+| Language | Python 3.11 | Graviton ARM64 on EC2 |
+| Async runtime | asyncio + aiohttp | Single process, all concurrent |
+| Broker API | DhanHQ v2 REST | No sandbox — all calls hit production |
+| Database | TimescaleDB (PostgreSQL + Timescale) | Hypertables, compression, free scans |
+| DB migrations | Alembic | 3 versions, current head: `003_auth_tables` |
+| AI signal filter | Kronos-small (NeoQuasar/HuggingFace) | OHLCV foundation model, AAAI 2026 |
+| Orchestration LLM | Groq `llama-3.3-70b-versatile` via OpenRouter | NOT Anthropic — too expensive for always-on |
+| Hermes agent | NousResearch Hermes | Telegram gateway (@farshoribot) |
+| Frontend | React 18 + Vite | Polls `/api/*`, served from `dashboard/dist/` |
+| Secrets | AWS SSM Parameter Store | Pulled by `setup_agent.sh` on first boot |
+| Infra | Terraform, ap-south-1, t4g Graviton | ~$56/month |
 
-**Risk manager** runs as a parallel async task every 30 seconds:
-- Daily loss cap with configurable INR limit
-- Maximum open positions enforcement
-- Per-trade capital exposure check
-- Kill switch for immediate trading halt
-- Async halt callbacks for alerting
+---
 
-**Breakeven-aware exit pricing** — all F&O charges calculated before placing OCO:
-- Brokerage ₹20/leg, STT 0.1% sell, exchange fee 0.053%, SEBI ₹10/crore, GST 18%, stamp 0.003% buy
+## Milestone Status
 
-**Instrument master** — downloads `api-scrip-master.csv` from Dhan on startup, caches for 6 hours, indexes ~4,120 NIFTY option contracts. O(1) ATM lookup by price and expiry. Auto-selects nearest weekly expiry when `EXPIRY_DATE` is blank.
+| Milestone | Status | Description |
+|---|---|---|
+| M0 — Infrastructure | Done | Terraform applied, TimescaleDB running, schema at head |
+| M1 — Data backfill | Done | 22,646 NSE equities being backfilled; 4.8M 1-min bars loaded |
+| M2 — Live WebSocket feed | In progress | LiveFeed connects; not yet writing to `ticks` table |
+| M3 — Backtester wired | Not started | `core/backtest.py` reads mock data, not `bars` hypertable |
+| M4 — Paper trading loop | In progress | `main.py` orchestrates both scanners; DB writes not fully wired |
+| M5 — Hermes orchestration | In progress | Hermes gateway online at @farshoribot; Groq configured |
+| M6 — Auth layer | Not started | Schema exists in `003_auth_tables`, no FastAPI routes |
+| M7 — Shadow orders | Not started | Log real-intent orders without executing |
+| M8 — Tiny live | Not started | 1-share real orders, reconcile fills |
+| M9 — Scale | Not started | After M8 validated |
 
-**Backtesting engine** — replay any `BaseStrategy` against historical OHLCV bars. Computes Sharpe ratio, max drawdown, win rate, and equity curve without touching the API.
+---
 
-**React dashboard** on `http://localhost:8765` — live P&L, risk state, signal feed, position detail, instrument browser.
+## Key Constraints
 
-**Paper trading mode** on by default — set `PAPER_TRADING=false` only when you are ready for live capital.
+- **No Dhan sandbox.** Every API call hits `api.dhan.co/v2` production infrastructure.
+- **Static IP required for live orders.** The agent EC2 Elastic IP (13.206.66.237) must be whitelisted in Dhan DevPortal under API settings. Once set, it cannot change for 7 days. Data APIs (historical bars, live feed, quotes) have no IP restriction.
+- **PAPER_TRADING=true always.** Never flip to `false` until backtesting on 2+ years of real data passes with realistic slippage.
+- **5 req/s rate limit.** Enforced in `core/client.py` with a token bucket.
+- **Max 90 days per intraday API call.** `backfill.py` chunks automatically.
+- **Token expires ~24h.** `core/auth.py` auto-refreshes via PIN + TOTP when `DHAN_PIN` and `DHAN_TOTP_SECRET` are set.
+- **Kronos is fail-open.** Model errors never block trades — `_kronos_allows()` returns `True` on exception.
 
 ---
 
 ## Quick Start
 
-### 1. Clone and create virtual environment
+### Local dev (docker-compose)
 
 ```bash
-git clone <repo-url> dhan_algo
-cd dhan_algo
-python3.14 -m venv venv
-source venv/bin/activate
+# Clone
+git clone <repo-url> DhanAIBot && cd DhanAIBot
+
+# Configure
+cp .env.example .env
+# Edit .env: set DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN at minimum
+
+# Start TimescaleDB locally
+docker compose up -d
+
+# Apply schema
+source venv/bin/activate      # or: python3.11 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-```
+alembic upgrade head
 
-### 2. Configure credentials
+# Load instrument master (~224K scrips)
+python backfill.py --instruments
 
-```bash
-cp .env .env.local   # or edit .env directly
-```
+# Backfill watchlist (90 days, default .env watchlist)
+python backfill.py
 
-| Variable | Required | Description |
-|---|---|---|
-| `DHAN_CLIENT_ID` | Yes | Your DhanHQ client ID |
-| `DHAN_ACCESS_TOKEN` | Yes | JWT from DhanHQ developer portal |
-| `PAPER_TRADING` | No | `true` (default) — set `false` for live |
-| `MAX_DAILY_LOSS` | No | INR daily loss cap (default `5000`) |
-| `STRATEGY` | No | `scalper` (default) or `sma` |
-| `EXPIRY_DATE` | No | `YYYY-MM-DD` — blank = nearest weekly |
-| `NUM_LOTS` | No | Number of lots (default `1`) |
-| `WEBHOOK_PORT` | No | Dashboard port (default `8765`) |
-
-Full variable reference: [Configuration wiki](wiki/Configuration.md)
-
-### 3. Run
-
-```bash
-source venv/bin/activate
+# Run platform in paper mode
 python main.py
+# Dashboard at http://localhost:8765
 ```
 
-Open `http://localhost:8765` for the live dashboard.
-
-To switch strategies:
+### AWS deploy (production path)
 
 ```bash
-STRATEGY=sma python main.py
-STRATEGY=scalper EXPIRY_DATE=2026-05-15 python main.py
-```
+# 1. Provision infrastructure (run once from Mac terminal)
+cd infra && terraform init && terraform apply
+# Note the outputs: agent_elastic_ip, db_private_ip
 
-### 4. Build the React dashboard (optional)
+# 2. Whitelist agent Elastic IP in Dhan DevPortal → API settings (order APIs only)
 
-```bash
-cd dashboard
-npm install
-npm run build
-cd ..
-python main.py   # now serves the compiled React app
-```
+# 3. SSH to agent EC2
+ssh -i ~/.ssh/dhan_trading_key ubuntu@<agent_elastic_ip>
 
----
+# 4. On agent EC2 — repo is already cloned by setup_agent.sh
+cd ~/dhan_algo && source .venv/bin/activate
 
-## Environment Variable Reference
+# 5. Pull latest code
+git pull origin main
 
-| Variable | Default | Description |
-|---|---|---|
-| `DHAN_CLIENT_ID` | — | DhanHQ client ID (required) |
-| `DHAN_ACCESS_TOKEN` | — | JWT access token (required) |
-| `PAPER_TRADING` | `true` | Paper mode — no real orders placed |
-| `MAX_DAILY_LOSS` | `5000` | INR loss cap before platform halts |
-| `STRATEGY` | `scalper` | Active strategy: `scalper` or `sma` |
-| `EXPIRY_DATE` | _(auto)_ | Option expiry `YYYY-MM-DD` |
-| `NUM_LOTS` | `1` | Number of NIFTY option lots |
-| `WEBHOOK_PORT` | `8765` | HTTP port for dashboard and postback |
+# 6. Verify schema
+alembic current   # expect: 003_auth_tables (head)
 
----
+# 7. Load all instruments (run once)
+python backfill.py --instruments
 
-## Project Layout
+# 8. Backfill Nifty 50 — 5 years of 1-min + daily bars (~3.5 min)
+python backfill.py --all --from 2021-06-01
 
-```
-dhan_algo/
-├── main.py                   # Orchestrator, web server, signal handlers
-├── requirements.txt
-├── .env                      # Credentials and runtime config
-│
-├── core/
-│   ├── client.py             # DhanHQ v2 async HTTP client
-│   ├── risk.py               # RiskManager + RiskConfig
-│   ├── instruments.py        # InstrumentMaster — scrip CSV parser
-│   ├── charges.py            # BreakevenCalculator
-│   └── backtest.py           # Backtesting engine
-│
-├── strategies/
-│   ├── strategy_base.py      # BaseStrategy, SMA 9/21, StraddleSeller
-│   └── options_scalper.py    # OptionsScalperStrategy
-│
-├── dashboard/                # React 18 + Vite frontend
-│   ├── src/
-│   │   ├── App.jsx
-│   │   └── utils.js
-│   └── dist/                 # Built output (served by aiohttp)
-│
-└── .cache/
-    └── scrip_master.csv      # Auto-downloaded, refreshed every 6h
+# 9. Expand to all NSE equities (~5 days, running in background)
+python backfill.py --nse-eq --all --from 2021-06-01
+
+# 10. Run the platform
+python main.py
+
+# Dashboard access via SSH tunnel from Mac:
+ssh -L 8765:localhost:8765 ubuntu@<agent_elastic_ip>
+# Then open: http://localhost:8765
 ```
 
 ---
 
-## API Endpoints
-
-All endpoints return JSON. No authentication required (bind to localhost).
-
-| Endpoint | Description |
-|---|---|
-| `GET /api/status` | Strategy state, uptime, warmup progress |
-| `GET /api/risk` | P&L snapshot, violations, halt state |
-| `GET /api/signals` | Last 50 signals (newest first) |
-| `GET /api/funds` | Available funds from DhanHQ |
-| `GET /api/positions` | Open positions from DhanHQ |
-| `GET /api/scalper` | Scalper-specific: RSI, OCO state, ATM |
-| `GET /api/instruments` | NIFTY expiry list from instrument master |
-| `POST /postback` | DhanHQ order postback webhook receiver |
-
-Full request/response documentation: [API Reference wiki](wiki/API-Reference.md)
-
----
-
-## Wiki
+## Documentation
 
 | Page | Contents |
 |---|---|
-| [Home](wiki/Home.md) | Overview, feature highlights, navigation |
-| [Setup Guide](wiki/Setup-Guide.md) | Full step-by-step on Ubuntu |
-| [Configuration](wiki/Configuration.md) | Every `.env` variable and strategy param explained |
-| [Strategies](wiki/Strategies.md) | Signal logic, breakeven math, state machine diagrams |
-| [API Reference](wiki/API-Reference.md) | All 8 endpoints with request/response examples |
+| [docs/Home.md](docs/Home.md) | System overview, feature highlights, tech stack |
+| [docs/Setup-Guide.md](docs/Setup-Guide.md) | Local dev, AWS deploy, Hermes setup |
+| [docs/Configuration.md](docs/Configuration.md) | All env vars, strategy config fields, DB config |
+| [docs/Strategies.md](docs/Strategies.md) | ORB, Options Scalper, SMA Crossover signal logic |
+| [docs/API-Reference.md](docs/API-Reference.md) | All 30+ REST endpoints with request/response examples |
+
+---
+
+## Safety Rules
+
+1. `PAPER_TRADING=true` is the default. Never flip without explicit intent and backtesting evidence.
+2. IP whitelist applies only to order placement. Data APIs work from any IP.
+3. `RiskManager` owns the kill-switch. All orders route through `core/risk.py`.
+4. No live trading until backtesting passes on 2+ years of real NSE data with realistic costs.
+5. Kronos failures must never block trades. `_kronos_allows()` returns `True` on any exception.
+6. Hermes may only propose changes to strategy/risk parameters. Human approval required for anything touching position sizing, kill-switch threshold, or live order flow.
 
 ---
 
 ## Disclaimer
 
-This software is for educational and research purposes. Algorithmic trading involves substantial financial risk. The authors are not responsible for any trading losses. Always start in paper mode and understand the strategy logic before committing real capital.
+This software is for educational and research purposes. Algorithmic trading involves substantial financial risk. Always start in paper mode. The authors are not responsible for trading losses.
