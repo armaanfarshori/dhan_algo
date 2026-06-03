@@ -80,12 +80,10 @@ class KronosSignalEngine:
             self._predictor = await loop.run_in_executor(None, self._load_sync, device)
             logger.info("Kronos loaded.")
 
-    @staticmethod
-    def _load_sync(device: str):
+    def _load_sync(self, device: str):
         from kronos import KronosTokenizer, Kronos, KronosPredictor
-        import torch
-        tokenizer = KronosTokenizer.from_pretrained(_TOKENIZER_ID)
-        model     = Kronos.from_pretrained(_MODEL_ID)
+        tokenizer = KronosTokenizer.from_pretrained(self._tokenizer_id)
+        model     = Kronos.from_pretrained(self._model_id)
         return KronosPredictor(model, tokenizer, max_context=512)
 
     # ------------------------------------------------------------------

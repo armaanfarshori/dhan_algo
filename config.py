@@ -1,7 +1,6 @@
 """
 Centralised configuration — reads .env and exposes a typed Config object.
-main.py uses os.getenv() directly; this module serves the data pipeline
-and new components (backfill, db_journal, strategy_orb).
+All modules use get_config() instead of os.getenv() directly.
 """
 import os
 from dataclasses import dataclass, field

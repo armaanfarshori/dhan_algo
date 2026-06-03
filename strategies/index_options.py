@@ -29,7 +29,7 @@ from zoneinfo import ZoneInfo
 from strategies.strategy_base import Signal
 from core.instruments import InstrumentMaster, OptionContract
 from core.charges import BreakevenCalculator
-from core.trade_log import get_trade_logger
+from core.journal import get_trade_logger
 
 logger = logging.getLogger("dhan.index_options")
 IST = ZoneInfo("Asia/Kolkata")

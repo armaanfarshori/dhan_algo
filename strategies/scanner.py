@@ -32,7 +32,7 @@ from strategies.backtest_strategies import (
     VWAPReversionStrategy, VWAPConfig,
 )
 from core.watchlist import WatchlistManager, WatchlistStock
-from core.trade_log import get_trade_logger
+from core.journal import get_trade_logger
 
 logger = logging.getLogger("dhan.scanner")
 IST = ZoneInfo("Asia/Kolkata")
