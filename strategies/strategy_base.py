@@ -197,11 +197,26 @@ class BaseStrategy(ABC):
             )
         return result
 
+    @staticmethod
+    def _is_market_hours() -> bool:
+        """True only during NSE trading hours (9:00–15:35 IST) on weekdays."""
+        from datetime import datetime, time as dtime
+        import pytz
+        now = datetime.now(pytz.timezone("Asia/Kolkata"))
+        if now.weekday() >= 5:          # Saturday / Sunday
+            return False
+        t = now.time()
+        return dtime(9, 0) <= t <= dtime(15, 35)
+
     async def run(self):
-        """Main strategy loop — polls data and calls on_tick()."""
+        """Main strategy loop — polls live OHLC only during NSE market hours."""
         self._running = True
         logger.info(f"▶ Strategy '{self.config.name}' started (paper={self.config.paper_trading})")
         while self._running:
+            if not self._is_market_hours():
+                # Outside market hours: sleep 60s, no API calls
+                await asyncio.sleep(60)
+                continue
             try:
                 data = await self.client.get_ohlc(
                     {self.config.exchange_segment: [int(self.config.security_id)]}

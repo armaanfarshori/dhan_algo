@@ -998,15 +998,18 @@ async def main():
 
         # ── Web app ───────────────────────────────────────────────────────────
         app = web.Application(middlewares=[cors_middleware])
-        # ── Launch all ORB strategies concurrently ────────────────────────────
+        # ── Launch ORB strategies (market hours only — see run() override below) ─
         orb_tasks = [asyncio.create_task(s.run(), name=f"orb_{s.config.security_id}")
                      for s in strategies_list]
-        # Legacy scanners kept running for /api/scanner endpoints (read-only)
-        fno_task    = asyncio.create_task(fno_scanner.run(),    name="fno_scanner")
-        equity_task = asyncio.create_task(equity_scanner.run(), name="equity_scanner")
+
+        # Legacy scanners: do NOT start their run() loops — they hit the quote
+        # API continuously and cause 429 errors. Kept only so /api/scanner
+        # endpoints can return their last in-memory state if polled.
+        fno_task    = asyncio.create_task(asyncio.sleep(0), name="fno_noop")
+        equity_task = asyncio.create_task(asyncio.sleep(0), name="equity_noop")
 
         app["risk"]           = risk
-        app["strategy"]       = strategy              # first ORB instance for /api/status duck-typing
+        app["strategy"]       = strategy
         app["strategy_task"]  = orb_tasks[0] if orb_tasks else fno_task
         app["equity_task"]    = equity_task
         app["orb_tasks"]      = orb_tasks
