@@ -1,9 +1,39 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, Component } from 'react'
 import { useDashboardData } from './hooks/useDashboardData'
 import { T, INR, INR0, colorPnl, fmtTime } from './tokens'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
 import FloatingKillSwitch from './components/cockpit/FloatingKillSwitch'
 import DataTab from './components/cockpit/DataTab'
+
+// ─────────────────────────────────────────────────────────────────
+// Error boundary — prevents blank screen on render errors
+// ─────────────────────────────────────────────────────────────────
+class ErrorBoundary extends Component {
+  state = { error: null }
+  static getDerivedStateFromError(e) { return { error: e } }
+  componentDidCatch(e, info) { console.error('DhanAI render error:', e, info) }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 32, fontFamily: "'JetBrains Mono', monospace", color: '#e7ebf2', background: '#07080a', minHeight: '100vh' }}>
+          <div style={{ color: 'oklch(0.68 0.22 25)', fontSize: 13, marginBottom: 12 }}>⚠ RENDER ERROR</div>
+          <pre style={{ fontSize: 11, color: '#6b7589', whiteSpace: 'pre-wrap', maxWidth: 800 }}>
+            {this.state.error?.message}
+          </pre>
+          <button
+            onClick={() => this.setState({ error: null })}
+            style={{ marginTop: 16, fontFamily: "'JetBrains Mono', monospace", fontSize: 10,
+              background: 'none', border: '1px solid #1f242e', color: '#a9b2c2',
+              padding: '6px 14px', cursor: 'pointer' }}
+          >
+            RETRY
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────
 // Clock
@@ -311,7 +341,9 @@ function KronosBoard({ kronosSignals, screener }) {
 // Live signal feed (real-time strategy signals)
 // ─────────────────────────────────────────────────────────────────
 function LiveFeed({ signals }) {
-  const rows = (signals?.data ?? []).slice(0, 12)
+  // signals API returns a bare list, usePoller wraps it: {data: [...], loading, error}
+  const raw  = signals?.data
+  const rows = (Array.isArray(raw) ? raw : []).slice(0, 12)
   const ACTION_COLOR = { BUY: T.green, SELL: T.red, EXIT: T.amber, HOLD: T.ink3 }
 
   return (
@@ -363,8 +395,10 @@ function LiveFeed({ signals }) {
 // Positions strip
 // ─────────────────────────────────────────────────────────────────
 function PositionStrip({ positions, paperPositions, risk }) {
-  const live  = (positions?.data ?? []).filter(p => p.netQty !== 0)
-  const paper = (paperPositions?.data?.data ?? []).filter(p => p.in_position)
+  // positions API: {ok, data:[...]}  → need .data.data
+  // paperPositions API: {ok, count, data:{data:[...]}} → need .data.data
+  const live  = (positions?.data?.data ?? []).filter(p => p.netQty !== 0)
+  const paper = (paperPositions?.data?.data?.data ?? paperPositions?.data?.data ?? []).filter(p => p.in_position)
   const open  = live.length > 0 ? live : paper
   const rpnl  = risk?.data?.realised_pnl   ?? 0
   const upnl  = risk?.data?.unrealised_pnl ?? 0
@@ -643,23 +677,27 @@ export default function App() {
   const [tab, setTab] = useState('Signals')
 
   return (
-    <div style={{ background: T.bg0, minHeight: '100vh', color: T.ink0 }}>
-      <style>{`
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { background: ${T.bg0}; }
-        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
-        ::-webkit-scrollbar { width: 4px; height: 4px; }
-        ::-webkit-scrollbar-track { background: ${T.bg1}; }
-        ::-webkit-scrollbar-thumb { background: ${T.line2}; }
-      `}</style>
+    <ErrorBoundary>
+      <div style={{ background: T.bg0, minHeight: '100vh', color: T.ink0 }}>
+        <style>{`
+          * { box-sizing: border-box; margin: 0; padding: 0; }
+          body { background: ${T.bg0}; }
+          @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+          ::-webkit-scrollbar { width: 4px; height: 4px; }
+          ::-webkit-scrollbar-track { background: ${T.bg1}; }
+          ::-webkit-scrollbar-thumb { background: ${T.line2}; }
+        `}</style>
 
-      <FloatingKillSwitch onKill={() => {}} />
-      <Header status={data.status} risk={data.risk} funds={data.funds} />
-      <TabBar active={tab} onChange={setTab} />
+        <FloatingKillSwitch onKill={() => {}} />
+        <Header status={data.status} risk={data.risk} funds={data.funds} />
+        <TabBar active={tab} onChange={setTab} />
 
-      {tab === 'Signals'   && <SignalsTab   data={data} />}
-      {tab === 'Portfolio' && <PortfolioTab data={data} />}
-      {tab === 'System'    && <SystemTab    data={data} />}
-    </div>
+        <ErrorBoundary>
+          {tab === 'Signals'   && <SignalsTab   data={data} />}
+          {tab === 'Portfolio' && <PortfolioTab data={data} />}
+          {tab === 'System'    && <SystemTab    data={data} />}
+        </ErrorBoundary>
+      </div>
+    </ErrorBoundary>
   )
 }
