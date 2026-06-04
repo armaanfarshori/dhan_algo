@@ -784,7 +784,7 @@ async def db_stats_handler(_request: web.Request) -> web.Response:
             )).fetchall()
             signals_count = conn.execute(text("SELECT COUNT(*) FROM signals")).scalar()
             trades_count  = conn.execute(text("SELECT COUNT(*) FROM trades")).scalar()
-        return web.json_response({
+        result = {
             "ok": True,
             "bars": [{"timeframe": r[0], "rows": r[1], "earliest": str(r[2]), "latest": str(r[3])} for r in bars],
             "segments": [{"segment": r[0], "securities": r[1], "bars": r[2],
