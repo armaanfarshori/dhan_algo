@@ -954,7 +954,7 @@ function SysLabel({ children }) {
 
 function SysPanel({ title, right, accent, children }) {
   return (
-    <div style={{ background: T.bg1, border: `1px solid ${accent ?? T.line}`, display: 'flex', flexDirection: 'column' }}>
+    <div style={{ background: T.bg1, border: `1px solid ${accent ?? T.line}` }}>
       <div style={{
         padding: '10px 16px', borderBottom: `1px solid ${accent ?? T.line}`,
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
@@ -964,7 +964,7 @@ function SysPanel({ title, right, accent, children }) {
           letterSpacing: '0.18em', textTransform: 'uppercase' }}>{title}</span>
         {right && <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>{right}</span>}
       </div>
-      <div style={{ padding: 16, flex: 1 }}>{children}</div>
+      <div style={{ padding: 16 }}>{children}</div>
     </div>
   )
 }
