@@ -921,8 +921,28 @@ async def main():
         # Upgrade to t4g.medium if you want eager model loading.
         kronos = get_kronos_engine()
 
-        # One ORBStrategy instance per watchlist security
-        watchlist_ids = _cfg.watchlist_security_ids
+        # ── Watchlist: dynamic screener (preferred) or env fallback ──────────
+        # Primary: use ATR screener to pick top-N volatile securities from DB
+        # Fallback: WATCHLIST_SECURITY_IDS from .env (used before backfill loads)
+        n_watch = int(os.getenv("WATCHLIST_N", "5"))
+        try:
+            from core.nse_screener import get_top_volatile
+            from urllib.parse import quote_plus
+            from db import init_db as _init_db_screener
+            _init_db_screener(
+                f"postgresql+psycopg2://{quote_plus(_cfg.db_user)}:{quote_plus(_cfg.db_password)}"
+                f"@{_cfg.db_host}:{_cfg.db_port}/{_cfg.db_name}"
+            )
+            screener_results = get_top_volatile(n=n_watch, min_avg_volume=10_000)
+            if screener_results:
+                watchlist_ids = [r["security_id"] for r in screener_results]
+                logger.info("Watchlist from screener (%d): %s", len(watchlist_ids), watchlist_ids)
+            else:
+                watchlist_ids = _cfg.watchlist_security_ids
+                logger.warning("Screener returned no results — using .env fallback: %s", watchlist_ids)
+        except Exception as e:
+            watchlist_ids = _cfg.watchlist_security_ids
+            logger.warning("Screener failed (%s) — using .env fallback: %s", e, watchlist_ids)
         orb_cfg = ORBConfig(
             orb_minutes=_cfg.orb_range_minutes,
             use_kronos=True,
