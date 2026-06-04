@@ -47,7 +47,8 @@ class BaseStrategy(ABC):
     Abstract base strategy. Subclass and implement on_tick().
     """
 
-    def __init__(self, client, risk_manager, config: StrategyConfig, db_backend=None, run_id=None):
+    def __init__(self, client, risk_manager, config: StrategyConfig,
+                 db_backend=None, run_id=None, poll_offset: float = 0.0):
         self.client = client
         self.risk = risk_manager
         self.config = config
@@ -57,6 +58,7 @@ class BaseStrategy(ABC):
         self.signals: List[Signal] = []
         self._running = False
         self._db = db_backend   # AsyncDBBackend — optional, fails silently if None
+        self._poll_offset = poll_offset  # stagger start so N strategies don't burst together
         self._run_id = run_id   # links all orders/signals to this agent session
 
     @abstractmethod
@@ -211,7 +213,9 @@ class BaseStrategy(ABC):
     async def run(self):
         """Main strategy loop — polls live OHLC only during NSE market hours."""
         self._running = True
-        logger.info(f"▶ Strategy '{self.config.name}' started (paper={self.config.paper_trading})")
+        logger.info(f"▶ Strategy '{self.config.name}' started (paper={self.config.paper_trading}, offset={self._poll_offset:.1f}s)")
+        if self._poll_offset > 0:
+            await asyncio.sleep(self._poll_offset)
         while self._running:
             if not self._is_market_hours():
                 # Outside market hours: sleep 60s, no API calls

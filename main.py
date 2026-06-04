@@ -929,7 +929,14 @@ async def main():
             kronos_min_confidence=float(os.getenv("KRONOS_MIN_CONFIDENCE", "0.4")),
         )
         strategies_list = []
-        for sid in watchlist_ids:
+        # Stagger poll intervals so N concurrent strategies don't burst-hit
+        # the quote endpoint simultaneously.
+        # Each gets an extra (index * stagger) seconds, then all poll at
+        # POLL_INTERVAL thereafter.  With 4 strategies + 5s stagger = one
+        # quote call every 5s across the group = 0.2 req/s (well under 1/s).
+        base_interval = float(os.getenv("POLL_INTERVAL", "20.0"))  # 20s default
+        stagger_sec   = base_interval / max(len(watchlist_ids), 1)
+        for idx, sid in enumerate(watchlist_ids):
             from strategies.strategy_base import StrategyConfig
             scfg = StrategyConfig(
                 name=f"ORB_{sid}",
@@ -937,7 +944,7 @@ async def main():
                 exchange_segment=_cfg.watchlist_exchange_segment,
                 product_type="INTRADAY",
                 quantity=int(os.getenv("TRADE_QUANTITY", "1")),
-                poll_interval=float(os.getenv("POLL_INTERVAL", "5.0")),
+                poll_interval=base_interval,
                 paper_trading=PAPER_TRADING,
                 max_orders=int(os.getenv("MAX_ORDERS_PER_SESSION", "4")),
             )
@@ -945,7 +952,8 @@ async def main():
                 ORBStrategy(dhan, risk, scfg, orb_config=orb_cfg,
                             trade_logger=get_trade_logger(),
                             kronos_engine=kronos,
-                            db_backend=db, run_id=run_id)
+                            db_backend=db, run_id=run_id,
+                            poll_offset=idx * stagger_sec)
             )
 
         logger.info("ORB+Kronos active on %d securities: %s", len(strategies_list), watchlist_ids)
