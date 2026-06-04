@@ -912,7 +912,6 @@ async def main():
         access_token=access_token,
         auth_manager=master_tm,
         sandbox=PAPER_TRADING,
-        auth_manager=_auth_manager,
     ) as dhan:
 
         # max_loss_per_trade: premium paid per options position (full upfront cost)
