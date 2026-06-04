@@ -293,8 +293,32 @@ async def run_backfill(args, cfg):
             # Background loop checks every 10 min and refreshes 30 min before expiry
             refresh_task = asyncio.create_task(auth_mgr.run())
 
+        # Build set of already-fully-loaded securities to skip on resume
+        already_loaded: set[str] = set()
+        if getattr(args, "resume", True):
+            try:
+                from db import get_session
+                from sqlalchemy import text as _text
+                cutoff = args.from_date.strftime("%Y-%m-%d")
+                with get_session() as _s:
+                    rows = _s.execute(_text("""
+                        SELECT security_id FROM bars
+                        WHERE timeframe='1m'
+                          AND time::date <= :cutoff + INTERVAL '7 days'
+                        GROUP BY security_id
+                        HAVING MIN(time)::date <= :cutoff + INTERVAL '7 days'
+                           AND MAX(time)::date >= CURRENT_DATE - INTERVAL '3 days'
+                    """), {"cutoff": cutoff}).fetchall()
+                already_loaded = {r[0] for r in rows}
+                if already_loaded:
+                    logger.info("Resume mode: skipping %d already-loaded securities", len(already_loaded))
+            except Exception as exc:
+                logger.warning("Could not load resume set (%s) — processing all", exc)
+
         try:
             for sid in args.security_ids:
+                if sid in already_loaded:
+                    continue   # skip — data already complete
                 logger.info("═══ security_id=%s ═══", sid)
 
                 if args.do_intraday:
