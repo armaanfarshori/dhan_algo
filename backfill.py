@@ -39,11 +39,21 @@ from core.client import DhanClient
 
 _ENV_FILE = Path(__file__).parent / ".env"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
-    datefmt="%H:%M:%S",
-)
+import time as _time
+
+class _ISTFormatter(logging.Formatter):
+    """Log timestamps in IST (UTC+5:30) for readability."""
+    def formatTime(self, record, datefmt=None):
+        import datetime
+        ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        ct  = datetime.datetime.fromtimestamp(record.created, tz=ist)
+        return ct.strftime(datefmt or "%H:%M:%S IST")
+
+_handler = logging.StreamHandler()
+_handler.setFormatter(_ISTFormatter(
+    fmt="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s"
+))
+logging.basicConfig(level=logging.INFO, handlers=[_handler])
 logger = logging.getLogger("dhan.backfill")
 
 _MAX_INTRADAY_CHUNK = 90  # Dhan hard limit per /v2/charts/intraday call
@@ -299,19 +309,20 @@ async def run_backfill(args, cfg):
             try:
                 from db import get_session
                 from sqlalchemy import text as _text
-                cutoff = args.from_date.strftime("%Y-%m-%d")
+                from datetime import date as _date, timedelta as _td
+                min_check = args.from_date + _td(days=7)
+                max_check = _date.today() - _td(days=3)
                 with get_session() as _s:
                     rows = _s.execute(_text("""
                         SELECT security_id FROM bars
                         WHERE timeframe='1m'
-                          AND time::date <= :cutoff + INTERVAL '7 days'
                         GROUP BY security_id
-                        HAVING MIN(time)::date <= :cutoff + INTERVAL '7 days'
-                           AND MAX(time)::date >= CURRENT_DATE - INTERVAL '3 days'
-                    """), {"cutoff": cutoff}).fetchall()
+                        HAVING MIN(time)::date <= :min_check
+                           AND MAX(time)::date >= :max_check
+                    """), {"min_check": min_check, "max_check": max_check}).fetchall()
                 already_loaded = {r[0] for r in rows}
                 if already_loaded:
-                    logger.info("Resume mode: skipping %d already-loaded securities", len(already_loaded))
+                    logger.info("Resume mode: skipping %d already-loaded securities, starting from frontier", len(already_loaded))
             except Exception as exc:
                 logger.warning("Could not load resume set (%s) — processing all", exc)
 
