@@ -738,7 +738,7 @@ async def backtest_run_handler(request: web.Request) -> web.Response:
 # ── New: data pipeline + AI handlers ─────────────────────────────────────────
 
 async def db_stats_handler(_request: web.Request) -> web.Response:
-    """Row counts and date ranges from TimescaleDB."""
+    """Row counts, date ranges, and per-segment breakdown from TimescaleDB."""
     try:
         from db import get_engine
         from sqlalchemy import text
@@ -748,20 +748,35 @@ async def db_stats_handler(_request: web.Request) -> web.Response:
                        MIN(time)::date AS earliest, MAX(time)::date AS latest
                 FROM bars GROUP BY timeframe ORDER BY timeframe
             """)).fetchall()
+            # Per-segment bar counts (joined with instruments)
+            seg_bars = conn.execute(text("""
+                SELECT i.exchange_segment,
+                       COUNT(DISTINCT b.security_id) AS securities,
+                       COUNT(*) AS bars,
+                       MIN(b.time)::date AS earliest,
+                       MAX(b.time)::date AS latest
+                FROM bars b
+                JOIN instruments i ON i.security_id = b.security_id
+                WHERE b.timeframe = '1m'
+                GROUP BY i.exchange_segment
+                ORDER BY bars DESC
+            """)).fetchall()
             instruments = conn.execute(text(
-                "SELECT exchange_segment, COUNT(*) FROM instruments GROUP BY exchange_segment"
+                "SELECT exchange_segment, COUNT(*) FROM instruments GROUP BY exchange_segment ORDER BY COUNT(*) DESC"
             )).fetchall()
             signals_count = conn.execute(text("SELECT COUNT(*) FROM signals")).scalar()
             trades_count  = conn.execute(text("SELECT COUNT(*) FROM trades")).scalar()
         return web.json_response({
             "ok": True,
             "bars": [{"timeframe": r[0], "rows": r[1], "earliest": str(r[2]), "latest": str(r[3])} for r in bars],
+            "segments": [{"segment": r[0], "securities": r[1], "bars": r[2],
+                          "earliest": str(r[3]), "latest": str(r[4])} for r in seg_bars],
             "instruments": {r[0]: r[1] for r in instruments},
             "signals": signals_count,
             "trades":  trades_count,
         })
     except Exception as exc:
-        return web.json_response({"ok": False, "error": str(exc), "bars": [], "instruments": {}})
+        return web.json_response({"ok": False, "error": str(exc), "bars": [], "segments": [], "instruments": {}})
 
 
 async def kronos_signals_handler(request: web.Request) -> web.Response:
