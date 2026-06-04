@@ -40,17 +40,18 @@ BATCH_SIZE        = 500   # rows per DB batch
 
 def _exchange_segment(seg: str, exchange: str, instrument: str) -> str:
     if seg == "E":
-        return "NSE_EQ"
+        return "BSE_EQ" if exchange == "BSE" else "NSE_EQ"
     if seg == "D":
-        return "NSE_FNO"
+        return "BSE_FNO" if exchange == "BSE" else "NSE_FNO"
     if seg == "C":
-        return "NSE_CDS"
+        return "BSE_CDS" if exchange == "BSE" else "NSE_CDS"
     if seg == "I":
-        return "NSE_IDX"
+        return "BSE_IDX" if exchange == "BSE" else "NSE_IDX"
     if seg == "M":
-        # BSE segment — equity vs derivatives
+        if exchange == "MCX":
+            return "MCX_COMM"           # MCX commodity futures/options
         return "BSE_EQ" if instrument == "EQUITY" else "BSE_FNO"
-    return f"{exchange}_{seg}"   # fallback — preserves unknown segments
+    return f"{exchange}_{seg}"
 
 
 # ── Row dataclass ──────────────────────────────────────────────────────────────

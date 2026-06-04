@@ -141,6 +141,20 @@ def _upsert_bars(df: pd.DataFrame, timeframe: str) -> int:
 
 # ── Intraday backfill (1m) ─────────────────────────────────────────────────────
 
+# Instrument type by exchange segment — used in Dhan API intraday calls
+_SEGMENT_INSTRUMENT = {
+    "NSE_EQ":   "EQUITY",
+    "BSE_EQ":   "EQUITY",
+    "NSE_FNO":  "FUTIDX",   # default; FUTSTK / OPTIDX / OPTSTK also exist
+    "BSE_FNO":  "FUTIDX",
+    "NSE_CDS":  "FUTCUR",
+    "BSE_CDS":  "FUTCUR",
+    "MCX_COMM": "FUTCOM",
+    "NSE_IDX":  "INDEX",
+    "BSE_IDX":  "INDEX",
+}
+
+
 async def backfill_intraday(
     client: DhanClient,
     security_id: str,
@@ -156,10 +170,11 @@ async def backfill_intraday(
         logger.info("  [1m] %s  %s → %s", security_id,
                     cursor.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d"))
         try:
+            instrument_type = _SEGMENT_INSTRUMENT.get(exchange_segment, "EQUITY")
             data = await client.get_intraday_historical(
                 security_id=security_id,
                 exchange_segment=exchange_segment,
-                instrument="EQUITY",
+                instrument=instrument_type,
                 interval="1",
                 from_date=cursor.strftime("%Y-%m-%d"),
                 to_date=chunk_end.strftime("%Y-%m-%d"),
@@ -198,7 +213,7 @@ async def backfill_daily(
         data = await client.get_daily_historical(
             security_id=security_id,
             exchange_segment=exchange_segment,
-            instrument="EQUITY",
+            instrument=_SEGMENT_INSTRUMENT.get(exchange_segment, "EQUITY"),
             from_date=from_date.strftime("%Y-%m-%d"),
             to_date=to_date.strftime("%Y-%m-%d"),
         )
@@ -318,10 +333,10 @@ def main():
     # ── Security ID selection ──────────────────────────────────────────────────
     parser.add_argument("--ids",
         help="Comma-separated security IDs to backfill")
-    parser.add_argument(
-        "--nse-eq", action="store_true",
-        help="Backfill ALL NSE equity instruments (loads from instruments table — run --instruments first)",
-    )
+    parser.add_argument("--nse-eq",  action="store_true", help="All NSE equity (NSE_EQ)")
+    parser.add_argument("--nse-cds", action="store_true", help="NSE currency derivatives (NSE_CDS) — USD/INR, EUR/INR etc.")
+    parser.add_argument("--bse-eq",  action="store_true", help="All BSE equity (BSE_EQ)")
+    parser.add_argument("--mcx",     action="store_true", help="MCX commodity futures (MCX_COMM) — Gold, Silver, Crude etc.")
 
     # ── Date range ─────────────────────────────────────────────────────────────
     parser.add_argument("--from", dest="from_date",
@@ -362,22 +377,32 @@ def main():
     raw.to_date    = datetime.strptime(raw.to_date,    "%Y-%m-%d").date()
     raw.daily_from = datetime.strptime(raw.daily_from, "%Y-%m-%d").date()
 
+    from core.instrument_sync import get_security_ids_by_segment
+
     if raw.nse_eq:
-        # Pull all NSE equity IDs from the instruments table
-        from core.instrument_sync import get_equity_security_ids
-        raw.security_ids = get_equity_security_ids()
+        raw.security_ids = get_security_ids_by_segment("NSE_EQ")
         raw.exchange_segment = "NSE_EQ"
-        if not raw.security_ids:
-            logger.error("No NSE_EQ instruments in DB — run: python backfill.py --instruments first")
-            return
-        logger.info("Loaded %d NSE equity security IDs from instruments table", len(raw.security_ids))
+    elif raw.nse_cds:
+        raw.security_ids = get_security_ids_by_segment("NSE_CDS")
+        raw.exchange_segment = "NSE_CDS"
+    elif raw.bse_eq:
+        raw.security_ids = get_security_ids_by_segment("BSE_EQ")
+        raw.exchange_segment = "BSE_EQ"
+    elif raw.mcx:
+        raw.security_ids = get_security_ids_by_segment("MCX_COMM")
+        raw.exchange_segment = "MCX_COMM"
     elif raw.ids:
         raw.security_ids = [s.strip() for s in raw.ids.split(",")]
         raw.exchange_segment = raw.segment or cfg.watchlist_exchange_segment
     else:
-        # No --ids or --nse-eq: require explicit flag — no static default
-        logger.error("Specify securities with --ids <list> or use --nse-eq for all NSE equities")
+        logger.error("Specify a segment flag: --nse-eq | --nse-cds | --bse-eq | --mcx | --ids <list>")
         return
+
+    if not raw.security_ids:
+        logger.error("No instruments found for segment — run: python backfill.py --instruments first")
+        return
+
+    logger.info("Loaded %d security IDs  segment=%s", len(raw.security_ids), raw.exchange_segment)
 
     raw.do_intraday = not raw.daily
     raw.do_daily    = raw.daily or raw.all
