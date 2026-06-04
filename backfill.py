@@ -375,8 +375,9 @@ def main():
         raw.security_ids = [s.strip() for s in raw.ids.split(",")]
         raw.exchange_segment = raw.segment or cfg.watchlist_exchange_segment
     else:
-        raw.security_ids = cfg.watchlist_security_ids
-        raw.exchange_segment = raw.segment or cfg.watchlist_exchange_segment
+        # No --ids or --nse-eq: require explicit flag — no static default
+        logger.error("Specify securities with --ids <list> or use --nse-eq for all NSE equities")
+        return
 
     raw.do_intraday = not raw.daily
     raw.do_daily    = raw.daily or raw.all

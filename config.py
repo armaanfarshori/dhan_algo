@@ -37,12 +37,12 @@ class Config:
         default_factory=lambda: int(os.getenv("ORB_RANGE_MINUTES", "15"))
     )
 
-    # Watchlist
-    watchlist_security_ids: list[str] = field(default_factory=lambda: [
-        s.strip() for s in os.getenv("WATCHLIST_SECURITY_IDS", "2885,1333,1594,11536").split(",")
-    ])
+    # Watchlist — dynamic from screener; only segment is fixed
     watchlist_exchange_segment: str = field(
         default_factory=lambda: os.getenv("WATCHLIST_EXCHANGE_SEGMENT", "NSE_EQ")
+    )
+    watchlist_n: int = field(
+        default_factory=lambda: int(os.getenv("WATCHLIST_N", "5"))
     )
 
     # TimescaleDB
