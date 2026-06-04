@@ -23,10 +23,10 @@ export function useDashboardData() {
   const config        = usePoller('/api/config',           10000)
   const watchlist     = usePoller('/api/watchlist',        15000)
   const market        = usePoller('/api/market',           30000)
-  const dbStats       = usePoller('/api/db/stats',         30000)
-  const kronosSignals = usePoller('/api/kronos/signals',   30000)
-  const screener      = usePoller('/api/kronos/screener',  60000)
-  const hermes        = usePoller('/api/hermes/status',    30000)
+  const dbStats       = usePoller('/api/db/stats',         60000)   // cached 60s server-side
+  const kronosSignals = usePoller('/api/kronos/signals',   60000)
+  const screener      = usePoller('/api/kronos/screener',  120000)  // ATR screener is expensive
+  const hermes        = usePoller('/api/hermes/status',    60000)   // cached 30s server-side
 
   return {
     // existing

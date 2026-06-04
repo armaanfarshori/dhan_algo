@@ -737,8 +737,26 @@ async def backtest_run_handler(request: web.Request) -> web.Response:
 
 # ── New: data pipeline + AI handlers ─────────────────────────────────────────
 
+# Simple TTL caches so slow queries/subprocesses don't block every poll
+_CACHE: dict = {}
+
+def _cache_get(key: str, ttl_seconds: int):
+    import time
+    entry = _CACHE.get(key)
+    if entry and (time.monotonic() - entry["ts"]) < ttl_seconds:
+        return entry["val"]
+    return None
+
+def _cache_set(key: str, val):
+    import time
+    _CACHE[key] = {"val": val, "ts": time.monotonic()}
+
+
 async def db_stats_handler(_request: web.Request) -> web.Response:
-    """Row counts, date ranges, and per-segment breakdown from TimescaleDB."""
+    """Row counts, date ranges, and per-segment breakdown from TimescaleDB. Cached 60s."""
+    cached = _cache_get("db_stats", 60)
+    if cached:
+        return web.json_response(cached)
     try:
         from db import get_engine
         from sqlalchemy import text
@@ -774,7 +792,9 @@ async def db_stats_handler(_request: web.Request) -> web.Response:
             "instruments": {r[0]: r[1] for r in instruments},
             "signals": signals_count,
             "trades":  trades_count,
-        })
+        }
+        _cache_set("db_stats", result)
+        return web.json_response(result)
     except Exception as exc:
         return web.json_response({"ok": False, "error": str(exc), "bars": [], "segments": [], "instruments": {}})
 
@@ -832,7 +852,10 @@ async def backfill_status_handler(_request: web.Request) -> web.Response:
 
 
 async def hermes_status_handler(_request: web.Request) -> web.Response:
-    """Hermes gateway status — PID, model, next cron fires."""
+    """Hermes gateway status. Cached 30s — subprocess is slow."""
+    cached = _cache_get("hermes_status", 30)
+    if cached:
+        return web.json_response(cached)
     import subprocess
     try:
         result = subprocess.run(
@@ -840,13 +863,15 @@ async def hermes_status_handler(_request: web.Request) -> web.Response:
             capture_output=True, text=True, timeout=5,
         )
         running = "active (running)" in result.stdout
-        return web.json_response({
+        val = {
             "ok": True,
             "running": running,
             "raw": result.stdout.strip()[:300],
             "model": "meta-llama/llama-3.3-70b-instruct",
             "provider": "openrouter",
-        })
+        }
+        _cache_set("hermes_status", val)
+        return web.json_response(val)
     except Exception as exc:
         return web.json_response({"ok": False, "running": False, "error": str(exc)})
 
