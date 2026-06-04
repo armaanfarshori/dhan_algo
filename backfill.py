@@ -268,35 +268,19 @@ async def run_backfill(args, cfg):
 
     Falls back to static token if PIN/TOTP are not configured.
     """
-    auth_mgr = None
-    access_token = cfg.dhan_access_token
-    refresh_task = None
-
-    if cfg.dhan_pin and cfg.totp_secret:
-        try:
-            from core.auth import DhanAuthManager
-            auth_mgr = DhanAuthManager(
-                client_id=cfg.dhan_client_id,
-                pin=cfg.dhan_pin,
-                totp_secret=cfg.totp_secret,
-            )
-            # Load cached token or generate fresh one via PIN + TOTP
-            access_token = await auth_mgr.load_or_generate()
-            auth_mgr.on_token_refresh(_save_token_to_env)
-            logger.info("Auth manager ready — token auto-refresh active (refreshes 30 min before expiry)")
-        except Exception as exc:
-            logger.warning(
-                "Auth manager init failed (%s) — falling back to static token from .env. "
-                "Token auto-refresh disabled. Verify DHAN_PIN is correct.",
-                exc,
-            )
-            auth_mgr = None
-            access_token = cfg.dhan_access_token
+    # ── Token: read from shared cache managed by main.py (MasterTokenManager) ──
+    # backfill.py never calls generate_token() — only main.py does.
+    # This prevents the "two processes competing and invalidating each other" problem.
+    from core.token_manager import read_current_token
+    cached = read_current_token()
+    access_token = cached or cfg.dhan_access_token
+    if cached:
+        logger.info("Using cached token from dhan_token.json (managed by main.py)")
     else:
-        logger.warning(
-            "DHAN_PIN or DHAN_TOTP_SECRET not set — using static token. "
-            "Backfill will fail after token expires (~24h)."
-        )
+        logger.warning("No cached token found — using .env token. Start main.py first for auto-refresh.")
+
+    auth_mgr     = None   # backfill never owns token refresh
+    refresh_task = None
 
     async with DhanClient(cfg.dhan_client_id, access_token, auth_manager=auth_mgr) as client:
         if auth_mgr:

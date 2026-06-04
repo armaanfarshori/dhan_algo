@@ -898,24 +898,19 @@ async def main():
     if not PAPER_TRADING:
         logger.warning("⚠️  LIVE TRADING MODE — real money at risk!")
 
-    # ── Auth Manager (auto token refresh) ─────────────────────────────────────
+    # ── Auth: use MasterTokenManager (single owner of token refresh) ──────────
+    # backfill.py reads the token from dhan_token.json — never generates itself
+    from core.token_manager import MasterTokenManager
     global _auth_manager
-    access_token = ACCESS_TOKEN
-
-    if DHAN_PIN and TOTP_SECRET:
-        _auth_manager = DhanAuthManager(
-            client_id=CLIENT_ID,
-            pin=DHAN_PIN,
-            totp_secret=TOTP_SECRET,
-        )
-        access_token = await _auth_manager.load_or_generate()
-        logger.info("🔑 Auto token management enabled (PIN + TOTP)")
-    else:
-        logger.info("🔑 Manual token mode — set DHAN_PIN + DHAN_TOTP_SECRET for auto-refresh")
+    master_tm = MasterTokenManager()
+    access_token = await master_tm.load_or_generate()
+    _auth_manager = master_tm   # kept for /api/auth endpoint compat
+    logger.info("🔑 MasterTokenManager active — sole token owner")
 
     async with DhanClient(
         client_id=CLIENT_ID,
         access_token=access_token,
+        auth_manager=master_tm,
         sandbox=PAPER_TRADING,
         auth_manager=_auth_manager,
     ) as dhan:
