@@ -289,76 +289,105 @@ async def run_backfill(args, cfg):
             # Background loop checks every 10 min and refreshes 30 min before expiry
             refresh_task = asyncio.create_task(auth_mgr.run())
 
-        # ── Checkpoint-based resume ───────────────────────────────────────────
-        # Writes the last-processed security_id to a JSON file after each security.
-        # On restart, reads the checkpoint and skips everything up to+including
-        # that ID. Exact position in the queue — no DB query needed.
+        # ── Bulletproof resume: index checkpoint + DB seeding ─────────────────
+        # The security_ids list is fixed/sorted. We track the INDEX of the last
+        # processed security in a checkpoint file (survives process restarts).
+        # On a fresh start with no checkpoint, we SEED the start index from the
+        # DB: find the furthest security in the list that already has data.
+        # This means a fresh deploy NEVER re-scans from the beginning.
         import json as _json
 
-        CKPT_FILE = Path("/tmp") / f"backfill_ckpt_{args.exchange_segment}.json"
+        ckpt_dir  = Path("/opt/dhan-trading")
+        ckpt_dir  = ckpt_dir if ckpt_dir.exists() else Path("/tmp")
+        CKPT_FILE = ckpt_dir / f"backfill_ckpt_{args.exchange_segment}.json"
+        id_list   = list(args.security_ids)
+        n_total   = len(id_list)
 
-        def _load_checkpoint() -> str | None:
-            try:
-                if CKPT_FILE.exists():
-                    d = _json.loads(CKPT_FILE.read_text())
-                    if d.get("segment") == args.exchange_segment:
-                        return d.get("last_id")
-            except Exception:
-                pass
-            return None
-
-        def _save_checkpoint(sid: str):
-            CKPT_FILE.write_text(_json.dumps({
-                "segment": args.exchange_segment,
-                "last_id": sid,
-                "ts":      __import__("datetime").datetime.now().isoformat(),
+        def _save_checkpoint(idx: int, sid: str):
+            tmp = CKPT_FILE.with_suffix(".tmp")
+            tmp.write_text(_json.dumps({
+                "segment":  args.exchange_segment,
+                "index":    idx,
+                "last_id":  sid,
+                "total":    n_total,
+                "ts":       __import__("datetime").datetime.now().isoformat(),
             }))
+            tmp.replace(CKPT_FILE)   # atomic
 
-        last_done = _load_checkpoint()
-        skip_until_done = last_done is not None
-        skipped = 0
+        # Determine the start index
+        start_idx = 0
+        ckpt_idx  = None
+        if CKPT_FILE.exists():
+            try:
+                d = _json.loads(CKPT_FILE.read_text())
+                if d.get("segment") == args.exchange_segment and d.get("last_id") in id_list:
+                    # Verify the id still matches the index (list could have changed)
+                    saved_id = d["last_id"]
+                    if id_list[d["index"]] == saved_id:
+                        ckpt_idx = d["index"]
+                    else:
+                        ckpt_idx = id_list.index(saved_id)
+            except Exception as exc:
+                logger.warning("Checkpoint unreadable (%s) — will seed from DB", exc)
 
-        if last_done:
-            logger.info("Checkpoint found — resuming after security_id=%s", last_done)
+        if ckpt_idx is not None:
+            start_idx = ckpt_idx + 1
+            logger.info("Checkpoint: resuming at index %d/%d (after security_id=%s)",
+                        start_idx, n_total, id_list[ckpt_idx])
         else:
-            logger.info("No checkpoint — starting from beginning of %s list", args.exchange_segment)
+            # No checkpoint — seed from DB: find furthest already-loaded security
+            try:
+                from db import get_session
+                from sqlalchemy import text as _text
+                from datetime import date as _date, timedelta as _td
+                min_check = args.from_date + _td(days=7)
+                max_check = _date.today() - _td(days=3)
+                with get_session() as _s:
+                    rows = _s.execute(_text("""
+                        SELECT security_id FROM bars WHERE timeframe='1m'
+                        GROUP BY security_id
+                        HAVING MIN(time)::date <= :mn AND MAX(time)::date >= :mx
+                    """), {"mn": min_check, "mx": max_check}).fetchall()
+                loaded = {r[0] for r in rows}
+                # Find the highest index in our list that's already loaded
+                last_loaded_idx = -1
+                for i, sid in enumerate(id_list):
+                    if sid in loaded:
+                        last_loaded_idx = i
+                start_idx = last_loaded_idx + 1
+                logger.info("No checkpoint — seeded from DB: %d loaded, starting at index %d/%d",
+                            len(loaded), start_idx, n_total)
+            except Exception as exc:
+                logger.warning("DB seeding failed (%s) — starting from index 0", exc)
+                start_idx = 0
 
         try:
-            for sid in args.security_ids:
-                # Skip until we pass the last checkpoint
-                if skip_until_done:
-                    if sid == last_done:
-                        skip_until_done = False   # next iteration starts processing
-                    skipped += 1
-                    continue
-
-                if skipped and skipped % 500 == 0:
-                    logger.info("Skipped %d already-done securities", skipped)
-
-                logger.info("═══ security_id=%s ═══", sid)
+            for idx in range(start_idx, n_total):
+                sid = id_list[idx]
+                logger.info("═══ [%d/%d] security_id=%s ═══", idx + 1, n_total, sid)
 
                 if args.do_intraday:
                     n = await backfill_intraday(
                         client, sid, args.exchange_segment,
                         args.from_date, args.to_date, args.dry_run,
                     )
-                    logger.info("  1m done — %d rows %s", n, "(dry)" if args.dry_run else "upserted")
+                    if n > 0:
+                        logger.info("  1m done — %d rows upserted", n)
 
                 if args.do_daily:
                     n = await backfill_daily(
                         client, sid, args.exchange_segment,
                         args.daily_from, args.to_date, args.dry_run,
                     )
-                    logger.info("  1d done — %d rows %s", n, "(dry)" if args.dry_run else "upserted")
 
-                # Save checkpoint after every security (including 0-candle ones)
+                # Checkpoint after every security (data or not)
                 if not args.dry_run:
-                    _save_checkpoint(sid)
+                    _save_checkpoint(idx, sid)
 
+            logger.info("Segment %s complete — %d securities processed", args.exchange_segment, n_total - start_idx)
         finally:
             if refresh_task:
                 refresh_task.cancel()
-            logger.info("Checkpoint saved at security_id=%s — safe to restart", _load_checkpoint() or "unknown")
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
