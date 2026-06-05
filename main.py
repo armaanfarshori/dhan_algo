@@ -1086,10 +1086,16 @@ async def main():
         equity_task = asyncio.create_task(asyncio.sleep(0), name="equity_noop")
 
         # ── Kronos live scanner — continuous screener + scoring ──────────────
-        from core.kronos_scanner import KronosScanner
-        kronos_scanner = KronosScanner(kronos, db_backend=db, n=int(os.getenv("WATCHLIST_N", "5")))
-        scanner_task = asyncio.create_task(kronos_scanner.run(), name="kronos_scanner")
-        app["kronos_scanner"] = kronos_scanner
+        # Gated by KRONOS_SCANNER_ENABLED (default on). Disable to free CPU for
+        # the historical backfill — Kronos inference is CPU-heavy on t4g.
+        scanner_task = None
+        if os.getenv("KRONOS_SCANNER_ENABLED", "true").lower() in ("1", "true", "yes"):
+            from core.kronos_scanner import KronosScanner
+            kronos_scanner = KronosScanner(kronos, db_backend=db, n=int(os.getenv("WATCHLIST_N", "5")))
+            scanner_task = asyncio.create_task(kronos_scanner.run(), name="kronos_scanner")
+            app["kronos_scanner"] = kronos_scanner
+        else:
+            logger.info("Kronos live scanner DISABLED (KRONOS_SCANNER_ENABLED=false)")
 
         app["risk"]           = risk
         app["strategy"]       = strategy
