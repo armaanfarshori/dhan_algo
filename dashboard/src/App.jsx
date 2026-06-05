@@ -166,11 +166,19 @@ const SIDE_CFG = {
   HOLD: { label: '➖ HOLD', color: T.ink3,  bg: T.bg3,    border: T.line  },
 }
 
-function SignalCard({ sig, atr }) {
+function _atrPct(reason) {
+  if (!reason) return null
+  const m = reason.match(/ATR%=([\d.]+)/)
+  return m ? parseFloat(m[1]) : null
+}
+
+// Card for the live Kronos scanner — uses ticker NAME, not ID
+function SignalCard({ sig }) {
   const cfg  = SIDE_CFG[sig.side] ?? SIDE_CFG.HOLD
   const conf = Math.round((sig.confidence ?? 0) * 100)
-  const ret  = (sig.features?.forecast_return ?? 0) * 100
-  const atrPct = atr ? (parseFloat(atr.replace('ATR%=', '')) ?? null) : null
+  const ret  = (sig.forecast_return ?? 0) * 100
+  const atrPct = _atrPct(sig.atr_reason)
+  const name = sig.ticker || sig.security_id
 
   return (
     <div style={{
@@ -181,14 +189,22 @@ function SignalCard({ sig, atr }) {
       display: 'flex', flexDirection: 'column', gap: 8,
       position: 'relative', overflow: 'hidden',
     }}>
-      {/* Security ID + badge */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <span style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 700, color: T.ink0 }}>
-          {sig.security_id}
-        </span>
+      {/* Ticker name + badge */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <div>
+          <div style={{ fontFamily: T.mono, fontSize: 14, fontWeight: 700, color: T.ink0 }}>
+            {name}
+          </div>
+          {sig.name && (
+            <div style={{ fontFamily: T.mono, fontSize: 8, color: T.ink3, marginTop: 2,
+              maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {sig.name}
+            </div>
+          )}
+        </div>
         <span style={{
           fontFamily: T.mono, fontSize: 9, letterSpacing: '0.15em',
-          padding: '2px 7px',
+          padding: '2px 7px', flexShrink: 0,
           background: cfg.bg, color: cfg.color,
           border: `1px solid ${cfg.border}`,
         }}>
@@ -228,7 +244,6 @@ function SignalCard({ sig, atr }) {
         )}
       </div>
 
-      {/* Subtle confidence glow behind card */}
       {conf >= 60 && (
         <div style={{
           position: 'absolute', inset: 0, pointerEvents: 'none',
@@ -286,73 +301,60 @@ function SessionBar({ status }) {
 // ─────────────────────────────────────────────────────────────────
 // Signal card (compact)
 // ─────────────────────────────────────────────────────────────────
-function KronosBoard({ kronosSignals, screener }) {
-  const raw        = kronosSignals?.data?.signals ?? []
-  const candidates = screener?.data?.candidates ?? []
-
-  // Deduplicate: keep latest per security
-  const seen = new Map()
-  for (const s of [...raw].sort((a,b) => b.ts?.localeCompare(a.ts ?? '') ?? 0)) {
-    if (!seen.has(s.security_id)) seen.set(s.security_id, s)
-  }
-
-  // Sort: BUY > SELL > HOLD, then by confidence desc
-  const ORDER = { BUY: 0, SELL: 1, HOLD: 2 }
-  const sorted = [...seen.values()].sort((a, b) =>
-    (ORDER[a.side] ?? 3) - (ORDER[b.side] ?? 3) || (b.confidence ?? 0) - (a.confidence ?? 0)
-  )
-
-  const lastTs = raw[0]?.ts ?? null
-  const atrMap = Object.fromEntries(candidates.map(c => [c.security_id, c.reason]))
+function KronosBoard({ kronosLive }) {
+  const state    = kronosLive?.data ?? {}
+  const results  = state.results ?? []
+  const scanning = state.scanning ?? false
+  const scanCount= state.scan_count ?? 0
+  const lastScan = state.last_scan
 
   return (
     <section>
-      {/* Section header */}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 12,
-        marginBottom: 14,
-      }}>
+      {/* Section header with live scanning indicator */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <div style={{
             width: 8, height: 8, borderRadius: '50%',
-            background: sorted.length ? T.cyan : T.ink3,
-            boxShadow: sorted.length ? `0 0 10px ${T.cyan}` : 'none',
+            background: scanning ? T.amber : results.length ? T.cyan : T.ink3,
+            boxShadow: (scanning || results.length) ? `0 0 10px ${scanning ? T.amber : T.cyan}` : 'none',
+            animation: scanning ? 'pulse 1s ease-in-out infinite' : 'none',
           }} />
           <span style={{ fontFamily: T.mono, fontSize: 11, letterSpacing: '0.22em', color: T.ink0 }}>
             KRONOS AI
           </span>
         </div>
-        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>
-          AAAI 2026 · OHLCV FOUNDATION MODEL
+        <span style={{
+          fontFamily: T.mono, fontSize: 9,
+          color: scanning ? T.amber : T.ink3,
+          letterSpacing: '0.1em',
+        }}>
+          {scanning ? '◉ SCANNING…' : `AAAI 2026 · SCAN #${scanCount}`}
         </span>
-        {lastTs && (
+        {lastScan && (
           <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, marginLeft: 'auto' }}>
-            LAST RUN {fmtTime(lastTs)}
+            LAST SCAN {fmtTime(lastScan)} · re-scans every 3 min
           </span>
         )}
       </div>
 
-      {sorted.length === 0 ? (
+      {results.length === 0 ? (
         <div style={{
-          border: `1px dashed ${T.line2}`,
-          padding: '40px 24px',
-          textAlign: 'center',
-          fontFamily: T.mono, fontSize: 11, color: T.ink3,
-          letterSpacing: '0.1em',
+          border: `1px dashed ${T.line2}`, padding: '40px 24px', textAlign: 'center',
+          fontFamily: T.mono, fontSize: 11, color: T.ink3, letterSpacing: '0.1em',
         }}>
-          NO SIGNALS — RUN KRONOS FORECAST
+          {scanning ? 'KRONOS SCANNING WATCHLIST…' : 'WAITING FOR FIRST SCAN'}
           <div style={{ fontSize: 10, marginTop: 8, color: T.ink3 }}>
-            hermes_skills/dhan/kronos_forecast/scripts/forecast.py
+            Scanner runs the ATR screener, then Kronos scores each security
           </div>
         </div>
       ) : (
         <>
-          {/* Signal summary strip */}
+          {/* Summary strip */}
           <div style={{ display: 'flex', gap: 20, marginBottom: 14 }}>
             {[
-              ['BUY',  sorted.filter(s => s.side==='BUY').length,  T.green],
-              ['SELL', sorted.filter(s => s.side==='SELL').length, T.red],
-              ['HOLD', sorted.filter(s => s.side==='HOLD').length, T.ink3],
+              ['BUY',  results.filter(s => s.side==='BUY').length,  T.green],
+              ['SELL', results.filter(s => s.side==='SELL').length, T.red],
+              ['HOLD', results.filter(s => s.side==='HOLD').length, T.ink3],
             ].map(([label, count, color]) => (
               <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ fontFamily: T.dot, fontSize: 22, color }}>{count}</span>
@@ -360,23 +362,68 @@ function KronosBoard({ kronosSignals, screener }) {
               </div>
             ))}
             <span style={{ marginLeft: 'auto', fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>
-              {sorted.length} SECURITIES SCORED
+              {results.length} SCORED THIS SCAN
             </span>
           </div>
 
-          {/* Cards grid */}
+          {/* Cards grid — uses names */}
           <div style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))',
             gap: 8,
           }}>
-            {sorted.map(sig => (
-              <SignalCard key={sig.security_id} sig={sig} atr={atrMap[sig.security_id]} />
+            {results.map(sig => (
+              <SignalCard key={sig.security_id} sig={sig} />
             ))}
           </div>
         </>
       )}
     </section>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Screened-today panel — the day's full screened universe
+// ─────────────────────────────────────────────────────────────────
+function ScreenedToday({ kronosLive }) {
+  const screened = kronosLive?.data?.screened_today?.securities ?? {}
+  const entries  = Object.entries(screened)
+    .map(([sid, v]) => ({ sid, ...v }))
+    .sort((a, b) => (b.times_seen ?? 0) - (a.times_seen ?? 0))
+
+  return (
+    <div style={{ background: T.bg1, border: `1px solid ${T.line}` }}>
+      <div style={{ padding: '10px 16px', borderBottom: `1px solid ${T.line}`,
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.cyan, letterSpacing: '0.18em', textTransform: 'uppercase' }}>
+          SCREENED TODAY
+        </span>
+        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>
+          {entries.length} unique securities · ATR-ranked
+        </span>
+      </div>
+      {entries.length === 0 ? (
+        <div style={{ padding: 16, fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>
+          No securities screened yet today
+        </div>
+      ) : (
+        <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+          {entries.map((e, i) => (
+            <div key={e.sid} style={{
+              display: 'grid', gridTemplateColumns: '80px 1fr 70px 50px', gap: 10,
+              padding: '6px 16px', alignItems: 'center',
+              background: i % 2 === 0 ? T.bg1 : T.bg2,
+              borderBottom: `1px solid ${T.line}`,
+            }}>
+              <span style={{ fontFamily: T.mono, fontSize: 11, fontWeight: 700, color: T.ink0 }}>{e.ticker}</span>
+              <span style={{ fontFamily: T.mono, fontSize: 8, color: T.ink3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.name}</span>
+              <span style={{ fontFamily: T.mono, fontSize: 9, color: T.amber }}>{e.atr_reason?.match(/ATR%=[\d.]+%?/)?.[0] ?? ''}</span>
+              <span style={{ fontFamily: T.mono, fontSize: 8, color: T.ink3, textAlign: 'right' }}>{e.first_seen}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -564,7 +611,10 @@ function ActionWatchlist({ positions, paperPositions, tradelog, kronosSignals })
                 borderLeft: `3px solid ${qty > 0 ? T.green : T.red}`,
                 background: i % 2 === 0 ? T.bg1 : T.bg2,
               }}>
-                <span style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.ink0, minWidth: 60 }}>{sid}</span>
+                <span style={{ display: 'flex', flexDirection: 'column', minWidth: 90 }}>
+                  <span style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.ink0 }}>{sig?.ticker ?? sid}</span>
+                  {sig?.name && <span style={{ fontFamily: T.mono, fontSize: 8, color: T.ink3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 120 }}>{sig.name}</span>}
+                </span>
                 <span style={{ fontFamily: T.mono, fontSize: 9, color: qty > 0 ? T.green : T.red }}>{qty > 0 ? 'LONG' : 'SHORT'}</span>
                 <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink2 }}>{Math.abs(qty)} × ₹{entry?.toFixed?.(2)}</span>
                 {sig && (
@@ -678,8 +728,9 @@ function SignalsTab({ data }) {
 
       {/* Main 2-col layout: Kronos board (left) + PnL+feed (right) */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16, marginBottom: 16 }}>
-        <div>
-          <KronosBoard kronosSignals={data.kronosSignals} screener={data.screener} />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <KronosBoard kronosLive={data.kronosLive} />
+          <ScreenedToday kronosLive={data.kronosLive} />
         </div>
         <RightPanel risk={data.risk} signals={data.signals} />
       </div>

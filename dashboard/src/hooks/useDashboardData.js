@@ -24,7 +24,8 @@ export function useDashboardData() {
   const watchlist     = usePoller('/api/watchlist',        15000)
   const market        = usePoller('/api/market',           30000)
   const dbStats       = usePoller('/api/db/stats',         60000)   // cached 60s server-side
-  const kronosSignals = usePoller('/api/kronos/signals',   60000)
+  const kronosSignals = usePoller('/api/kronos/signals',   30000)
+  const kronosLive    = usePoller('/api/kronos/live',      10000)   // live scanner state
   const screener      = usePoller('/api/kronos/screener',  120000)  // ATR screener is expensive
   const hermes        = usePoller('/api/hermes/status',    60000)   // cached 30s server-side
 
@@ -34,6 +35,6 @@ export function useDashboardData() {
     scalper, payoff, config, watchlist, scanner,
     fnoScanner, equityScanner, market, tradelog, logs,
     // new
-    dbStats, kronosSignals, screener, backfill, hermes,
+    dbStats, kronosSignals, kronosLive, screener, backfill, hermes,
   }
 }

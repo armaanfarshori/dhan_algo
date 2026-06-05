@@ -807,31 +807,53 @@ async def kronos_signals_handler(request: web.Request) -> web.Response:
         from sqlalchemy import text
         with get_engine().connect() as conn:
             rows = conn.execute(text("""
-                SELECT security_id, side, score, confidence, strategy, ts, features_snapshot
-                FROM signals ORDER BY ts DESC LIMIT :lim
+                SELECT s.security_id, s.side, s.score, s.confidence, s.strategy, s.ts,
+                       s.features_snapshot, i.ticker, i.name
+                FROM signals s
+                LEFT JOIN instruments i ON i.security_id = s.security_id
+                ORDER BY s.ts DESC LIMIT :lim
             """), {"lim": limit}).fetchall()
         return web.json_response({"ok": True, "signals": [
             {"security_id": r[0], "side": r[1], "score": float(r[2] or 0),
              "confidence": float(r[3] or 0), "strategy": r[4],
-             "ts": str(r[5]), "features": r[6]}
+             "ts": str(r[5]), "features": r[6],
+             "ticker": r[7] or r[0], "name": r[8] or ""}
             for r in rows
         ]})
     except Exception as exc:
         return web.json_response({"ok": False, "error": str(exc), "signals": []})
 
 
+async def kronos_live_handler(request: web.Request) -> web.Response:
+    """Live Kronos scanner state — current screener + scored forecasts with names."""
+    scanner = request.app.get("kronos_scanner")
+    if scanner is None:
+        return web.json_response({"ok": False, "error": "scanner not running",
+                                  "results": [], "screened_today": {}})
+    return web.json_response(scanner.get_state())
+
+
 async def kronos_screener_handler(request: web.Request) -> web.Response:
-    """Top N volatile NSE equities from the ATR screener."""
+    """Top N volatile NSE equities from the ATR screener — with security names."""
     try:
         n = int(request.rel_url.query.get("n", 20))
         from core.nse_screener import get_top_volatile
-        from db import init_db
-        from config import get_config
-        cfg = get_config()
-        from urllib.parse import quote_plus
-        init_db(f"postgresql+psycopg2://{quote_plus(cfg.db_user)}:{quote_plus(cfg.db_password)}"
-                f"@{cfg.db_host}:{cfg.db_port}/{cfg.db_name}")
+        from db import get_engine
+        from sqlalchemy import text
         candidates = get_top_volatile(n=n)
+        # Resolve names
+        sids = [c["security_id"] for c in candidates]
+        names = {}
+        if sids:
+            with get_engine().connect() as conn:
+                rows = conn.execute(text(
+                    "SELECT security_id, ticker, name FROM instruments WHERE security_id = ANY(:ids)"
+                ), {"ids": sids}).fetchall()
+                names = {r[0]: {"ticker": r[1] or r[0], "name": r[2] or ""} for r in rows}
+        for c in candidates:
+            meta = names.get(c["security_id"], {})
+            c["ticker"] = meta.get("ticker", c["security_id"])
+            c["name"]   = meta.get("name", "")
         return web.json_response({"ok": True, "candidates": candidates, "count": len(candidates)})
     except Exception as exc:
         return web.json_response({"ok": False, "error": str(exc), "candidates": []})
@@ -1063,6 +1085,12 @@ async def main():
         fno_task    = asyncio.create_task(asyncio.sleep(0), name="fno_noop")
         equity_task = asyncio.create_task(asyncio.sleep(0), name="equity_noop")
 
+        # ── Kronos live scanner — continuous screener + scoring ──────────────
+        from core.kronos_scanner import KronosScanner
+        kronos_scanner = KronosScanner(kronos, db_backend=db, n=int(os.getenv("WATCHLIST_N", "5")))
+        scanner_task = asyncio.create_task(kronos_scanner.run(), name="kronos_scanner")
+        app["kronos_scanner"] = kronos_scanner
+
         app["risk"]           = risk
         app["strategy"]       = strategy
         app["strategy_task"]  = orb_tasks[0] if orb_tasks else fno_task
@@ -1091,6 +1119,7 @@ async def main():
         app.router.add_get("/api/db/stats",           db_stats_handler)
         app.router.add_get("/api/kronos/signals",     kronos_signals_handler)
         app.router.add_get("/api/kronos/screener",    kronos_screener_handler)
+        app.router.add_get("/api/kronos/live",        kronos_live_handler)
         app.router.add_get("/api/backfill/status",    backfill_status_handler)
         app.router.add_get("/api/hermes/status",      hermes_status_handler)
 
