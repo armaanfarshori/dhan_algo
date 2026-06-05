@@ -195,7 +195,9 @@ async def backfill_intraday(
             continue
 
         df = _parse_intraday(data, security_id, exchange_segment)
-        logger.info("  Received %d candles", len(df))
+        # Only log if we actually received data — 0 candles is normal for illiquid/suspended instruments
+        if len(df) > 0:
+            logger.info("  Received %d candles", len(df))
         if not dry_run and not df.empty:
             total += _upsert_bars(df, "1m")
         else:
@@ -287,33 +289,52 @@ async def run_backfill(args, cfg):
             # Background loop checks every 10 min and refreshes 30 min before expiry
             refresh_task = asyncio.create_task(auth_mgr.run())
 
-        # Build set of already-fully-loaded securities to skip on resume
-        already_loaded: set[str] = set()
-        if getattr(args, "resume", True):
+        # ── Checkpoint-based resume ───────────────────────────────────────────
+        # Writes the last-processed security_id to a JSON file after each security.
+        # On restart, reads the checkpoint and skips everything up to+including
+        # that ID. Exact position in the queue — no DB query needed.
+        import json as _json
+
+        CKPT_FILE = Path("/tmp") / f"backfill_ckpt_{args.exchange_segment}.json"
+
+        def _load_checkpoint() -> str | None:
             try:
-                from db import get_session
-                from sqlalchemy import text as _text
-                from datetime import date as _date, timedelta as _td
-                min_check = args.from_date + _td(days=7)
-                max_check = _date.today() - _td(days=3)
-                with get_session() as _s:
-                    rows = _s.execute(_text("""
-                        SELECT security_id FROM bars
-                        WHERE timeframe='1m'
-                        GROUP BY security_id
-                        HAVING MIN(time)::date <= :min_check
-                           AND MAX(time)::date >= :max_check
-                    """), {"min_check": min_check, "max_check": max_check}).fetchall()
-                already_loaded = {r[0] for r in rows}
-                if already_loaded:
-                    logger.info("Resume mode: skipping %d already-loaded securities, starting from frontier", len(already_loaded))
-            except Exception as exc:
-                logger.warning("Could not load resume set (%s) — processing all", exc)
+                if CKPT_FILE.exists():
+                    d = _json.loads(CKPT_FILE.read_text())
+                    if d.get("segment") == args.exchange_segment:
+                        return d.get("last_id")
+            except Exception:
+                pass
+            return None
+
+        def _save_checkpoint(sid: str):
+            CKPT_FILE.write_text(_json.dumps({
+                "segment": args.exchange_segment,
+                "last_id": sid,
+                "ts":      __import__("datetime").datetime.now().isoformat(),
+            }))
+
+        last_done = _load_checkpoint()
+        skip_until_done = last_done is not None
+        skipped = 0
+
+        if last_done:
+            logger.info("Checkpoint found — resuming after security_id=%s", last_done)
+        else:
+            logger.info("No checkpoint — starting from beginning of %s list", args.exchange_segment)
 
         try:
             for sid in args.security_ids:
-                if sid in already_loaded:
-                    continue   # skip — data already complete
+                # Skip until we pass the last checkpoint
+                if skip_until_done:
+                    if sid == last_done:
+                        skip_until_done = False   # next iteration starts processing
+                    skipped += 1
+                    continue
+
+                if skipped and skipped % 500 == 0:
+                    logger.info("Skipped %d already-done securities", skipped)
+
                 logger.info("═══ security_id=%s ═══", sid)
 
                 if args.do_intraday:
@@ -329,9 +350,15 @@ async def run_backfill(args, cfg):
                         args.daily_from, args.to_date, args.dry_run,
                     )
                     logger.info("  1d done — %d rows %s", n, "(dry)" if args.dry_run else "upserted")
+
+                # Save checkpoint after every security (including 0-candle ones)
+                if not args.dry_run:
+                    _save_checkpoint(sid)
+
         finally:
             if refresh_task:
                 refresh_task.cancel()
+            logger.info("Checkpoint saved at security_id=%s — safe to restart", _load_checkpoint() or "unknown")
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
