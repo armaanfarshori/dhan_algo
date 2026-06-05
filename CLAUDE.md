@@ -1,29 +1,91 @@
 # DhanAIBot — Hermes-Kronos Trading Platform
 **Repo:** `github.com/armaanfarshori/dhan_algo`  
-**Last updated:** 2026-06-04  
+**Last updated:** 2026-06-05  
 **Current phase:** PHASE 2 — BACKFILL RUNNING / KRONOS LIVE
 
 ---
 
-## ⚡ TL;DR — Current state
+## 💻 This is the LOCAL MAC clone
+
+You are reading this in `~/Desktop/dhan_algo` — the **Mac working copy** (editor + local
+backtesting). The **live platform runs on AWS**, not here. This Mac does NOT run live
+trading (one Dhan session per account; order placement is locked to the agent's whitelisted
+Elastic IP). Use the Mac to edit code, run local backtests, and drive AWS via SSH.
+
+**AWS access package:** `~/Desktop/dhan_aws_access/` (OUTSIDE this repo — never committed).
+Contains the SSH key, `connect.sh` helpers, `aws_inventory.md`, and `secrets.md`.
+
+```bash
+~/Desktop/dhan_aws_access/connect.sh agent       # SSH to agent EC2
+~/Desktop/dhan_aws_access/connect.sh dashboard   # tunnel -> http://localhost:8765
+~/Desktop/dhan_aws_access/connect.sh backfill-log
+~/Desktop/dhan_aws_access/connect.sh help        # full list
+```
+
+The Mac has the SSH key at `~/.ssh/dhan_trading_key` but **no AWS CLI creds** yet
+(`aws configure` not done) — run AWS CLI commands on the agent, or configure an IAM key
+(see `dhan_aws_access/secrets.md`).
+
+---
+
+## ⚡ TL;DR — Current state (2026-06-05)
 
 ```
-Backfill running on agent EC2 — ~22,646 NSE equities, completes ~June 8–9.
-Platform is live in PAPER mode with ORB + Kronos (zero-shot).
+Backfill RUNNING on agent (screen `backfill`) — NSE_EQ, resumed at index ~330/9470.
+Platform live on agent (screen `platform`) in PAPER mode, ORB + Kronos.
+Kronos LIVE SCANNER is currently DISABLED on the agent (KRONOS_SCANNER_ENABLED=false)
+  to free CPU for the backfill. Flip to true + restart platform to re-enable.
 Hermes gateway online at @farshoribot on Telegram.
-Nothing needs provisioning — AWS is fully live.
+Agent was resized t4g.micro -> t4g.small (2 GB).
 ```
 
-**Dev workflow (Mac = editor only):**
+**Dev workflow (Mac = editor + backtest; AWS = live runtime):**
 ```
-Mac (VS Code + Claude Code)  →  git push  →  GitHub  →  git pull on agent EC2
+Mac (~/Desktop/dhan_algo, edit)  →  git push  →  GitHub  →  agent: sudo git pull (in /opt/dhan-trading)
+Dashboard rebuild on agent:  cd dashboard && npm run build   (as ubuntu, PATH=~/.local/bin:~/.hermes/node/bin)
 ```
 
 **SSH access:**
 ```bash
-ssh -i ~/.ssh/dhan_trading_key ubuntu@13.206.66.237          # agent
+ssh -i ~/.ssh/dhan_trading_key ubuntu@13.206.66.237          # agent (repo at /opt/dhan-trading)
 ssh -J ubuntu@13.206.66.237 -i ~/.ssh/dhan_trading_key ubuntu@10.0.1.155  # DB
 ```
+
+---
+
+## 🗺️ Data locality — AWS vs Mac (decided 2026-06-05)
+
+**Do NOT copy the full raw DB to the Mac.** The raw `dhan_trading` DB is the permanent
+landing zone — it grows to billions of bars and lives on the private-subnet DB EC2.
+Pulling it to a laptop is slow, fragile, and pointless. Keep heavy data + model training
+on AWS; use the Mac for code + light backtests on small curated extracts.
+
+**The pipeline (each stage lives where it's cheapest):**
+```
+Raw DB (AWS, dhan_trading)      ← backfill lands here, stays here forever
+   │  M2.5 SQL transform (runs on AWS)
+   ▼
+Clean DB (AWS, dhan_clean)      ← liquid, corporate-action adjusted
+   │  export liquid universe
+   ▼
+S3 Parquet  s3://…/kronos/training-data/   ← the portable, compact artifact
+   ├──► GPU spot instance (AWS) — Kronos fine-tune → checkpoint to S3   [training stays on AWS]
+   └──► Mac (optional) — pull a SUBSET for local backtest iteration
+```
+
+**If/when you want data on the Mac**, pull the *clean Parquet*, not the raw DB:
+```bash
+# on the Mac, once AWS CLI is configured (see dhan_aws_access/secrets.md)
+aws s3 sync s3://dhan-trading-data-155304839154/kronos/training-data/ ~/dhan_data/
+# then query locally with DuckDB (zero infra) or load into the local docker-compose Timescale
+```
+Local backtest stack on Mac = `docker-compose.yml` (LOCAL DEV ONLY) for a throwaway
+Timescale, or just DuckDB over the Parquet files. Iterate cleaning/backtest rules on the
+Mac against this subset; never re-hit Dhan from the laptop.
+
+**Recommended division of labour:**
+- **AWS:** raw backfill, clean-DB transform, Kronos fine-tune (GPU spot), live paper/▶live trading.
+- **Mac:** edit code, run backtests on clean Parquet extracts, drive AWS over SSH.
 
 ---
 
@@ -31,7 +93,7 @@ ssh -J ubuntu@13.206.66.237 -i ~/.ssh/dhan_trading_key ubuntu@10.0.1.155  # DB
 
 | Resource | Value |
 |---|---|
-| Agent EC2 (t4g.micro) | `13.206.66.237` — Elastic IP, whitelisted in Dhan DevPortal |
+| Agent EC2 (t4g.small) | `13.206.66.237` — Elastic IP, whitelisted in Dhan DevPortal (resized from micro) |
 | DB EC2 (t4g.medium) | `10.0.1.155` — private subnet only |
 | TimescaleDB | Running in Docker on DB EC2 — 19 tables, 5 hypertables, migration 003 |
 | S3 bucket | `dhan-trading-data-155304839154` |
