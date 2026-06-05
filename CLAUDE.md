@@ -48,15 +48,49 @@ ssh -J ubuntu@13.206.66.237 -i ~/.ssh/dhan_trading_key ubuntu@10.0.1.155  # DB
 |---|---|---|
 | M0 — AWS infrastructure | ✅ **Done** | VPC, EC2×2, EIP, S3, SSM, IAM, Terraform committed |
 | M1 — Database schema | ✅ **Done** | 19 tables, 5 hypertables, compression + retention, migration 003 |
-| M2 — Data pipeline | ⏳ **60%** | Backfill running (~June 8–9). WebSocket→DB not yet wired. |
-| M3 — Backtester on real bars | ❌ Not started | Blocked on backfill completion |
+| M2 — Data pipeline (RAW) | ⏳ **In progress** | Backfill ALL segments into raw DB. ~4–5 days. WebSocket→DB not yet wired. |
+| **M2.5 — Clean data replica** | ❌ **New** | Build curated DB from raw — liquid only, corporate-action adjusted. For fine-tuning + backtest. |
+| M3 — Backtester on real bars | ❌ Not started | Runs against M2.5 clean DB |
 | M4 — Execution engine DB writes | ✅ **Done** | orders/fills/positions/equity_curve write to TimescaleDB |
 | M5 — Deployment + ops | ⚠️ Partial | systemd + NSE cron done, no CloudWatch/alerts |
 | M6 — Operator auth layer | ❌ Schema only | users/sessions/auth_events tables exist, no FastAPI auth |
 | M7 — Readonly validation | ❌ Not started | Needs M3 first |
 | M8 — Tiny live | ❌ Not started | Needs M7 + Elastic IP whitelisted (already done) |
 | Kronos zero-shot | ✅ **Done** | Integrated, ORB gate wired, lazy-loads on first use |
-| Kronos fine-tuned on NSE | ❌ Next after backfill | See fine-tuning plan below |
+| Kronos fine-tuned on NSE | ❌ After M2.5 | Trains on the clean replica, not raw |
+
+---
+
+## Two-tier data architecture (decided 2026-06-05)
+
+```
+┌─────────────────────────────────────┐     ┌─────────────────────────────────────┐
+│  RAW DB (current — dhan_trading)     │     │  CLEAN DB (M2.5 — dhan_clean)        │
+│  TimescaleDB on DB EC2               │     │  Replica/separate DB                 │
+│                                      │     │                                      │
+│  • EVERYTHING — all segments         │ ──► │  • Liquid instruments only           │
+│    NSE_EQ, NSE_CDS, BSE_EQ, MCX      │     │    (avg_volume > 50K)                │
+│  • All 9,470 NSE equities incl.      │     │  • Corporate-action adjusted         │
+│    illiquid SGBs, ETFs, dormant      │     │    (split/bonus gaps removed)        │
+│  • Unfiltered, as-is from Dhan       │     │  • No circuit-breaker zero-vol days  │
+│  • The permanent landing zone        │     │  • No pre-market auction rows        │
+│                                      │     │  • Min 2yr continuous history        │
+│  Used for: archival, re-derivation   │     │  Used for: Kronos fine-tuning,       │
+│                                      │     │            backtesting (M3)          │
+└─────────────────────────────────────┘     └─────────────────────────────────────┘
+```
+
+**Why two tiers:**
+- Raw layer is the source of truth — pull once, never re-fetch. ~5 days of API calls is expensive to repeat.
+- Clean layer is cheap to rebuild — it's a SQL transform over raw. Iterate on cleaning rules without re-hitting Dhan.
+- Fine-tuning on dirty data (illiquid SGBs, split gaps, circuit days) corrupts the model. Clean layer is the training set.
+
+**M2.5 deliverable:** `scripts/build_clean_db.py`
+- Reads from raw `bars` hypertable
+- Applies cleaning filters (see "Step 0" in Kronos fine-tuning plan below)
+- Writes to a separate `dhan_clean` database (same TimescaleDB instance, new DB)
+- Exports liquid universe to S3 Parquet at `s3://.../kronos/training-data/`
+- Rebuildable any time — pure transform, no API calls
 
 ---
 
@@ -307,12 +341,13 @@ dhan_algo/
 
 ## What to build next (in order)
 
-1. **`scripts/prepare_kronos_dataset.py`** — clean NSE bars, export Parquet to S3
-2. **M3: wire `core/backtest.py` to `bars` hypertable** — replace mock data with real TimescaleDB reads
-3. **Run three-way backtest** — ORB alone vs zero-shot vs (later) fine-tuned
-4. **Fine-tune Kronos-base** — spot GPU g4dn.xlarge, NSE bars, S3 checkpoint
-5. **M2 completion: wire `core/live_feed.py` → `ticks` table** — real-time bar building
-6. **M7 readonly validation** — shadow trading, log orders without placing
+1. **Finish raw backfill** — all segments (NSE_EQ, NSE_CDS, BSE_EQ, MCX) into raw `dhan_trading` DB (~4–5 days, running now)
+2. **M2.5: `scripts/build_clean_db.py`** — transform raw → clean `dhan_clean` DB (liquid, corporate-action adjusted), export Parquet to S3
+3. **M3: wire `core/backtest.py` to clean DB** — real bars, realistic costs, equity curve
+4. **Run three-way backtest** — ORB alone vs Kronos zero-shot vs (later) fine-tuned
+5. **Fine-tune Kronos-base** — spot GPU g4dn.xlarge, train on clean DB Parquet, S3 checkpoint
+6. **M2 completion: wire `core/live_feed.py` → `ticks` table** — real-time bar building
+7. **M7 readonly validation** — shadow trading, log orders without placing
 
 ---
 
