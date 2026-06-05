@@ -165,6 +165,51 @@ _SEGMENT_INSTRUMENT = {
 }
 
 
+# ── Live token rotation (multi-day runs) ───────────────────────────────────────
+# backfill never generates tokens (main.py owns that). But a multi-day run
+# outlives the ~24h token, so main.py rotates dhan_token.json mid-run. The
+# running DhanClient holds the token string captured at startup, so we must
+# re-read the shared cache and push any rotation into the live client/session.
+
+class _TokenExpired(Exception):
+    """Raised when a chunk fails auth and no fresh token is available yet."""
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    s = str(exc)
+    return "DH-901" in s or "invalid or expired" in s.lower()
+
+
+def _reload_token(client: DhanClient) -> bool:
+    """Re-read dhan_token.json; if it rotated, push it into the live client.
+
+    Returns True if a *different* valid token was loaded, False otherwise.
+    """
+    from core.token_manager import read_current_token
+    fresh = read_current_token()
+    if fresh and fresh != client.access_token:
+        client._on_token_refreshed(fresh)   # updates self.access_token + session header
+        logger.info("  Token rotation detected — reloaded fresh token into client")
+        return True
+    return False
+
+
+async def _wait_for_fresh_token(client: DhanClient, poll_s: int = 30, max_wait_s: int = 1800):
+    """Block until main.py rotates dhan_token.json to a token != the current one.
+
+    Backfill cannot mint tokens itself, so on an unrecoverable auth failure we
+    wait for main.py's MasterTokenManager to publish a fresh one, then resume
+    the SAME security (no checkpoint advance → no data loss)."""
+    waited = 0
+    while waited < max_wait_s:
+        if _reload_token(client):
+            return True
+        await asyncio.sleep(poll_s)
+        waited += poll_s
+        logger.warning("  Waiting for main.py to rotate token… (%ds)", waited)
+    return False
+
+
 async def backfill_intraday(
     client: DhanClient,
     security_id: str,
@@ -190,6 +235,13 @@ async def backfill_intraday(
                 to_date=chunk_end.strftime("%Y-%m-%d"),
             )
         except Exception as exc:
+            if _is_auth_error(exc):
+                # Token expired mid-run. If main.py already rotated it, reload
+                # and retry the SAME chunk; otherwise bubble up so the caller
+                # waits for a fresh token (and does NOT checkpoint this id).
+                if _reload_token(client):
+                    continue
+                raise _TokenExpired(str(exc))
             logger.error("  Chunk failed: %s", exc)
             cursor = chunk_end + timedelta(days=1)
             continue
@@ -230,6 +282,12 @@ async def backfill_daily(
             to_date=to_date.strftime("%Y-%m-%d"),
         )
     except Exception as exc:
+        if _is_auth_error(exc):
+            if _reload_token(client):
+                return await backfill_daily(
+                    client, security_id, exchange_segment, from_date, to_date, dry_run,
+                )
+            raise _TokenExpired(str(exc))
         logger.error("  Daily fetch failed: %s", exc)
         return 0
 
@@ -362,27 +420,44 @@ async def run_backfill(args, cfg):
                 start_idx = 0
 
         try:
-            for idx in range(start_idx, n_total):
+            idx = start_idx
+            while idx < n_total:
                 sid = id_list[idx]
                 logger.info("═══ [%d/%d] security_id=%s ═══", idx + 1, n_total, sid)
 
-                if args.do_intraday:
-                    n = await backfill_intraday(
-                        client, sid, args.exchange_segment,
-                        args.from_date, args.to_date, args.dry_run,
-                    )
-                    if n > 0:
-                        logger.info("  1m done — %d rows upserted", n)
+                # Pick up any token main.py rotated since the last security
+                # (multi-day runs outlive a single ~24h token).
+                _reload_token(client)
 
-                if args.do_daily:
-                    n = await backfill_daily(
-                        client, sid, args.exchange_segment,
-                        args.daily_from, args.to_date, args.dry_run,
-                    )
+                try:
+                    if args.do_intraday:
+                        n = await backfill_intraday(
+                            client, sid, args.exchange_segment,
+                            args.from_date, args.to_date, args.dry_run,
+                        )
+                        if n > 0:
+                            logger.info("  1m done — %d rows upserted", n)
 
-                # Checkpoint after every security (data or not)
+                    if args.do_daily:
+                        n = await backfill_daily(
+                            client, sid, args.exchange_segment,
+                            args.daily_from, args.to_date, args.dry_run,
+                        )
+                except _TokenExpired as exc:
+                    # Token died and no fresh one yet. Do NOT checkpoint — wait
+                    # for main.py to rotate, then retry the SAME security.
+                    logger.error("  Auth token expired at index %d (sid=%s): %s — "
+                                 "holding, will retry once token rotates", idx, sid, exc)
+                    if not await _wait_for_fresh_token(client):
+                        logger.error("  No fresh token after max wait — is main.py alive? "
+                                     "Staying on sid=%s without checkpointing.", sid)
+                    continue   # retry same idx; checkpoint not advanced
+
+                # Checkpoint only after a security actually completes (data or
+                # legitimately empty) — never on an auth failure.
                 if not args.dry_run:
                     _save_checkpoint(idx, sid)
+                idx += 1
 
             logger.info("Segment %s complete — %d securities processed", args.exchange_segment, n_total - start_idx)
         finally:
