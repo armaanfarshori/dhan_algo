@@ -10,9 +10,10 @@ from datetime import datetime
 LOG_FILE = "/tmp/backfill.log"
 SCREEN   = "backfill"
 
-def screen_alive():
-    r = subprocess.run(["screen", "-ls"], capture_output=True, text=True)
-    return SCREEN in r.stdout
+def python_process_alive():
+    """Check if a backfill.py Python process is actually running (more reliable than screen)."""
+    r = subprocess.run(["pgrep", "-f", "backfill.py"], capture_output=True, text=True)
+    return r.returncode == 0
 
 def last_log_age_minutes():
     try:
@@ -21,36 +22,28 @@ def last_log_age_minutes():
     except FileNotFoundError:
         return 9999
 
-alive  = screen_alive()
-age    = last_log_age_minutes()
-stale  = age > 10  # no log update in 10 min = likely stuck
+alive = python_process_alive()
+age   = last_log_age_minutes()
+# Only restart if BOTH the process is dead AND the log is very stale (>30 min)
+# This prevents cascade restarts from log overwrites or slow sections
+stale = age > 30
 
-if alive and not stale:
-    sys.exit(0)  # silent — all good
+if alive:
+    sys.exit(0)  # process running — always silent, even if log is stale
 
-# Something is wrong — alert and attempt restart
-reason = []
-if not alive:
-    reason.append("screen session died")
-if stale:
-    reason.append(f"log stale {age:.0f} min")
+if not stale:
+    sys.exit(0)  # process dead but log recent — might be normal restart, wait
 
-print(f"⚠️ BACKFILL INTERRUPTED | {', '.join(reason)}")
-print("Restarting backfill...")
+# Both dead AND stale — likely genuine failure
+print(f"⚠️ BACKFILL STOPPED | process dead, log stale {age:.0f} min | {datetime.now().strftime('%H:%M IST')}")
+print("Restarting backfill queue...")
 
-# Kill any zombie session first
-subprocess.run(["screen", "-S", SCREEN, "-X", "quit"], capture_output=True)
-
-# Restart
 cmd = (
     "cd /opt/dhan-trading && "
     "set -a && source .env && set +a && "
-    "echo \"Backfill restarted at $(date)\" > /tmp/backfill.log && "
+    "echo \"Watchdog restart $(TZ=Asia/Kolkata date)\" >> /tmp/backfill.log && "
     ".venv/bin/python3 backfill.py --nse-eq --all --from 2021-06-01 "
-    ">> /tmp/backfill.log 2>&1 && "
-    "echo \"Backfill finished at $(date)\" >> /tmp/backfill.log"
+    ">> /tmp/backfill.log 2>&1"
 )
 subprocess.Popen(["screen", "-dmS", SCREEN, "bash", "-c", cmd])
-
-print(f"✅ Backfill restarted in screen '{SCREEN}'")
-print("It will resume from where it left off (ON CONFLICT DO NOTHING).")
+print(f"✅ Backfill restarted")
