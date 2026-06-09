@@ -295,6 +295,41 @@ ON CONFLICT DO NOTHING
 """
 
 
+def _compute_vwap(rows: list[tuple]) -> list[tuple]:
+    """
+    Replace the vwap column (index 8) with a daily cumulative VWAP computed
+    from close price and volume.  Resets at the start of each trading session.
+
+    VWAP = cumsum(close × volume) / cumsum(volume)
+
+    Using close as a proxy for typical price (no tick data available).
+    """
+    # rows columns: time(0) sid(1) tf(2) open(3) high(4) low(5) close(6) vol(7) vwap(8)
+    out = []
+    cum_pv = 0.0
+    cum_v  = 0
+    cur_day = None
+
+    for row in rows:
+        row      = list(row)
+        ts       = row[0]
+        day      = ts.date() if hasattr(ts, "date") else str(ts)[:10]
+        close    = float(row[6]) if row[6] is not None else 0.0
+        volume   = int(row[7])   if row[7] is not None else 0
+
+        if day != cur_day:          # new session — reset accumulators
+            cum_pv  = 0.0
+            cum_v   = 0
+            cur_day = day
+
+        cum_pv += close * volume
+        cum_v  += volume
+        row[8]  = round(cum_pv / cum_v, 4) if cum_v > 0 else None
+        out.append(tuple(row))
+
+    return out
+
+
 def transform(universe: list[str], batch_size: int = 50):
     log.info("Stage 2: transforming %d instruments into dhan_clean…", len(universe))
     raw  = raw_conn()
@@ -332,6 +367,7 @@ def transform(universe: list[str], batch_size: int = 50):
         raw_cur2.close()
 
         if rows:
+            rows = _compute_vwap(rows)
             psycopg2.extras.execute_values(cln_cur, """
                 INSERT INTO bars
                     (time, security_id, timeframe, open, high, low, close, volume, vwap)
@@ -362,13 +398,14 @@ PARQUET_SCHEMA = pa.schema([
     pa.field("low",         pa.float32()),
     pa.field("close",       pa.float32()),
     pa.field("volume",      pa.int64()),
+    pa.field("vwap",        pa.float32()),
 ])
 
 
 def _export_one(security_id: str, ticker: str, s3_client) -> str:
     conn = clean_conn()
     df = pd.read_sql("""
-        SELECT time, security_id, open, high, low, close, volume
+        SELECT time, security_id, open, high, low, close, volume, vwap
         FROM bars
         WHERE security_id = %s AND timeframe = '1m'
         ORDER BY time
@@ -379,7 +416,7 @@ def _export_one(security_id: str, ticker: str, s3_client) -> str:
         return f"SKIP  {ticker} ({security_id}) — no rows"
 
     df["time"] = pd.to_datetime(df["time"], utc=True)
-    for col in ("open", "high", "low", "close"):
+    for col in ("open", "high", "low", "close", "vwap"):
         df[col] = df[col].astype("float32")
 
     table = pa.Table.from_pandas(df, schema=PARQUET_SCHEMA, preserve_index=False)
