@@ -169,6 +169,19 @@ async def status_handler(request: web.Request) -> web.Response:
     uptime   = int(time.time() - request.app["start_time"])
 
     current_paper = request.app.get("paper_trading", PAPER_TRADING)
+    if strategy is None:
+        return web.json_response({
+            "mode":             "PAPER" if current_paper else "LIVE",
+            "client_id":        CLIENT_ID,
+            "uptime_seconds":   uptime,
+            "strategy_name":    "none",
+            "strategy_running": False,
+            "orders_placed":    0,
+            "position":         0,
+            "entry_price":      0.0,
+            "warmup":           {"ready": False},
+            "note":             "No strategies running — screener returned 0 securities",
+        })
     payload = {
         "mode":             "PAPER" if current_paper else "LIVE",
         "client_id":        CLIENT_ID,
@@ -991,7 +1004,12 @@ async def main():
         if watchlist_ids:
             logger.info("Screener watchlist (%d): %s", len(watchlist_ids), watchlist_ids)
         else:
-            logger.warning("Screener returned 0 securities — bars table may be empty. No ORB strategies will run until data is loaded.")
+            # Screener timed out (backfill contention) or bars table empty — fall back to cached watchlist
+            watchlist_ids = [s.security_id for s in watchlist.get()[:n_watch]]
+            if watchlist_ids:
+                logger.warning("Screener returned 0 — using cached watchlist fallback (%d): %s", len(watchlist_ids), watchlist_ids)
+            else:
+                logger.warning("Screener and watchlist cache both empty — no ORB strategies will run")
         orb_cfg = ORBConfig(
             orb_minutes=_cfg.orb_range_minutes,
             use_kronos=True,
@@ -1173,7 +1191,8 @@ async def main():
 
         def _shutdown(sig, frame):
             logger.info(f"Signal {sig.name} received — shutting down…")
-            strategy.stop()
+            if strategy:
+                strategy.stop()
             fno_scanner.stop()
             equity_scanner.stop()
             stop_event.set()

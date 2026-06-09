@@ -91,14 +91,19 @@ def get_top_volatile(
         LIMIT :n
     """)
 
-    with get_session() as session:
-        rows = session.execute(sql, {
-            "lookback":  lookback_days * 2,  # calendar days (2× to cover weekends)
-            "seg":       segment,
-            "min_days":  _MIN_TRADING_DAYS,
-            "min_vol":   min_avg_volume,
-            "n":         n,
-        }).fetchall()
+    try:
+        with get_session() as session:
+            session.execute(text("SET LOCAL statement_timeout = '20000'"))
+            rows = session.execute(sql, {
+                "lookback":  lookback_days * 2,  # calendar days (2× to cover weekends)
+                "seg":       segment,
+                "min_days":  _MIN_TRADING_DAYS,
+                "min_vol":   min_avg_volume,
+                "n":         n,
+            }).fetchall()
+    except Exception as exc:
+        logger.warning("Screener query timed out or failed (%s) — returning empty", exc)
+        return []
 
     result = []
     for r in rows:
