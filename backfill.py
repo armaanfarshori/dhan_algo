@@ -131,14 +131,19 @@ def _upsert_bars(df: pd.DataFrame, timeframe: str) -> int:
     # Batch upserts to avoid exhausting max_locks_per_transaction.
     # TimescaleDB acquires a lock per chunk touched; 263 chunks × 5 yrs of daily
     # bars in one shot exceeds the lock limit. 500 rows ≈ ~14 months ≈ ~14 chunks.
-    _BATCH    = 500
-    _RETRIES  = 4
+    # Retry waits: 5, 15, 30, 60s — enough for Postgres WAL recovery after a crash
+    _BATCH      = 500
+    _RETRY_WAIT = [5, 15, 30, 60]
     legacy_rows = df.to_dict(orient="records") if timeframe == "1m" else None
     for i in range(0, len(rows), _BATCH):
         batch        = rows[i : i + _BATCH]
         legacy_batch = legacy_rows[i : i + _BATCH] if legacy_rows is not None else None
-        for attempt in range(_RETRIES):
+        for attempt, wait in enumerate([0] + _RETRY_WAIT):
             try:
+                if wait:
+                    logger.warning("  DB batch failed — waiting %ds for DB recovery (attempt %d/%d)",
+                                   wait, attempt, len(_RETRY_WAIT) + 1)
+                    _time.sleep(wait)
                 with get_session() as session:
                     session.execute(bars_sql, batch)
                     if legacy_batch is not None:
@@ -156,11 +161,8 @@ def _upsert_bars(df: pd.DataFrame, timeframe: str) -> int:
                         """), legacy_batch)
                 break  # success
             except Exception as exc:
-                if attempt < _RETRIES - 1:
-                    wait = 2 ** attempt  # 1, 2, 4 seconds
-                    logger.warning("  DB batch failed (attempt %d/%d): %s — retrying in %ds",
-                                   attempt + 1, _RETRIES, exc, wait)
-                    _time.sleep(wait)
+                if attempt < len(_RETRY_WAIT):
+                    logger.warning("  Batch error: %s", exc)
                 else:
                     raise
 
