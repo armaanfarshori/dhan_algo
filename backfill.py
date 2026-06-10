@@ -127,24 +127,29 @@ def _upsert_bars(df: pd.DataFrame, timeframe: str) -> int:
             volume = EXCLUDED.volume
     """)
 
-    with get_session() as session:
-        session.execute(bars_sql, rows)
+    # Batch upserts to avoid exhausting max_locks_per_transaction.
+    # TimescaleDB acquires a lock per chunk touched; 263 chunks × 5 yrs of daily
+    # bars in one shot exceeds the 128-lock limit. 200 rows ≈ 6-7 months ≈ 6-7 chunks.
+    _BATCH = 200
+    for i in range(0, len(rows), _BATCH):
+        batch = rows[i : i + _BATCH]
+        with get_session() as session:
+            session.execute(bars_sql, batch)
 
-        # also mirror into ohlcv_1min for 1-minute bars (legacy)
-        if timeframe == "1m":
-            legacy_rows = df.to_dict(orient="records")
-            session.execute(text("""
-                INSERT INTO ohlcv_1min
-                    (security_id, exchange_segment, ts, open, high, low, close, volume)
-                VALUES
-                    (:security_id, :exchange_segment, :ts, :open, :high, :low, :close, :volume)
-                ON CONFLICT (security_id, ts) DO UPDATE SET
-                    open   = EXCLUDED.open,
-                    high   = EXCLUDED.high,
-                    low    = EXCLUDED.low,
-                    close  = EXCLUDED.close,
-                    volume = EXCLUDED.volume
-            """), legacy_rows)
+            if timeframe == "1m":
+                legacy_batch = df.to_dict(orient="records")[i : i + _BATCH]
+                session.execute(text("""
+                    INSERT INTO ohlcv_1min
+                        (security_id, exchange_segment, ts, open, high, low, close, volume)
+                    VALUES
+                        (:security_id, :exchange_segment, :ts, :open, :high, :low, :close, :volume)
+                    ON CONFLICT (security_id, ts) DO UPDATE SET
+                        open   = EXCLUDED.open,
+                        high   = EXCLUDED.high,
+                        low    = EXCLUDED.low,
+                        close  = EXCLUDED.close,
+                        volume = EXCLUDED.volume
+                """), legacy_batch)
 
     return len(rows)
 
