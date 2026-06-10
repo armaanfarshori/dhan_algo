@@ -40,6 +40,7 @@ print("Restarting backfill queue...")
 
 cmd = (
     "cd /opt/dhan-trading && "
+    "sudo git pull -q && "   # always run with latest fixes before restart
     "set -a && source .env && set +a && "
     "echo \"Watchdog restart $(TZ=Asia/Kolkata date)\" >> /tmp/backfill.log && "
     ".venv/bin/python3 backfill.py --nse-eq --all --from 2021-06-01 "
