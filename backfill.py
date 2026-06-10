@@ -129,15 +129,15 @@ def _upsert_bars(df: pd.DataFrame, timeframe: str) -> int:
 
     # Batch upserts to avoid exhausting max_locks_per_transaction.
     # TimescaleDB acquires a lock per chunk touched; 263 chunks × 5 yrs of daily
-    # bars in one shot exceeds the 128-lock limit. 200 rows ≈ 6-7 months ≈ 6-7 chunks.
+    # bars in one shot exceeds the lock limit. 200 rows ≈ 6-7 months ≈ 6-7 chunks.
     _BATCH = 200
+    legacy_rows = df.to_dict(orient="records") if timeframe == "1m" else None
     for i in range(0, len(rows), _BATCH):
         batch = rows[i : i + _BATCH]
         with get_session() as session:
             session.execute(bars_sql, batch)
 
-            if timeframe == "1m":
-                legacy_batch = df.to_dict(orient="records")[i : i + _BATCH]
+            if legacy_rows is not None:
                 session.execute(text("""
                     INSERT INTO ohlcv_1min
                         (security_id, exchange_segment, ts, open, high, low, close, volume)
@@ -149,7 +149,7 @@ def _upsert_bars(df: pd.DataFrame, timeframe: str) -> int:
                         low    = EXCLUDED.low,
                         close  = EXCLUDED.close,
                         volume = EXCLUDED.volume
-                """), legacy_batch)
+                """), legacy_rows[i : i + _BATCH])
 
     return len(rows)
 
