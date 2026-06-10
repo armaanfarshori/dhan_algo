@@ -23,6 +23,7 @@ import argparse
 import asyncio
 import logging
 import re
+import time as _time
 from datetime import date, timedelta, datetime
 from pathlib import Path
 from typing import Any
@@ -129,27 +130,39 @@ def _upsert_bars(df: pd.DataFrame, timeframe: str) -> int:
 
     # Batch upserts to avoid exhausting max_locks_per_transaction.
     # TimescaleDB acquires a lock per chunk touched; 263 chunks × 5 yrs of daily
-    # bars in one shot exceeds the lock limit. 200 rows ≈ 6-7 months ≈ 6-7 chunks.
-    _BATCH = 200
+    # bars in one shot exceeds the lock limit. 500 rows ≈ ~14 months ≈ ~14 chunks.
+    _BATCH    = 500
+    _RETRIES  = 4
     legacy_rows = df.to_dict(orient="records") if timeframe == "1m" else None
     for i in range(0, len(rows), _BATCH):
-        batch = rows[i : i + _BATCH]
-        with get_session() as session:
-            session.execute(bars_sql, batch)
-
-            if legacy_rows is not None:
-                session.execute(text("""
-                    INSERT INTO ohlcv_1min
-                        (security_id, exchange_segment, ts, open, high, low, close, volume)
-                    VALUES
-                        (:security_id, :exchange_segment, :ts, :open, :high, :low, :close, :volume)
-                    ON CONFLICT (security_id, ts) DO UPDATE SET
-                        open   = EXCLUDED.open,
-                        high   = EXCLUDED.high,
-                        low    = EXCLUDED.low,
-                        close  = EXCLUDED.close,
-                        volume = EXCLUDED.volume
-                """), legacy_rows[i : i + _BATCH])
+        batch        = rows[i : i + _BATCH]
+        legacy_batch = legacy_rows[i : i + _BATCH] if legacy_rows is not None else None
+        for attempt in range(_RETRIES):
+            try:
+                with get_session() as session:
+                    session.execute(bars_sql, batch)
+                    if legacy_batch is not None:
+                        session.execute(text("""
+                            INSERT INTO ohlcv_1min
+                                (security_id, exchange_segment, ts, open, high, low, close, volume)
+                            VALUES
+                                (:security_id, :exchange_segment, :ts, :open, :high, :low, :close, :volume)
+                            ON CONFLICT (security_id, ts) DO UPDATE SET
+                                open   = EXCLUDED.open,
+                                high   = EXCLUDED.high,
+                                low    = EXCLUDED.low,
+                                close  = EXCLUDED.close,
+                                volume = EXCLUDED.volume
+                        """), legacy_batch)
+                break  # success
+            except Exception as exc:
+                if attempt < _RETRIES - 1:
+                    wait = 2 ** attempt  # 1, 2, 4 seconds
+                    logger.warning("  DB batch failed (attempt %d/%d): %s — retrying in %ds",
+                                   attempt + 1, _RETRIES, exc, wait)
+                    _time.sleep(wait)
+                else:
+                    raise
 
     return len(rows)
 
