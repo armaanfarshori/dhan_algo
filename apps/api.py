@@ -357,6 +357,8 @@ async def signals_handler(_r: web.Request) -> web.Response:
                        COALESCE(NULLIF(i.ticker, ''), t.security_id) AS ticker
                 FROM trades t
                 LEFT JOIN instruments i ON i.security_id = t.security_id
+                WHERE t.entry_ts::date = CURRENT_DATE
+                   OR t.exit_ts::date  = CURRENT_DATE
                 ORDER BY t.entry_ts DESC LIMIT 100
             """)).fetchall()
     try:

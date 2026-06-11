@@ -456,276 +456,81 @@ function ActionWatchlist({ positions, paperPositions, tradelog, kronosSignals })
 // ─────────────────────────────────────────────────────────────────
 // Right panel — PnL summary + live signals feed
 // ─────────────────────────────────────────────────────────────────
-function RightPanel({ risk, signals, limits }) {
+function TodayPnlCard({ risk, limits }) {
   const rpnl  = risk?.data?.realised_pnl   ?? 0
   const upnl  = risk?.data?.unrealised_pnl ?? 0
   const total = risk?.data?.total_pnl      ?? 0
   const limit = limits?.max_daily_loss ?? 5000
   const losspct = Math.min(Math.abs(Math.min(total, 0)) / limit * 100, 100)
-  const raw   = signals?.data
-  const feed  = (Array.isArray(raw) ? raw : []).slice(0, 15)
-  const ACTION_COLOR = { BUY: T.green, SELL: T.red, EXIT: T.amber, HOLD: T.ink3 }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {/* PnL block */}
-      <div style={{ background: T.bg1, border: `1px solid ${T.line}`, padding: 16 }}>
-        <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em', textTransform: 'uppercase', marginBottom: 12 }}>
-          Today P&L
-        </div>
-        <div style={{ display: 'flex', gap: 20, alignItems: 'flex-end', marginBottom: 14 }}>
-          <div>
-            <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, marginBottom: 3 }}>TOTAL</div>
-            <div style={{ fontFamily: T.dot, fontSize: 36, color: colorPnl(total), lineHeight: 1 }}>
-              {total >= 0 ? '+' : ''}₹{Math.round(total).toLocaleString('en-IN')}
+    <div style={{ background: T.bg1, border: `1px solid ${T.line}`, padding: 16 }}>
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em', textTransform: 'uppercase', marginBottom: 12 }}>
+        Today P&L
+      </div>
+      <div style={{ fontFamily: T.dot, fontSize: 36, color: colorPnl(total), lineHeight: 1, marginBottom: 12 }}>
+        {total >= 0 ? '+' : ''}₹{Math.round(total).toLocaleString('en-IN')}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 14 }}>
+        {[['REALISED', rpnl], ['UNREALISED', upnl]].map(([l, v]) => (
+          <div key={l} style={{ background: T.bg2, border: `1px solid ${T.line}`, padding: '8px 10px' }}>
+            <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.14em', marginBottom: 3 }}>{l}</div>
+            <div style={{ fontFamily: T.dot, fontSize: 20, color: colorPnl(v) }}>
+              {v >= 0 ? '+' : ''}₹{Math.abs(Math.round(v)).toLocaleString('en-IN')}
             </div>
           </div>
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 14 }}>
-          {[['REALISED', rpnl], ['UNREALISED', upnl]].map(([l, v]) => (
-            <div key={l} style={{ background: T.bg2, border: `1px solid ${T.line}`, padding: '8px 10px' }}>
-              <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.14em', marginBottom: 3 }}>{l}</div>
-              <div style={{ fontFamily: T.dot, fontSize: 20, color: colorPnl(v) }}>
-                {v >= 0 ? '+' : ''}₹{Math.abs(Math.round(v)).toLocaleString('en-IN')}
-              </div>
-            </div>
-          ))}
-        </div>
-        {/* Loss meter */}
-        <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, marginBottom: 4 }}>
-          DAILY LOSS LIMIT · ₹{limit.toLocaleString('en-IN')}
-        </div>
-        <div style={{ height: 4, background: T.bg3, overflow: 'hidden' }}>
-          <div style={{ height: '100%', width: `${losspct}%`,
-            background: `linear-gradient(90deg, ${T.green}, ${T.amber} 60%, ${T.red})`,
-            transition: 'width 0.5s' }} />
-        </div>
-        <div style={{ fontFamily: T.mono, fontSize: 9, color: losspct > 75 ? T.red : T.ink3, marginTop: 4 }}>
-          {losspct.toFixed(1)}% consumed
-        </div>
+        ))}
       </div>
-
-      {/* Live signal feed */}
-      <div style={{ background: T.bg1, border: `1px solid ${T.line}`, flex: 1 }}>
-        <div style={{ padding: '10px 16px', borderBottom: `1px solid ${T.line}`,
-          display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div style={{ width: 6, height: 6, borderRadius: '50%', background: T.amber,
-            boxShadow: `0 0 6px ${T.amber}` }} />
-          <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em', textTransform: 'uppercase' }}>
-            Live Signal Feed
-          </span>
-        </div>
-        <div style={{ maxHeight: 300, overflowY: 'auto' }}>
-          {feed.length === 0
-            ? <div style={{ padding: 16, fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>Waiting for signals…</div>
-            : feed.map((s, i) => (
-              <div key={i} style={{
-                display: 'grid', gridTemplateColumns: '50px 40px 70px 1fr',
-                gap: 8, padding: '5px 16px',
-                background: i % 2 === 0 ? T.bg1 : T.bg2,
-                borderLeft: `2px solid ${ACTION_COLOR[s.action] ?? T.line}`,
-              }}>
-                <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>{fmtTime(s.timestamp)}</span>
-                <span style={{ fontFamily: T.mono, fontSize: 9, fontWeight: 700, color: ACTION_COLOR[s.action] ?? T.ink1 }}>{s.action}</span>
-                {s.price && <span style={{ fontFamily: T.dot, fontSize: 15, color: T.ink0 }}>₹{s.price}</span>}
-                <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.reason}</span>
-              </div>
-            ))
-          }
-        </div>
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, marginBottom: 4 }}>
+        DAILY LOSS LIMIT · ₹{Number(limit).toLocaleString('en-IN')}
+      </div>
+      <div style={{ height: 4, background: T.bg3, overflow: 'hidden' }}>
+        <div style={{ height: '100%', width: `${losspct}%`,
+          background: `linear-gradient(90deg, ${T.green}, ${T.amber} 60%, ${T.red})`,
+          transition: 'width 0.5s' }} />
+      </div>
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: losspct > 75 ? T.red : T.ink3, marginTop: 4 }}>
+        {losspct.toFixed(1)}% consumed
       </div>
     </div>
   )
 }
 
-// ─────────────────────────────────────────────────────────────────
-// ORB cockpit — one card per runner, straight from the trader heartbeat.
-// The range ladder answers the question the strategy itself asks:
-// where is price relative to the opening range?
-// ─────────────────────────────────────────────────────────────────
-const VERDICT_TONE = { ALLOW: T.green, BLOCK: T.red }
-
-function RangeLadder({ s }) {
-  const lo = s.or_low, hi = s.or_high, px = s.last_price
-  if (!lo || !hi || hi <= lo) {
-    return (
-      <div style={{ height: 34, display: 'flex', alignItems: 'center' }}>
-        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>
-          {s.or_locked ? 'zero-width range — no trade' : 'building opening range…'}
-        </span>
-      </div>
-    )
-  }
-  const range = hi - lo
-  const pad   = Math.max(range * 0.6, hi * 0.002)
-  const wLo   = lo - pad, span = (hi + pad) - wLo
-  const pct   = v => Math.min(98.5, Math.max(1.5, ((v - wLo) / span) * 100))
-  const inPos = s.position !== 0
-
-  return (
-    <div style={{ padding: '6px 0 2px' }}>
-      <div style={{ position: 'relative', height: 18, background: T.bg3 }}>
-        <div style={{ position: 'absolute', top: 0, bottom: 0,
-          left: `${pct(lo)}%`, width: `${pct(hi) - pct(lo)}%`,
-          background: T.bg2, borderLeft: `2px solid ${T.redD}`, borderRight: `2px solid ${T.greenD}` }} />
-        {inPos && s.entry_price > 0 && (
-          <div style={{ position: 'absolute', top: 2, bottom: 2, left: `${pct(s.entry_price)}%`,
-            width: 1, background: T.ink1 }} />
-        )}
-        {px > 0 && (
-          <div style={{ position: 'absolute', top: -2, bottom: -2, left: `calc(${pct(px)}% - 1px)`,
-            width: 3, background: px > hi ? T.green : px < lo ? T.red : T.cyan,
-            boxShadow: `0 0 8px ${px > hi ? T.green : px < lo ? T.red : T.cyan}` }} />
-        )}
-      </div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
-        <span style={{ fontFamily: T.dot, fontSize: 14, color: T.red }}>{lo.toFixed(2)}</span>
-        <span style={{ fontFamily: T.dot, fontSize: 16, color: T.ink0 }}>
-          {px > 0 ? px.toFixed(2) : '—'}
-        </span>
-        <span style={{ fontFamily: T.dot, fontSize: 14, color: T.green }}>{hi.toFixed(2)}</span>
-      </div>
-    </div>
-  )
-}
-
-function ORBCard({ s, gateDec, maxEntries }) {
-  const inPos = s.position !== 0
-  const side  = s.position > 0 ? 'LONG' : 'SHORT'
-  const state = !s.or_locked ? 'BUILDING' : inPos ? side : 'WATCHING'
-  const stateColor = !s.or_locked ? T.amber : inPos ? (s.position > 0 ? T.green : T.red) : T.ink2
-
-  return (
-    <div style={{ background: T.bg1, border: `1px solid ${T.line}`,
-      borderTop: `2px solid ${stateColor}`, padding: '12px 14px' }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 4 }}>
-        <span style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 700, color: T.ink0 }}>
-          {s.ticker ?? s.security_id}
-        </span>
-        <span style={{ fontFamily: T.mono, fontSize: 9, letterSpacing: '0.15em', color: stateColor }}>
-          {state}{inPos ? ` ${Math.abs(s.position)} @ ₹${(s.entry_price ?? 0).toFixed(2)}` : ''}
-        </span>
-        <span style={{ marginLeft: 'auto', fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>
-          entries {s.entries_today ?? 0}/{maxEntries}
-        </span>
-      </div>
-
-      <RangeLadder s={s} />
-
-      <div style={{ marginTop: 8, minHeight: 16 }}>
-        {gateDec ? (
-          <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink2 }}>
-            <span style={{ color: T.amber }}>{gateDec.shadow ? '[SHADOW] ' : ''}</span>
-            kronos {gateDec.model_side} {Math.round(gateDec.confidence * 100)}%
-            {' → '}
-            <span style={{ color: VERDICT_TONE[gateDec.verdict] ?? T.ink2 }}>
-              {gateDec.shadow ? `would ${gateDec.verdict}` : gateDec.verdict}
-            </span>
-            {gateDec.data_age_min != null && (
-              <span style={{ color: gateDec.stale ? T.red : T.ink3 }}> · data {gateDec.data_age_min}m</span>
-            )}
-          </span>
-        ) : (
-          <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>no gate decision yet</span>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function ORBCockpit({ data }) {
-  const strategies = data.trader?.strategies ?? []
-  const maxEntries = data.limits?.max_orders_per_session ?? 4
-  const gateBySid  = {}
-  ;(data.gate?.data?.decisions ?? []).forEach(d => {
-    if (!gateBySid[d.security_id]) gateBySid[d.security_id] = d   // newest first
-  })
-
-  return (
-    <section style={{ marginBottom: 16 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-        <span style={{ fontFamily: T.mono, fontSize: 11, letterSpacing: '0.22em', color: T.ink0 }}>
-          ORB COCKPIT
-        </span>
-        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>
-          {strategies.length} runners · opening range vs price
-        </span>
-      </div>
-      {strategies.length === 0 ? (
-        <div style={{ padding: 20, border: `1px solid ${T.line}`, fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>
-          {data.alive ? 'No runners — screener returned 0 securities' : 'Engine offline — no live strategy state'}
-        </div>
-      ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(290px, 1fr))', gap: 12 }}>
-          {strategies.map(s => (
-            <ORBCard key={s.security_id} s={s} gateDec={gateBySid[s.security_id]} maxEntries={maxEntries} />
-          ))}
-        </div>
-      )}
-    </section>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────────
-// Kronos gate panel — today's verdicts + the calibration countdown.
-// Shadow mode is an experiment; this makes its progress visible.
-// ─────────────────────────────────────────────────────────────────
-function GatePanel({ gate }) {
-  const decisions = gate?.data?.decisions ?? []
-  const cal       = gate?.data?.calibration
+function ExecutionsFeed({ signals }) {
+  const raw  = signals?.data
+  const feed = (Array.isArray(raw) ? raw : []).slice(0, 20)
+  const ACTION_COLOR = { BUY: T.green, SELL: T.red, EXIT: T.amber, HOLD: T.ink3 }
 
   return (
     <div style={{ background: T.bg1, border: `1px solid ${T.line}` }}>
       <div style={{ padding: '10px 16px', borderBottom: `1px solid ${T.line}`,
-        display: 'flex', alignItems: 'center', gap: 10 }}>
-        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.amber, letterSpacing: '0.18em', textTransform: 'uppercase' }}>
-          KRONOS GATE
-        </span>
-        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>
-          {decisions.length} decisions today
+        display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ width: 6, height: 6, borderRadius: '50%', background: T.amber,
+          boxShadow: `0 0 6px ${T.amber}` }} />
+        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em', textTransform: 'uppercase' }}>
+          Executions — today
         </span>
       </div>
-
-      {cal && (
-        <div style={{ padding: '10px 16px', borderBottom: `1px solid ${T.line}`,
-          fontFamily: T.mono, fontSize: 9, color: T.ink2, lineHeight: 1.7 }}>
-          <span style={{ color: T.ink3, letterSpacing: '0.12em' }}>CALIBRATION · </span>
-          {cal.recommendation}
-          {cal.fresh_n != null && (
-            <span style={{ color: T.ink3 }}> ({cal.fresh_n} fresh outcomes{cal.fresh_accuracy != null ? `, acc ${cal.fresh_accuracy}` : ''})</span>
-          )}
-        </div>
-      )}
-
-      {decisions.length === 0 ? (
-        <div style={{ padding: 16, fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>
-          No gate decisions today — they fire on ORB breakouts
-        </div>
-      ) : (
-        <div style={{ maxHeight: 220, overflowY: 'auto' }}>
-          {decisions.map((d, i) => (
-            <div key={i} style={{
-              display: 'grid', gridTemplateColumns: '52px 70px 44px 1fr 60px', gap: 8,
-              padding: '6px 16px', alignItems: 'center',
-              background: i % 2 === 0 ? T.bg1 : T.bg2,
-              borderLeft: `2px solid ${VERDICT_TONE[d.verdict] ?? T.line}`,
-            }}>
-              <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>{fmtTime(d.ts)}</span>
-              <span style={{ fontFamily: T.mono, fontSize: 10, fontWeight: 700, color: T.ink0 }}>{d.ticker}</span>
-              <span style={{ fontFamily: T.mono, fontSize: 9,
-                color: d.requested_direction === 'BUY' ? T.green : T.red }}>{d.requested_direction}</span>
-              <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink2 }}>
-                model {d.model_side} {Math.round(d.confidence * 100)}%
-                {d.data_age_min != null && <span style={{ color: d.stale ? T.red : T.ink3 }}> · {d.data_age_min}m</span>}
-              </span>
-              <span style={{ fontFamily: T.mono, fontSize: 9, textAlign: 'right',
-                color: VERDICT_TONE[d.verdict] ?? T.ink3 }}>
-                {d.shadow ? `~${d.verdict}` : d.verdict}
-              </span>
+      <div style={{ maxHeight: 260, overflowY: 'auto' }}>
+        {feed.length === 0
+          ? <div style={{ padding: 16, fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>
+              No executions today — entries appear here when ORB fires
             </div>
-          ))}
-        </div>
-      )}
+          : feed.map((s, i) => (
+            <div key={i} style={{
+              display: 'grid', gridTemplateColumns: '50px 40px 70px 1fr',
+              gap: 8, padding: '5px 16px',
+              background: i % 2 === 0 ? T.bg1 : T.bg2,
+              borderLeft: `2px solid ${ACTION_COLOR[s.action] ?? T.line}`,
+            }}>
+              <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>{fmtTime(s.timestamp)}</span>
+              <span style={{ fontFamily: T.mono, fontSize: 9, fontWeight: 700, color: ACTION_COLOR[s.action] ?? T.ink1 }}>{s.action}</span>
+              {s.price ? <span style={{ fontFamily: T.dot, fontSize: 15, color: T.ink0 }}>₹{s.price}</span> : <span />}
+              <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.source} · {s.reason}</span>
+            </div>
+          ))
+        }
+      </div>
     </div>
   )
 }
@@ -736,12 +541,17 @@ function SignalsTab({ data }) {
       <SessionBar status={data.status} />
       <ORBCockpit data={data} />
 
+      {/* Left: what happened today (gate verdicts + executions — same clock).
+          Right: P&L + screener context. */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16, marginBottom: 16 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <GatePanel gate={data.gate} />
+          <ExecutionsFeed signals={data.signals} />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <TodayPnlCard risk={data.risk} limits={data.limits} />
           <ScreenedToday kronosLive={data.kronosLive} />
         </div>
-        <RightPanel risk={data.risk} signals={data.signals} limits={data.limits} />
       </div>
 
       <ActionWatchlist
