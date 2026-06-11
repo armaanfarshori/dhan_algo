@@ -70,6 +70,10 @@ class Config(BaseSettings):
     # ── Web / dashboard ─────────────────────────────────────────────────────
     webhook_port: int = 8765
 
+    # ── Telegram alerts (plain bot API — free, no LLM) ──────────────────────
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
     # ── TimescaleDB ─────────────────────────────────────────────────────────
     db_host: str = "localhost"
     db_port: int = 5432

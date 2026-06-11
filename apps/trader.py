@@ -186,6 +186,9 @@ async def main():
         @risk.on_halt
         async def on_halt(reason: str):
             logger.critical("⛔ HALT: %s — flattening open positions", reason)
+            from core.notify import send_async
+            await send_async(f"⛔ TRADING HALTED ({portfolio.mode})\n{reason}\n"
+                             f"Open positions are being flattened.")
             for r in runners:
                 pos = portfolio.get(r.sid)
                 if pos.qty != 0 and r.last_price > 0:

@@ -108,11 +108,14 @@ class RiskEngine:
             await asyncio.sleep(self.params.check_interval_seconds)
 
     async def _evaluate(self):
-        # Out-of-process kill switch (written by the api process)
+        # Out-of-process kill switch (written by the api process). Goes
+        # through _halt() so on_halt callbacks (flatten + alert) fire.
         ks_file = self.params.killswitch_file
         if ks_file and ks_file.exists() and not self.state.kill_switch:
             reason = ks_file.read_text().strip() or "kill switch file"
-            self.activate_kill_switch(f"external: {reason}")
+            self.state.kill_switch = True
+            logger.critical("⛔ KILL SWITCH (external): %s", reason)
+            await self._halt(f"Kill switch: {reason}")
 
         realized = self._portfolio.realized_pnl
         unrealized = self._portfolio.unrealized_pnl(self._ltp)
