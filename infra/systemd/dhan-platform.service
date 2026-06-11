@@ -16,10 +16,13 @@ RestartSec=10
 # logs run stop). Never SIGKILL a trading process before the grace expires.
 KillSignal=SIGTERM
 TimeoutStopSec=30
-# Keep writing to the path operators and Hermes skills already tail.
-# Logs also reachable via: journalctl -u dhan-platform
-StandardOutput=append:/tmp/platform.log
-StandardError=append:/tmp/platform.log
+# /tmp is sticky + fs.protected_regular blocks systemd's root-side open there,
+# so the real file lives in /var/log/dhan (LogsDirectory creates it owned by
+# ubuntu). /tmp/platform.log is a symlink to it — operators and Hermes skills
+# keep tailing the path they know. Also: journalctl -u dhan-platform
+LogsDirectory=dhan
+StandardOutput=append:/var/log/dhan/platform.log
+StandardError=append:/var/log/dhan/platform.log
 
 [Install]
 WantedBy=multi-user.target
