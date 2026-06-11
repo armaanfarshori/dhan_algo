@@ -755,9 +755,10 @@ async def system_health_handler(_r: web.Request) -> web.Response:
 
 async def dashboard_handler(_r: web.Request) -> web.Response:
     react_index = DIST_DIR / "index.html"
-    if react_index.exists():
-        return web.FileResponse(react_index)
-    return web.FileResponse(STATIC_DIR / "index.html")
+    path = react_index if react_index.exists() else STATIC_DIR / "index.html"
+    # index.html must always revalidate — the JS bundles it points at are
+    # content-hashed, so a cached index can pin users to a stale build
+    return web.FileResponse(path, headers={"Cache-Control": "no-cache"})
 
 
 async def postback_handler(request: web.Request) -> web.Response:
