@@ -98,8 +98,8 @@ class RiskEngine:
     # ── Monitoring loop ───────────────────────────────────────────────────────
 
     async def run(self):
-        logger.info("RiskEngine: monitoring portfolio (daily-loss limit ₹%,.0f)",
-                    self.params.max_daily_loss)
+        logger.info("RiskEngine: monitoring portfolio (daily-loss limit ₹%s)",
+                    f"{self.params.max_daily_loss:,.0f}")
         while True:
             try:
                 await self._evaluate()
