@@ -19,36 +19,24 @@ from sqlalchemy import text
 
 logger = logging.getLogger("dhan.backtest.universe")
 
+# Ranks from DAILY bars, not 1-minute — the backfill writes both, and the
+# 1m aggregation over every security × 60 days blew the statement timeout
+# whenever the backfill was writing to the same hypertable. Identical
+# semantics: day high/low/close/volume are exactly what the 1m rollup gave.
 _SQL = text("""
-    WITH daily_agg AS (
-        SELECT
-            b.security_id,
-            b.time::date                                      AS dt,
-            MAX(b.high)                                       AS day_high,
-            MIN(b.low)                                        AS day_low,
-            (ARRAY_AGG(b.close ORDER BY b.time DESC))[1]      AS last_close,
-            SUM(b.volume)                                     AS day_volume
-        FROM bars b
-        JOIN instruments i ON i.security_id = b.security_id
-        WHERE b.timeframe = '1m'
-          AND b.time >= :window_start
-          AND b.time <  :as_of               -- POINT-IN-TIME: nothing from the future
-          AND i.exchange_segment = :seg
-          AND i.instrument_type  = 'EQUITY'
-        GROUP BY b.security_id, b.time::date
-    ),
-    ranked AS (
-        SELECT security_id,
-               COUNT(*)                                          AS trading_days,
-               AVG((day_high - day_low) / NULLIF(last_close, 0)) AS atr_pct,
-               AVG(day_volume)                                   AS avg_volume
-        FROM daily_agg
-        GROUP BY security_id
-        HAVING COUNT(*) >= :min_days
-    )
-    SELECT security_id, atr_pct, avg_volume
-    FROM ranked
-    WHERE avg_volume >= :min_vol
+    SELECT b.security_id,
+           AVG((b.high - b.low) / NULLIF(b.close, 0)) AS atr_pct,
+           AVG(b.volume)                              AS avg_volume
+    FROM bars b
+    JOIN instruments i ON i.security_id = b.security_id
+    WHERE b.timeframe = '1d'
+      AND b.time >= :window_start
+      AND b.time <  :as_of               -- POINT-IN-TIME: nothing from the future
+      AND i.exchange_segment = :seg
+      AND i.instrument_type  = 'EQUITY'
+    GROUP BY b.security_id
+    HAVING COUNT(*) >= :min_days
+       AND AVG(b.volume) >= :min_vol
     ORDER BY atr_pct DESC
     LIMIT :n
 """)
