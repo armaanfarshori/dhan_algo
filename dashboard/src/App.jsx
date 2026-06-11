@@ -1,6 +1,6 @@
 import { useState, useEffect, Component } from 'react'
 import { useDashboardData } from './hooks/useDashboardData'
-import { T, INR, INR0, colorPnl, fmtTime } from './tokens'
+import { T, INR, INR0, colorPnl, fmtTime, fmtUptime } from './tokens'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
 import FloatingKillSwitch from './components/cockpit/FloatingKillSwitch'
 
