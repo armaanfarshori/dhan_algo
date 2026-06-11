@@ -1,73 +1,38 @@
 #!/usr/bin/env python3
 """
-Kronos signal calibration — autonomous weekly.
+Kronos signal calibration — autonomous weekly (Telegram-friendly summary).
 Cron: 0 4 * * 0 (09:30 IST Sunday = 04:00 UTC).
-Compares signal direction vs actual next-session price move.
-Always outputs — informs fine-tuning decision.
+
+Delegates to ml/calibration.py — outcomes over the model's ACTUAL 30-minute
+forecast horizon (the old version compared against next-DAY moves, which is
+not what score_from_db predicts). Decisions scored on stale bars are
+excluded from the recommendation by construction.
+
+The weekday EOD cron does the heavy `fill`; this just tops up and reports.
 """
 import sys
-from datetime import date, timedelta
+
 sys.path.insert(0, "/opt/dhan-trading")
-from dotenv import load_dotenv; load_dotenv("/opt/dhan-trading/.env")
-from urllib.parse import quote_plus
-from db import init_db, get_session
+from dotenv import load_dotenv
+
+load_dotenv("/opt/dhan-trading/.env")
+
 from config import get_config
-from sqlalchemy import text
+from db import init_db
 
-cfg = get_config()
-init_db(f"postgresql+psycopg2://{quote_plus(cfg.db_user)}:{quote_plus(cfg.db_password)}"
-        f"@{cfg.db_host}:{cfg.db_port}/{cfg.db_name}")
+init_db(get_config().db_url)
 
-week_ago = date.today() - timedelta(days=7)
+from ml.calibration import build_report, fill_outcomes
 
-with get_session() as s:
-    # Join signals with next day's actual price move
-    rows = s.execute(text("""
-        WITH sig AS (
-            SELECT s.id, s.security_id, s.side, s.confidence, s.ts::date AS sig_date
-            FROM signals s
-            WHERE s.strategy LIKE '%kronos%' AND s.ts::date >= :w
-        ),
-        actual AS (
-            SELECT b.security_id,
-                   b.time::date AS bar_date,
-                   (ARRAY_AGG(b.close ORDER BY b.time DESC))[1] AS close_px,
-                   (ARRAY_AGG(b.open  ORDER BY b.time ASC ))[1] AS open_px
-            FROM bars b WHERE b.timeframe='1m' AND b.time::date >= :w
-            GROUP BY b.security_id, b.time::date
-        )
-        SELECT sig.side,
-               CASE WHEN actual.close_px > actual.open_px THEN 'UP' ELSE 'DOWN' END AS actual_dir,
-               sig.confidence
-        FROM sig
-        JOIN actual ON actual.security_id = sig.security_id
-                    AND actual.bar_date = sig.sig_date + 1
-        WHERE sig.side IN ('BUY','SELL')
-    """), {"w": week_ago}).fetchall()
+filled = fill_outcomes(days=14)
+rep = build_report(days=30)
 
-if not rows:
-    print(f"📊 SIGNAL CALIBRATION | {week_ago} → {date.today()}")
-    print("No Kronos signals with next-day data yet.")
-    sys.exit(0)
-
-total = len(rows)
-correct = sum(1 for r in rows if
-              (r[0]=='BUY' and r[1]=='UP') or (r[0]=='SELL' and r[1]=='DOWN'))
-accuracy = correct / total * 100
-
-high_conf = [r for r in rows if float(r[2] or 0) >= 0.6]
-hc_correct= sum(1 for r in high_conf if
-               (r[0]=='BUY' and r[1]=='UP') or (r[0]=='SELL' and r[1]=='DOWN'))
-hc_acc    = hc_correct/len(high_conf)*100 if high_conf else 0
-
-print(f"📊 KRONOS SIGNAL CALIBRATION | {week_ago} → {date.today()}")
-print(f"Signals evaluated: {total}")
-print(f"Direction accuracy (all):        {accuracy:.1f}%")
-print(f"Direction accuracy (conf ≥0.6):  {hc_acc:.1f}%  ({len(high_conf)} signals)")
-
-if accuracy < 50:
-    print("\n⚠️ Below random baseline. Fine-tuning on NSE data is strongly recommended.")
-elif accuracy < 55:
-    print("\n🟡 Marginal edge. Consider fine-tuning to improve NSE-specific accuracy.")
-else:
-    print("\n✅ Meaningful edge. Continue monitoring — fine-tune when >500 securities loaded.")
+ma = rep["model_accuracy"]
+gv = rep["gate_value"]
+print(f"📊 KRONOS CALIBRATION (30-min horizon, last {rep['window_days']}d)")
+print(f"Outcomes: {rep['rows_with_outcomes']} (+{filled} new) | "
+      f"fresh-data: {ma['fresh']['n']} acc={ma['fresh']['accuracy']} | "
+      f"stale excluded: {ma['stale_excluded']['n']}")
+print(f"Gate  ALLOW n={gv['allow']['n']} avg={gv['allow']['avg_return_bps']}bps | "
+      f"BLOCK n={gv['block']['n']} avg={gv['block']['avg_return_bps']}bps")
+print(f"► {rep['recommendation']}")
