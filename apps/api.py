@@ -352,23 +352,26 @@ async def signals_handler(_r: web.Request) -> web.Response:
         from sqlalchemy import text
         with get_engine().connect() as conn:
             return conn.execute(text("""
-                SELECT security_id, side, qty, entry_ts, entry_price,
-                       exit_ts, exit_price, pnl, strategy, status
-                FROM trades ORDER BY entry_ts DESC LIMIT 100
+                SELECT t.security_id, t.side, t.qty, t.entry_ts, t.entry_price,
+                       t.exit_ts, t.exit_price, t.pnl, t.strategy, t.status,
+                       COALESCE(NULLIF(i.ticker, ''), t.security_id) AS ticker
+                FROM trades t
+                LEFT JOIN instruments i ON i.security_id = t.security_id
+                ORDER BY t.entry_ts DESC LIMIT 100
             """)).fetchall()
     try:
         rows = await asyncio.get_event_loop().run_in_executor(None, _query)
     except Exception as exc:
         return web.json_response([])
     sigs = []
-    for sid, side, qty, ets, ep, xts, xp, pnl, strat, status in rows:
+    for sid, side, qty, ets, ep, xts, xp, pnl, strat, status, ticker in rows:
         sigs.append({"action": side, "price": float(ep or 0),
                      "reason": f"{strat} entry x{qty}",
-                     "timestamp": str(ets), "source": f"{strat}_{sid}"})
+                     "timestamp": str(ets), "source": f"{strat} {ticker}"})
         if xts:
             sigs.append({"action": "EXIT", "price": float(xp or 0),
                          "reason": f"{strat} exit  PnL ₹{float(pnl or 0):+.2f}",
-                         "timestamp": str(xts), "source": f"{strat}_{sid}"})
+                         "timestamp": str(xts), "source": f"{strat} {ticker}"})
     sigs.sort(key=lambda x: x["timestamp"], reverse=True)
     return web.json_response(sigs[:100])
 
@@ -381,9 +384,12 @@ async def trades_handler(request: web.Request) -> web.Response:
         from sqlalchemy import text
         with get_engine().connect() as conn:
             rows = conn.execute(text("""
-                SELECT security_id, side, qty, entry_ts, entry_price,
-                       exit_ts, exit_price, pnl, strategy, status
-                FROM trades ORDER BY entry_ts DESC LIMIT :lim
+                SELECT t.security_id, t.side, t.qty, t.entry_ts, t.entry_price,
+                       t.exit_ts, t.exit_price, t.pnl, t.strategy, t.status,
+                       COALESCE(NULLIF(i.ticker, ''), t.security_id) AS ticker
+                FROM trades t
+                LEFT JOIN instruments i ON i.security_id = t.security_id
+                ORDER BY t.entry_ts DESC LIMIT :lim
             """), {"lim": limit}).fetchall()
             summary = conn.execute(text("""
                 SELECT COUNT(*) FILTER (WHERE status='CLOSED'),
@@ -405,7 +411,7 @@ async def trades_handler(request: web.Request) -> web.Response:
                     "pnl_today": float(pnl_sum or 0),
                     "wins_today": int(wins or 0)},
         "trades": [{
-            "symbol": r[0], "action": r[1], "qty": r[2],
+            "symbol": r[10], "security_id": r[0], "action": r[1], "qty": r[2],
             "entry_ts": str(r[3]), "entry_price": float(r[4] or 0),
             "exit_ts": str(r[5]) if r[5] else None,
             "exit_price": float(r[6] or 0) if r[6] is not None else None,

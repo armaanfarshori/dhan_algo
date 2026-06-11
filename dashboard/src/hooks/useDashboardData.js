@@ -37,7 +37,7 @@ export function useDashboardData() {
       trader_alive: alive,
       uptime_seconds: trader.uptime_seconds,
       kronos_gate: trader.kronos_gate,
-      strategy_name: first ? `ORB_${first.security_id}` : 'none',
+      strategy_name: first ? `ORB ${first.ticker ?? first.security_id}` : 'none',
       strategy_running: alive && !!first?.running,
     } : null,
   }
@@ -50,7 +50,7 @@ export function useDashboardData() {
     data: {
       ok: true,
       data: (trader?.portfolio?.open_positions ?? []).map(p => ({
-        security_id: p.security_id, qty: p.qty,
+        security_id: p.security_id, ticker: p.ticker, qty: p.qty,
         entry_price: p.avg_price, strategy: p.strategy, in_position: true,
       })),
     },

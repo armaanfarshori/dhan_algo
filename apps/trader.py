@@ -45,10 +45,14 @@ HEARTBEAT_INTERVAL = 5.0
 
 
 async def write_heartbeat(*, runners, portfolio, risk, feed, bar_builder,
-                          kronos_scanner, start_time):
+                          kronos_scanner, start_time, names=None):
     """Atomically export trader state for the api process."""
+    names = names or {}
     while True:
         try:
+            pf = portfolio.summary(feed.get_ltp)
+            for pos in pf.get("open_positions", []):
+                pos["ticker"] = names.get(pos["security_id"], pos["security_id"])
             payload = {
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "pid": __import__("os").getpid(),
@@ -56,8 +60,10 @@ async def write_heartbeat(*, runners, portfolio, risk, feed, bar_builder,
                 "uptime_seconds": int(time.time() - start_time),
                 "kronos_gate": "shadow" if cfg.kronos_shadow_mode else "enforcing",
                 "watchlist": [r.sid for r in runners],
-                "strategies": [r.status() for r in runners],
-                "portfolio": portfolio.summary(feed.get_ltp),
+                "names": names,
+                "strategies": [{**r.status(),
+                                "ticker": names.get(r.sid, r.sid)} for r in runners],
+                "portfolio": pf,
                 "risk": risk.get_summary(),
                 "feed": {
                     "connected": feed.is_connected(),
@@ -143,6 +149,23 @@ async def main():
         eq_sids = [int(s) for s in watchlist_ids if s.isdigit()]
         if eq_sids:
             feed.subscribe({cfg.watchlist_exchange_segment: eq_sids})
+
+        # Resolve display names once — the heartbeat carries them so every
+        # dashboard panel shows tickers instead of raw security ids.
+        def _resolve_names():
+            from sqlalchemy import text as _text
+            from db import get_session
+            with get_session() as s:
+                rows = s.execute(_text(
+                    "SELECT security_id, COALESCE(NULLIF(ticker, ''), security_id) "
+                    "FROM instruments WHERE security_id = ANY(:ids)"
+                ), {"ids": watchlist_ids}).fetchall()
+            return {r[0]: r[1] for r in rows}
+        try:
+            names = await asyncio.get_event_loop().run_in_executor(None, _resolve_names)
+        except Exception as exc:
+            logger.warning("Name resolution failed (%s) — showing ids", exc)
+            names = {}
 
         # ── Kronos gate (shadow until calibrated) ──────────────────────────────
         from core.kronos_signal import get_kronos_engine
@@ -250,7 +273,7 @@ async def main():
             asyncio.create_task(write_heartbeat(
                 runners=runners, portfolio=portfolio, risk=risk, feed=feed,
                 bar_builder=bar_builder, kronos_scanner=kronos_scanner,
-                start_time=start_time), name="heartbeat"),
+                start_time=start_time, names=names), name="heartbeat"),
             *[asyncio.create_task(r.run(), name=f"orb_{r.sid}") for r in runners],
         ]
         if kronos_scanner:

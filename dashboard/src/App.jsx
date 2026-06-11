@@ -429,7 +429,7 @@ function ActionWatchlist({ positions, paperPositions, tradelog, kronosSignals })
                 background: i % 2 === 0 ? T.bg1 : T.bg2,
               }}>
                 <span style={{ display: 'flex', flexDirection: 'column', minWidth: 90 }}>
-                  <span style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.ink0 }}>{sig?.ticker ?? sid}</span>
+                  <span style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.ink0 }}>{p.ticker ?? sig?.ticker ?? sid}</span>
                   {sig?.name && <span style={{ fontFamily: T.mono, fontSize: 8, color: T.ink3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 120 }}>{sig.name}</span>}
                 </span>
                 <span style={{ fontFamily: T.mono, fontSize: 9, color: qty > 0 ? T.green : T.red }}>{qty > 0 ? 'LONG' : 'SHORT'}</span>
@@ -600,7 +600,7 @@ function ORBCard({ s, gateDec, maxEntries }) {
       borderTop: `2px solid ${stateColor}`, padding: '12px 14px' }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 4 }}>
         <span style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 700, color: T.ink0 }}>
-          {s.security_id}
+          {s.ticker ?? s.security_id}
         </span>
         <span style={{ fontFamily: T.mono, fontSize: 9, letterSpacing: '0.15em', color: stateColor }}>
           {state}{inPos ? ` ${Math.abs(s.position)} @ ₹${(s.entry_price ?? 0).toFixed(2)}` : ''}
@@ -885,7 +885,7 @@ function OpenPositionsCard({ data }) {
           <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10,
             padding: '7px 0', borderBottom: `1px solid ${T.line}` }}>
             <span style={{ fontFamily: T.mono, fontSize: 11, fontWeight: 700, color: T.ink0,
-              minWidth: 56 }}>{p.security_id}</span>
+              minWidth: 56 }}>{p.ticker ?? p.security_id}</span>
             <span style={{ fontFamily: T.mono, fontSize: 9,
               color: p.qty > 0 ? T.green : T.red }}>{p.qty > 0 ? 'LONG' : 'SHORT'}</span>
             <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink2 }}>
