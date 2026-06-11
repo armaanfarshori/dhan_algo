@@ -425,11 +425,13 @@ async def db_stats_handler(_r: web.Request) -> web.Response:
                 SELECT hypertable_name, count(*) FILTER (WHERE is_compressed), count(*)
                 FROM timescaledb_information.chunks GROUP BY 1
             """)).fetchall()
-            # Span via the time index — first/last row, no scan
-            earliest = conn.execute(text(
-                "SELECT time::date FROM bars ORDER BY time ASC LIMIT 1")).scalar()
-            latest = conn.execute(text(
-                "SELECT time::date FROM bars ORDER BY time DESC LIMIT 1")).scalar()
+            # Span from the chunk CATALOG — ORDER BY time LIMIT 1 walks into
+            # compressed chunks (decompression, minutes); chunk ranges are
+            # free and accurate to within one chunk interval.
+            earliest, latest = conn.execute(text("""
+                SELECT min(range_start)::date, max(range_end)::date
+                FROM timescaledb_information.chunks WHERE hypertable_name = 'bars'
+            """)).fetchone()
             instruments = conn.execute(text(
                 "SELECT exchange_segment, COUNT(*) FROM instruments GROUP BY exchange_segment"
             )).fetchall()
