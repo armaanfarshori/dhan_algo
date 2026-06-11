@@ -206,12 +206,17 @@ async def logs_handler(request: web.Request) -> web.Response:
                 ts = f"{today}T{ts_raw}+00:00"
             else:
                 ts = ts_raw
+            body = parts[2].lstrip() if len(parts) > 2 else ln
+            name = "trader"
+            if " — " in body:
+                name, body = body.split(" — ", 1)
+                name = name.replace("dhan.", "")
             out.append({
                 "ts": ts,
                 "level": level,
                 "icon": {"INFO": "·", "WARNING": "⚠", "ERROR": "✗", "CRITICAL": "⛔"}.get(level, "·"),
-                "name": "trader",
-                "msg": parts[2] if len(parts) > 2 else ln,
+                "name": name,
+                "msg": body,
             })
         return out
 
