@@ -17,8 +17,16 @@ import os
 import signal
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import Optional
+
+# The server intentionally binds before bootstrap finishes (watchdog-safe
+# startup) and fills in app state afterwards — aiohttp warns on every such
+# assignment. Deliberate pattern; placeholders exist from build_app().
+warnings.filterwarnings(
+    "ignore", message="Changing state of started or joined application is deprecated",
+)
 
 from aiohttp import web
 from aiohttp.web_middlewares import normalize_path_middleware
