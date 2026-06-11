@@ -2,10 +2,10 @@
 BarBuilder — WebSocket ticks → 1-minute bars → TimescaleDB.
 
 This closes the M2 gap that silently broke the Kronos gate: score_from_db()
-reads ohlcv_1min, which only the historical backfill wrote — so during live
-sessions the model forecast from bars that ended days earlier. With the
-BarBuilder running, today's bars land in the DB within seconds of the minute
-closing and Kronos scores the present.
+read only backfilled history — so during live sessions the model forecast
+from bars that ended days earlier. With the BarBuilder running, today's bars
+land in the bars hypertable within seconds of the minute closing and Kronos
+scores the present.
 
 Volume note: Dhan's WS quote packet carries CUMULATIVE day volume. Per-bar
 volume is the delta between consecutive ticks (clamped at 0 for resets).
@@ -28,15 +28,6 @@ _BARS_SQL = text("""
         open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
         close = EXCLUDED.close, volume = EXCLUDED.volume
 """)
-
-_LEGACY_SQL = text("""
-    INSERT INTO ohlcv_1min (security_id, exchange_segment, ts, open, high, low, close, volume)
-    VALUES (:sid, :seg, :time, :open, :high, :low, :close, :volume)
-    ON CONFLICT (security_id, ts) DO UPDATE SET
-        open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
-        close = EXCLUDED.close, volume = EXCLUDED.volume
-""")
-
 
 class _Bar:
     __slots__ = ("minute_start", "open", "high", "low", "close", "volume")
@@ -127,7 +118,6 @@ class BarBuilder:
             from db import get_session
             with get_session() as s:
                 s.execute(_BARS_SQL, batch)
-                s.execute(_LEGACY_SQL, batch)
 
         try:
             await asyncio.get_event_loop().run_in_executor(None, _write)

@@ -205,17 +205,21 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _fetch_ohlcv_sync(security_id: str, exchange_segment: str, lookback: int) -> pd.DataFrame:
+    # Reads the compressed bars hypertable. The uncompressed ohlcv_1min
+    # mirror was dropped 2026-06-11 — it duplicated bars at 6× the size and
+    # its double-writes were OOM-killing Postgres. exchange_segment is
+    # unused: Dhan security_ids are unique within the equity universe.
     from sqlalchemy import text
     from db import get_engine
     sql = text("""
-        SELECT ts, open, high, low, close, volume
-        FROM ohlcv_1min
-        WHERE security_id = :sid AND exchange_segment = :seg
-        ORDER BY ts DESC
+        SELECT time AS ts, open, high, low, close, volume
+        FROM bars
+        WHERE security_id = :sid AND timeframe = '1m'
+        ORDER BY time DESC
         LIMIT :lim
     """)
     with get_engine().connect() as conn:
-        result = conn.execute(sql, {"sid": security_id, "seg": exchange_segment, "lim": lookback})
+        result = conn.execute(sql, {"sid": security_id, "lim": lookback})
         rows = result.fetchall()
     if not rows:
         return pd.DataFrame()

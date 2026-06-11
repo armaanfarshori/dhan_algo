@@ -99,7 +99,12 @@ def _parse_daily(data: dict[str, Any], security_id: str, exchange_segment: str) 
 # ── DB writes ──────────────────────────────────────────────────────────────────
 
 def _upsert_bars(df: pd.DataFrame, timeframe: str) -> int:
-    """Upsert into bars table (and ohlcv_1min for 1m data)."""
+    """Upsert into the bars hypertable.
+
+    The ohlcv_1min legacy mirror was dropped 2026-06-11: it duplicated bars
+    uncompressed (42GB vs 6.9GB for identical rows) and the double-writes
+    were OOM-killing Postgres on the 4GB DB instance.
+    """
     if df.empty:
         return 0
 
@@ -134,10 +139,8 @@ def _upsert_bars(df: pd.DataFrame, timeframe: str) -> int:
     # Retry waits: 5, 15, 30, 60s — enough for Postgres WAL recovery after a crash
     _BATCH      = 500
     _RETRY_WAIT = [5, 15, 30, 60]
-    legacy_rows = df.to_dict(orient="records") if timeframe == "1m" else None
     for i in range(0, len(rows), _BATCH):
-        batch        = rows[i : i + _BATCH]
-        legacy_batch = legacy_rows[i : i + _BATCH] if legacy_rows is not None else None
+        batch = rows[i : i + _BATCH]
         for attempt, wait in enumerate([0] + _RETRY_WAIT):
             try:
                 if wait:
@@ -146,19 +149,6 @@ def _upsert_bars(df: pd.DataFrame, timeframe: str) -> int:
                     _time.sleep(wait)
                 with get_session() as session:
                     session.execute(bars_sql, batch)
-                    if legacy_batch is not None:
-                        session.execute(text("""
-                            INSERT INTO ohlcv_1min
-                                (security_id, exchange_segment, ts, open, high, low, close, volume)
-                            VALUES
-                                (:security_id, :exchange_segment, :ts, :open, :high, :low, :close, :volume)
-                            ON CONFLICT (security_id, ts) DO UPDATE SET
-                                open   = EXCLUDED.open,
-                                high   = EXCLUDED.high,
-                                low    = EXCLUDED.low,
-                                close  = EXCLUDED.close,
-                                volume = EXCLUDED.volume
-                        """), legacy_batch)
                 break  # success
             except Exception as exc:
                 if attempt < len(_RETRY_WAIT):
