@@ -25,7 +25,6 @@ Returns a dict:
 
 import asyncio
 import logging
-import os
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -52,23 +51,14 @@ class KronosSignalEngine:
     def __init__(self):
         self._predictor = None
         self._lock = asyncio.Lock()
-        # Read config lazily at instantiation so .env is already loaded
-        try:
-            from config import get_config
-            cfg = get_config()
-            self._tokenizer_id  = os.getenv("KRONOS_TOKENIZER", _TOKENIZER_ID)
-            self._model_id      = os.getenv("KRONOS_MODEL",     _MODEL_ID)
-            self._lookback      = int(os.getenv("KRONOS_LOOKBACK",  str(_LOOKBACK)))
-            self._pred_len      = int(os.getenv("KRONOS_PRED_LEN",  str(_PRED_LEN)))
-            self._sample_count  = int(os.getenv("KRONOS_SAMPLES",   str(_SAMPLE_COUNT)))
-            self._signal_thresh = float(os.getenv("KRONOS_THRESH",  str(_SIGNAL_THRESH)))
-        except Exception:
-            self._tokenizer_id  = _TOKENIZER_ID
-            self._model_id      = _MODEL_ID
-            self._lookback      = _LOOKBACK
-            self._pred_len      = _PRED_LEN
-            self._sample_count  = _SAMPLE_COUNT
-            self._signal_thresh = _SIGNAL_THRESH
+        from config import get_config
+        cfg = get_config()
+        self._tokenizer_id  = cfg.kronos_tokenizer
+        self._model_id      = cfg.kronos_model
+        self._lookback      = cfg.kronos_lookback
+        self._pred_len      = cfg.kronos_pred_len
+        self._sample_count  = cfg.kronos_samples
+        self._signal_thresh = cfg.kronos_thresh
 
     async def load(self, device: str = "cpu"):
         """Download and cache the model. Safe to call multiple times."""

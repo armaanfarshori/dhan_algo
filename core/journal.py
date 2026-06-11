@@ -154,6 +154,8 @@ class AsyncDBBackend:
 
     def __init__(self):
         import os
+        # DB_HOST presence (not value) decides whether journalling is on —
+        # local dev without a DB should run with the backend disabled.
         self._enabled = bool(os.getenv("DB_HOST"))
         self._engine  = None
         self._Session = None
@@ -163,17 +165,10 @@ class AsyncDBBackend:
             _log.info("AsyncDBBackend: DB_HOST not set — DB journalling disabled")
             return
         try:
-            import os
-            from urllib.parse import quote_plus
             from sqlalchemy import create_engine
             from sqlalchemy.orm import sessionmaker
-            url = (
-                f"postgresql+psycopg2://"
-                f"{quote_plus(os.getenv('DB_USER','trader'))}:"
-                f"{quote_plus(os.getenv('DB_PASSWORD','trader123'))}"
-                f"@{os.getenv('DB_HOST','localhost')}:{os.getenv('DB_PORT','5432')}"
-                f"/{os.getenv('DB_NAME','dhan_trading')}"
-            )
+            from config import get_config
+            url = get_config().db_url
             self._engine  = create_engine(url, pool_pre_ping=True, pool_size=3, max_overflow=5)
             self._Session = sessionmaker(bind=self._engine)
             loop = asyncio.get_event_loop()

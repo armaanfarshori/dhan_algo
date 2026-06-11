@@ -1,71 +1,92 @@
 """
-Centralised configuration — reads .env and exposes a typed Config object.
-All modules use get_config() instead of os.getenv() directly.
+Centralised configuration — single typed Settings object for the platform.
+
+Every module reads configuration through get_config(); nothing else in the
+codebase may call os.getenv(). Values come from the environment / .env file
+and are validated at first access — a typo'd numeric env var fails loudly at
+startup instead of deep inside a trading session.
 """
-import os
-from dataclasses import dataclass, field
-from dotenv import load_dotenv
+from functools import lru_cache
+from urllib.parse import quote_plus
 
-load_dotenv()
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-@dataclass
-class Config:
-    # Dhan credentials
-    dhan_client_id: str = field(default_factory=lambda: os.getenv("DHAN_CLIENT_ID", "mock"))
-    dhan_access_token: str = field(default_factory=lambda: os.getenv("DHAN_ACCESS_TOKEN", "mock"))
-    dhan_pin: str = field(default_factory=lambda: os.getenv("DHAN_PIN", ""))
-    totp_secret: str = field(default_factory=lambda: os.getenv("DHAN_TOTP_SECRET", ""))
-
-    # Trading mode
-    paper_trading: bool = field(
-        default_factory=lambda: os.getenv("PAPER_TRADING", "true").lower() != "false"
-    )
-    strategy: str = field(default_factory=lambda: os.getenv("STRATEGY", "scalper"))
-
-    # Risk defaults
-    max_daily_loss: float = field(
-        default_factory=lambda: float(os.getenv("MAX_DAILY_LOSS", "5000"))
-    )
-    capital: float = field(default_factory=lambda: float(os.getenv("CAPITAL", "100000")))
-    risk_per_trade: float = field(
-        default_factory=lambda: float(os.getenv("RISK_PER_TRADE", "0.01"))
+class Config(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",          # .env carries vars for other tools too
+        case_sensitive=False,
     )
 
-    # ORB settings
-    orb_range_minutes: int = field(
-        default_factory=lambda: int(os.getenv("ORB_RANGE_MINUTES", "15"))
-    )
+    # ── Dhan credentials ────────────────────────────────────────────────────
+    dhan_client_id: str = "mock"
+    dhan_access_token: str = "mock"
+    dhan_pin: str = ""
+    dhan_totp_secret: str = ""
 
-    # Watchlist — dynamic from screener; only segment is fixed
-    watchlist_exchange_segment: str = field(
-        default_factory=lambda: os.getenv("WATCHLIST_EXCHANGE_SEGMENT", "NSE_EQ")
-    )
-    watchlist_n: int = field(
-        default_factory=lambda: int(os.getenv("WATCHLIST_N", "5"))
-    )
+    # ── Trading mode ────────────────────────────────────────────────────────
+    paper_trading: bool = True
+    # Flipping to live via POST /api/mode additionally requires this flag —
+    # there is no auth layer until M6, so live must never be one request away.
+    allow_live_toggle: bool = False
+    strategy: str = "orb"
 
-    # TimescaleDB
-    db_host: str = field(default_factory=lambda: os.getenv("DB_HOST", "localhost"))
-    db_port: int = field(default_factory=lambda: int(os.getenv("DB_PORT", "5432")))
-    db_name: str = field(default_factory=lambda: os.getenv("DB_NAME", "dhan_trading"))
-    db_user: str = field(default_factory=lambda: os.getenv("DB_USER", "trader"))
-    db_password: str = field(default_factory=lambda: os.getenv("DB_PASSWORD", "trader123"))
+    # ── Risk ────────────────────────────────────────────────────────────────
+    max_daily_loss: float = 5_000.0
+    capital: float = 100_000.0
+    risk_per_trade: float = 0.01          # fraction of equity risked per trade
+    paper_balance: float = 500_000.0
+    max_orders_per_session: int = 4
+
+    # ── ORB strategy ────────────────────────────────────────────────────────
+    orb_range_minutes: int = 15
+    poll_interval: float = 20.0           # seconds between quote polls
+    trade_quantity: int = 1
+
+    # ── Watchlist — dynamic from screener; only segment is fixed ────────────
+    watchlist_exchange_segment: str = "NSE_EQ"
+    watchlist_n: int = 5
+
+    # ── Kronos ──────────────────────────────────────────────────────────────
+    kronos_tokenizer: str = "NeoQuasar/Kronos-Tokenizer-base"
+    kronos_model: str = "NeoQuasar/Kronos-small"
+    kronos_checkpoint: str = ""           # S3 path after fine-tuning; empty = HF zero-shot
+    kronos_lookback: int = 400
+    kronos_pred_len: int = 30
+    kronos_samples: int = 5
+    kronos_thresh: float = 0.001
+    kronos_min_confidence: float = 0.4
+    kronos_scanner_enabled: bool = True
+    # Shadow mode: the gate scores and PERSISTS every decision but never
+    # blocks a trade. Stays on until calibration shows the gate adds value
+    # (all pre-2026-06-11 decisions were scored on stale data — worthless).
+    kronos_shadow_mode: bool = True
+
+    # ── Web / dashboard ─────────────────────────────────────────────────────
+    webhook_port: int = 8765
+
+    # ── TimescaleDB ─────────────────────────────────────────────────────────
+    db_host: str = "localhost"
+    db_port: int = 5432
+    db_name: str = "dhan_trading"
+    db_user: str = "trader"
+    db_password: str = "trader123"
 
     @property
     def db_url(self) -> str:
-        from urllib.parse import quote_plus
         return (
             f"postgresql+psycopg2://{quote_plus(self.db_user)}:{quote_plus(self.db_password)}"
             f"@{self.db_host}:{self.db_port}/{self.db_name}"
         )
 
+    # Back-compat alias: older modules referenced cfg.totp_secret
+    @property
+    def totp_secret(self) -> str:
+        return self.dhan_totp_secret
 
-_cfg: Config | None = None
 
-
+@lru_cache(maxsize=1)
 def get_config() -> Config:
-    global _cfg
-    if _cfg is None:
-        _cfg = Config()
-    return _cfg
+    return Config()

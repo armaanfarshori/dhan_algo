@@ -26,14 +26,12 @@ Usage (backfill.py):
 import asyncio
 import json
 import logging
-import os
 import re
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, Callable
 
 import pyotp
-from dhanhq import DhanLogin
 
 logger = logging.getLogger("dhan.token_manager")
 
@@ -102,9 +100,11 @@ class MasterTokenManager:
     """
 
     def __init__(self):
-        self.client_id   = os.getenv("DHAN_CLIENT_ID", "")
-        self.pin         = os.getenv("DHAN_PIN", "")
-        self.totp_secret = os.getenv("DHAN_TOTP_SECRET", "")
+        from config import get_config
+        cfg = get_config()
+        self.client_id   = cfg.dhan_client_id
+        self.pin         = cfg.dhan_pin
+        self.totp_secret = cfg.dhan_totp_secret
         self._token:  Optional[str]      = None
         self._expiry: Optional[datetime] = None
         self._callbacks: list[Callable]  = []
@@ -134,6 +134,7 @@ class MasterTokenManager:
 
     async def _generate(self) -> str:
         logger.info("Generating new Dhan token via PIN + TOTP…")
+        from dhanhq import DhanLogin   # lazy — only token GENERATION needs the SDK
         totp = pyotp.TOTP(self.totp_secret).now()
         loop = asyncio.get_event_loop()
 
@@ -158,6 +159,7 @@ class MasterTokenManager:
         if not self._token:
             return None
         try:
+            from dhanhq import DhanLogin   # lazy — see _generate()
             loop = asyncio.get_event_loop()
             old  = self._token
 

@@ -1,19 +1,20 @@
 """
 DhanHQ Algo Platform — Main Orchestrator
 =========================================
-Wires together:  DhanClient → RiskManager → Strategies → Web Dashboard
+Wires together:  DhanClient → RiskManager → ORB+Kronos strategies → Web Dashboard
+
+ORB is the sole production strategy; the Kronos gate runs in shadow mode until
+calibration proves it adds value (see config.kronos_shadow_mode). Legacy
+strategies/scanners were removed in the Phase-0 cleanup — git history has them.
 
 Run:
-    python main.py
+    python main.py        (systemd unit: dhan-platform)
 
-Set env vars (or .env file):
-    DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN, PAPER_TRADING, MAX_DAILY_LOSS
-    STRATEGY=scalper|sma   (default: scalper)
+Configuration: .env via config.Config — no os.getenv anywhere else.
 """
 
 import asyncio
 import logging
-import os
 import signal
 import sys
 import time
@@ -29,7 +30,6 @@ warnings.filterwarnings(
 )
 
 from aiohttp import web
-from aiohttp.web_middlewares import normalize_path_middleware
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -44,49 +44,17 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-from core.auth import DhanAuthManager
 from core.journal import get_trade_logger, get_log_buffer, install_log_buffer
 from core.live_feed import LiveFeed
 install_log_buffer()   # capture all log messages into rolling buffer
 from core.client import DhanClient
 from core.risk import RiskManager, RiskConfig
-from core.backtest import Backtester
-from strategies.strategy_base import (
-    SMACrossoverStrategy, SMAConfig,
-    StraddleSellerStrategy, StraddleSellerConfig,
-)
-from strategies.options_scalper import OptionsScalperStrategy, OptionsScalperConfig
 from core.watchlist import WatchlistManager
-from strategies.scanner import MultiStockScanner
-from strategies.index_options import IndexOptionsScanner
-from strategies.backtest_strategies import (
-    RSIScalperStrategy, RSIConfig,
-    MomentumBreakoutStrategy, MomentumConfig,
-    MeanReversionStrategy, MeanReversionConfig,
-    BollingerReversionStrategy, BollingerConfig,
-    VWAPReversionStrategy, VWAPConfig,
-    STRATEGY_REGISTRY,
-)
 
 logger = logging.getLogger("dhan.main")
 
-from config import get_config as _get_cfg
-_cfg = _get_cfg()
-
-CLIENT_ID      = _cfg.dhan_client_id
-ACCESS_TOKEN   = _cfg.dhan_access_token
-DHAN_PIN       = _cfg.dhan_pin
-TOTP_SECRET    = _cfg.totp_secret
-PAPER_TRADING  = _cfg.paper_trading
-MAX_DAILY_LOSS = _cfg.max_daily_loss
-WEBHOOK_PORT   = int(os.getenv("WEBHOOK_PORT", "8765"))
-STRATEGY       = _cfg.strategy.lower()
-SCANNER_MODE   = os.getenv("SCANNER_MODE", "false").lower() == "true"
-SEGMENTS       = os.getenv("SEGMENTS", "NSE_EQ").split(",")
-PAPER_BALANCE  = float(os.getenv("PAPER_BALANCE", "500000"))
-
-# Auth manager available when PIN + TOTP are configured
-_auth_manager: Optional[DhanAuthManager] = None
+from config import get_config
+cfg = get_config()
 
 DIST_DIR   = Path(__file__).parent / "dashboard" / "dist"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -117,14 +85,14 @@ async def postback_handler(request: web.Request) -> web.Response:
 
 
 async def health_handler(request: web.Request) -> web.Response:
-    return web.json_response({"status": "ok", "paper": PAPER_TRADING})
+    return web.json_response({
+        "status": "ok",
+        "paper":  request.app.get("paper_trading", cfg.paper_trading),
+    })
 
 
 async def trading_mode_handler(request: web.Request) -> web.Response:
-    """GET → current mode. POST {paper: true/false} → toggle all engines + child strategies."""
-    fno = request.app.get("fno_scanner")
-    eq  = request.app.get("equity_scanner")
-
+    """GET → current mode. POST {paper: true/false} → toggle all ORB strategies."""
     if request.method == "POST":
         body  = await request.json()
         paper = bool(body.get("paper", True))
@@ -132,49 +100,27 @@ async def trading_mode_handler(request: web.Request) -> web.Response:
         # No auth layer exists yet (M6) — flipping to LIVE via an open HTTP
         # endpoint is a real-money hazard. Until M6 lands, going live requires
         # ALLOW_LIVE_TOGGLE=true in .env plus a restart.
-        if not paper and os.getenv("ALLOW_LIVE_TOGGLE", "false").lower() not in ("1", "true", "yes"):
+        if not paper and not cfg.allow_live_toggle:
             logger.warning("Blocked attempt to switch to LIVE via /api/mode (ALLOW_LIVE_TOGGLE not set)")
             return web.json_response({
                 "ok": False,
                 "error": "Live toggle disabled — set ALLOW_LIVE_TOGGLE=true in .env and restart (no auth layer until M6)",
             }, status=403)
 
-        # ── F&O scanner ──────────────────────────────────────────────────────
-        if fno:
-            fno.paper_trading = paper
-            # Safe mid-session switch: clear paper positions if switching to live
-            if not paper:
-                for state in fno._indices.values():
-                    if state.in_position:
-                        logger.warning(f"Mode→LIVE: clearing paper position {state.name}")
-                        fno._go_flat(state)
+        for strategy in request.app.get("orb_strategies", []):
+            strategy.config.paper_trading = paper
+            if not paper and strategy.position != 0:
+                logger.warning(f"Mode→LIVE: paper position on {strategy.config.name} "
+                               f"({strategy.position} @ {strategy.entry_price}) — clearing")
+                strategy.position = 0
+                strategy.entry_price = 0.0
 
-        # ── Equity scanner + ALL child strategy instances ────────────────────
-        if eq:
-            eq.paper_trading = paper
-            for strategy in eq._strategies.values():
-                strategy.config.paper_trading = paper   # propagate to children
-            if not paper:
-                for key in list(eq._positions.keys()):
-                    logger.warning(f"Mode→LIVE: clearing paper equity position {key}")
-                eq._positions.clear()
-                eq._current_prices.clear()
-
-        # ── Primary strategy (app["strategy"]) ───────────────────────────────
-        primary = request.app.get("strategy")
-        if primary and hasattr(primary, "paper_trading"):
-            primary.paper_trading = paper
-        if primary and hasattr(primary, "config"):
-            primary.config.paper_trading = paper
-
-        # ── Update app-level mode flag (fixes status_handler) ────────────────
         request.app["paper_trading"] = paper
-
         mode = "PAPER" if paper else "LIVE"
         logger.warning(f"⚠️  Trading mode switched to {mode}")
         return web.json_response({"ok": True, "paper": paper, "mode": mode})
 
-    paper = request.app.get("paper_trading", fno.paper_trading if fno else PAPER_TRADING)
+    paper = request.app.get("paper_trading", cfg.paper_trading)
     return web.json_response({"ok": True, "paper": paper, "mode": "PAPER" if paper else "LIVE"})
 
 
@@ -191,11 +137,11 @@ async def status_handler(request: web.Request) -> web.Response:
     strategy = request.app["strategy"]
     uptime   = int(time.time() - request.app["start_time"])
 
-    current_paper = request.app.get("paper_trading", PAPER_TRADING)
+    current_paper = request.app.get("paper_trading", cfg.paper_trading)
     if strategy is None:
         return web.json_response({
             "mode":             "PAPER" if current_paper else "LIVE",
-            "client_id":        CLIENT_ID,
+            "client_id":        cfg.dhan_client_id,
             "uptime_seconds":   uptime,
             "strategy_name":    "none",
             "strategy_running": False,
@@ -205,31 +151,17 @@ async def status_handler(request: web.Request) -> web.Response:
             "warmup":           {"ready": False},
             "note":             "No strategies running — screener returned 0 securities",
         })
-    payload = {
+    return web.json_response({
         "mode":             "PAPER" if current_paper else "LIVE",
-        "client_id":        CLIENT_ID,
+        "client_id":        cfg.dhan_client_id,
         "uptime_seconds":   uptime,
         "strategy_name":    strategy.config.name,
         "strategy_running": strategy._running,
         "orders_placed":    strategy.orders_placed,
         "position":         strategy.position,
         "entry_price":      strategy.entry_price,
-    }
-
-    # SMA warmup info
-    if hasattr(strategy, '_fast_prices'):
-        sc = strategy.sma_config
-        payload["warmup"] = {
-            "fast_current":  len(strategy._fast_prices),
-            "fast_required": sc.fast_period,
-            "slow_current":  len(strategy._slow_prices),
-            "slow_required": sc.slow_period,
-            "ready":         len(strategy._slow_prices) >= sc.slow_period,
-        }
-    else:
-        payload["warmup"] = {"ready": True}
-
-    return web.json_response(payload)
+        "warmup":           {"ready": True},
+    })
 
 
 async def risk_handler(request: web.Request) -> web.Response:
@@ -240,20 +172,17 @@ async def risk_handler(request: web.Request) -> web.Response:
 
 
 async def signals_handler(request: web.Request) -> web.Response:
-    """Aggregates signals from BOTH scanners, newest first."""
-    fno = request.app.get("fno_scanner")
-    eq  = request.app.get("equity_scanner")
+    """All signals from the running ORB strategies, newest first."""
     all_sigs = []
-    for src, tag in [(fno, "F&O"), (eq, "EQ")]:
-        if src:
-            for s in getattr(src, "signals", []):
-                all_sigs.append({
-                    "action":    s.action,
-                    "price":     s.price,
-                    "reason":    s.reason,
-                    "timestamp": s.timestamp.isoformat(),
-                    "source":    tag,
-                })
+    for strategy in request.app.get("orb_strategies", []):
+        for s in strategy.signals:
+            all_sigs.append({
+                "action":    s.action,
+                "price":     s.price,
+                "reason":    s.reason,
+                "timestamp": s.timestamp.isoformat(),
+                "source":    strategy.config.name,
+            })
     all_sigs.sort(key=lambda x: x["timestamp"], reverse=True)
     return web.json_response(all_sigs[:100])
 
@@ -275,78 +204,39 @@ async def positions_handler(request: web.Request) -> web.Response:
 
 
 async def paper_positions_handler(request: web.Request) -> web.Response:
-    """Aggregates simulated paper positions — only when in paper mode."""
-    current_paper = request.app.get("paper_trading", PAPER_TRADING)
+    """Open simulated positions across the ORB strategies — paper mode only."""
+    current_paper = request.app.get("paper_trading", cfg.paper_trading)
     if not current_paper:
         return web.json_response({"ok": True, "count": 0, "data": [],
                                    "note": "Live mode — see /api/positions for real positions"})
+
+    wl = request.app.get("watchlist")
+    stocks = {s.security_id: s for s in (wl.get() if wl else [])}
+
     positions = []
+    for strategy in request.app.get("orb_strategies", []):
+        if strategy.position == 0:
+            continue
+        sid = strategy.config.security_id
+        sym = stocks.get(sid)
+        positions.append({
+            "engine":      "EQ",
+            "strategy":    strategy.config.name,
+            "symbol":      sym.symbol if sym else sid,
+            "name":        sym.name if sym else sid,
+            "segment":     strategy.config.exchange_segment,
+            "qty":         strategy.position,
+            "entry_price": strategy.entry_price,
+        })
 
-    fno: "IndexOptionsScanner" = request.app.get("fno_scanner")
-    if fno:
-        for name, state in fno._indices.items():
-            if state.in_position:
-                positions.append({
-                    "engine":        "F&O",
-                    "symbol":        f"{name} {int(state.strike)} {state.option_type}",
-                    "index":         name,
-                    "option_type":   state.option_type,
-                    "strike":        state.strike,
-                    "entry_premium": state.entry_premium,
-                    "lot_size":      state.lot_size,
-                    "expiry":        state.active_expiry,
-                    "bep":           state.breakeven,
-                })
-
-    eq = request.app.get("equity_scanner")
-    if eq:
-        wl = request.app.get("watchlist")
-        stocks = {s.security_id: s for s in (wl.get() if wl else [])}
-        for key, entry_price in eq._positions.items():
-            seg, sid = key.split(":")
-            sym = stocks.get(sid)
-            cur_price = eq._current_prices.get(sid, 0.0)
-            strat = eq._strategies.get(key)
-            qty = strat.config.quantity if strat else 1
-            upnl = round((cur_price - entry_price) * qty, 2) if cur_price else 0.0
-            positions.append({
-                "engine":        "EQ",
-                "symbol":        sym.symbol if sym else sid,
-                "name":          sym.name if sym else sid,
-                "segment":       seg,
-                "entry_price":   entry_price,
-                "current_price": cur_price,
-                "qty":           qty,
-                "unrealized_pnl": upnl,
-                "change_pct":    round((cur_price - entry_price) / entry_price * 100, 2) if entry_price else 0,
-            })
-
-    return web.json_response({
-        "ok":    True,
-        "count": len(positions),
-        "data":  positions,
-    })
-
-
-async def scalper_handler(request: web.Request) -> web.Response:
-    strategy = request.app["strategy"]
-    if hasattr(strategy, "get_scalper_summary"):
-        return web.json_response(strategy.get_scalper_summary())
-    return web.json_response({"ok": False, "error": "Not a scalper strategy"}, status=404)
-
-
-async def instruments_handler(request: web.Request) -> web.Response:
-    strategy = request.app["strategy"]
-    if hasattr(strategy, "get_expiries"):
-        return web.json_response(strategy.get_expiries())
-    return web.json_response({"ok": False, "error": "Not a scalper strategy"}, status=404)
+    return web.json_response({"ok": True, "count": len(positions), "data": positions})
 
 
 async def auth_handler(request: web.Request) -> web.Response:
     mgr = request.app.get("auth_manager")
     if not mgr:
         return web.json_response({"mode": "manual", "note": "Set DHAN_PIN + DHAN_TOTP_SECRET to enable auto-refresh"})
-    return web.json_response({"mode": "auto", **mgr.summary()})
+    return web.json_response({"mode": "auto", "valid": mgr.is_valid()})
 
 
 async def config_handler(request: web.Request) -> web.Response:
@@ -366,8 +256,6 @@ async def market_status_handler(_request: web.Request) -> web.Response:
 
     nse_open  = dtime(9, 15)
     nse_close = dtime(15, 30)
-    fno_open  = dtime(9, 15)
-    fno_close = dtime(15, 30)
     pre_open  = dtime(9, 0)
 
     # MCX: Mon–Fri 09:00–23:30, Sat 09:00–14:00
@@ -376,9 +264,8 @@ async def market_status_handler(_request: web.Request) -> web.Response:
     mcx_close_sat = dtime(14, 0)
     is_saturday   = wd == 5
 
-    nse_status  = "OPEN"  if is_weekday and nse_open  <= t <= nse_close else "CLOSED"
-    fno_status  = "OPEN"  if is_weekday and fno_open  <= t <= fno_close else "CLOSED"
-    pre_status  = "PRE"   if is_weekday and pre_open  <= t < nse_open   else None
+    nse_status = "OPEN" if is_weekday and nse_open <= t <= nse_close else "CLOSED"
+    pre_status = "PRE"  if is_weekday and pre_open <= t < nse_open   else None
 
     if is_weekday:
         mcx_status = "OPEN" if mcx_open <= t <= mcx_close_wkd else "CLOSED"
@@ -389,95 +276,12 @@ async def market_status_handler(_request: web.Request) -> web.Response:
 
     return web.json_response({
         "nse_equity":  pre_status or nse_status,
-        "nse_fno":     pre_status or fno_status,
+        "nse_fno":     pre_status or nse_status,
         "mcx":         mcx_status,
         "ist_time":    now.strftime("%H:%M:%S"),
         "weekday":     now.strftime("%A"),
         "is_weekend":  not is_weekday and not is_saturday,
     })
-
-
-async def switch_strategy_handler(request: web.Request) -> web.Response:
-    body          = await request.json()
-    strategy_name = body.get("strategy", "scalper")
-    segment       = body.get("segment",   "NSE_FNO")
-    security_id   = body.get("security_id", "13")
-    quantity      = int(body.get("quantity",  75))
-    num_lots      = int(body.get("num_lots",   1))
-
-    dhan  = request.app.get("client")
-    risk  = request.app.get("risk")
-    if dhan is None or risk is None:
-        return web.json_response({"ok": False, "initializing": True}, status=503)
-    # Always use the current live mode — not the startup global
-    paper = request.app.get("paper_trading", PAPER_TRADING)
-
-    # Stop old strategy
-    old = request.app.get("strategy")
-    if old:
-        old.stop()
-    old_task = request.app.get("strategy_task")
-    if old_task and not old_task.done():
-        old_task.cancel()
-        await asyncio.gather(old_task, return_exceptions=True)
-
-    # Common equity config kwargs
-    equity_kwargs = dict(
-        security_id=security_id, exchange_segment=segment,
-        product_type="INTRADAY", quantity=quantity, paper_trading=paper,
-    )
-
-    if strategy_name == "scalper":
-        cfg = OptionsScalperConfig(
-            security_id=security_id, exchange_segment="IDX_I",
-            product_type="MARGIN", quantity=quantity, num_lots=num_lots,
-            poll_interval=10.0, paper_trading=paper,
-        )
-        new_strategy = OptionsScalperStrategy(dhan, risk, cfg)
-
-    elif strategy_name == "sma_crossover":
-        cfg = SMAConfig(name=f"SMA_9_21_{security_id}", **equity_kwargs)
-        new_strategy = SMACrossoverStrategy(dhan, risk, cfg)
-
-    elif strategy_name == "rsi_scalper":
-        cfg = RSIConfig(name=f"RSI_Scalper_{security_id}", **equity_kwargs)
-        new_strategy = RSIScalperStrategy(dhan, risk, cfg)
-
-    elif strategy_name == "momentum_breakout":
-        cfg = MomentumConfig(name=f"Momentum_{security_id}", **equity_kwargs)
-        new_strategy = MomentumBreakoutStrategy(dhan, risk, cfg)
-
-    elif strategy_name == "mean_reversion":
-        cfg = MeanReversionConfig(name=f"MeanRev_{security_id}", **equity_kwargs)
-        new_strategy = MeanReversionStrategy(dhan, risk, cfg)
-
-    elif strategy_name == "bollinger":
-        cfg = BollingerConfig(name=f"Bollinger_{security_id}", **equity_kwargs)
-        new_strategy = BollingerReversionStrategy(dhan, risk, cfg)
-
-    elif strategy_name == "vwap_reversion":
-        cfg = VWAPConfig(name=f"VWAP_{security_id}", **equity_kwargs)
-        new_strategy = VWAPReversionStrategy(dhan, risk, cfg)
-
-    elif strategy_name == "short_straddle":
-        cfg = StraddleSellerConfig(
-            name="Short_Straddle", security_id=security_id,
-            exchange_segment="NSE_FNO", product_type="MARGIN",
-            quantity=quantity, lot_size=quantity, paper_trading=paper,
-        )
-        new_strategy = StraddleSellerStrategy(dhan, risk, cfg)
-
-    else:
-        return web.json_response({"ok": False, "error": f"Unknown strategy: {strategy_name}"}, status=400)
-
-    request.app["strategy"]      = new_strategy
-    request.app["strategy_task"] = asyncio.create_task(new_strategy.run(), name="strategy")
-    request.app["runtime_config"] = {
-        "strategy": strategy_name, "segment": segment,
-        "security_id": security_id, "quantity": quantity, "num_lots": num_lots,
-    }
-    logger.info(f"Strategy switched to {new_strategy.config.name}")
-    return web.json_response({"ok": True, "strategy": strategy_name, "message": f"Switched to {new_strategy.config.name}"})
 
 
 async def instrument_search_handler(request: web.Request) -> web.Response:
@@ -508,58 +312,19 @@ async def instrument_price_handler(request: web.Request) -> web.Response:
 
 
 async def killswitch_handler(request: web.Request) -> web.Response:
-    risk     = request.app.get("risk")
-    strategy = request.app.get("strategy")
+    risk = request.app.get("risk")
     if risk is None:
         return web.json_response({"ok": False, "initializing": True}, status=503)
     risk.activate_kill_switch()
-    if strategy:
-        strategy.stop()
-    task = request.app.get("strategy_task")
-    if task and not task.done():
-        task.cancel()
 
-    oco_cancelled = 0
-    if not PAPER_TRADING and hasattr(strategy, "_oco_order_id") and strategy._oco_order_id:
-        try:
-            await request.app["client"].cancel_forever_order(strategy._oco_order_id)
-            oco_cancelled = 1
-        except Exception as e:
-            logger.warning(f"OCO cancel failed: {e}")
+    for strategy in request.app.get("orb_strategies", []):
+        strategy.stop()
+    for task in request.app.get("orb_tasks", []):
+        if not task.done():
+            task.cancel()
 
     logger.critical("⛔ KILL SWITCH ACTIVATED via dashboard")
-    return web.json_response({"ok": True, "halted": True, "oco_cancelled": oco_cancelled, "message": "Kill switch activated"})
-
-
-async def payoff_handler(request: web.Request) -> web.Response:
-    strategy = request.app["strategy"]
-    if not hasattr(strategy, "get_scalper_summary"):
-        return web.json_response({"ok": False, "error": "Payoff only for scalper"}, status=404)
-
-    sc  = strategy.get_scalper_summary()
-    cfg = strategy.scalper_cfg
-
-    if sc["state"] == "IN_POSITION":
-        entry  = sc["entry_premium"]
-        bep    = sc["breakeven_premium"]
-        target = round(bep + cfg.target_buffer, 2)
-        stop   = round(entry - cfg.stop_buffer, 2)
-        qty    = cfg.quantity * cfg.num_lots
-        mode   = "live"
-    else:
-        entry  = cfg.max_premium / 2
-        bep    = round(entry + 2.0, 2)
-        target = round(bep + cfg.target_buffer, 2)
-        stop   = round(entry - cfg.stop_buffer, 2)
-        qty    = cfg.quantity * cfg.num_lots
-        mode   = "whatif"
-
-    lo   = min(stop * 0.8, stop - 10)
-    hi   = max(target * 1.2, target + 10)
-    step = (hi - lo) / 19
-    points = [{"premium": round(lo + i * step, 2), "pnl": round((lo + i * step - entry) * qty, 2)} for i in range(20)]
-
-    return web.json_response({"ok": True, "mode": mode, "entry": entry, "breakeven": bep, "target": target, "stop": stop, "points": points})
+    return web.json_response({"ok": True, "halted": True, "message": "Kill switch activated"})
 
 
 async def watchlist_handler(request: web.Request) -> web.Response:
@@ -579,66 +344,6 @@ async def watchlist_refresh_handler(request: web.Request) -> web.Response:
                                   "stocks": [s.symbol for s in wl.get()]})
     except Exception as e:
         return web.json_response({"ok": False, "error": str(e)}, status=500)
-
-
-async def scanner_handler(request: web.Request) -> web.Response:
-    scanner = request.app.get("scanner")
-    if not scanner:
-        return web.json_response({"ok": False, "mode": "single_strategy"})
-    if hasattr(scanner, "get_summary"):
-        return web.json_response({"ok": True, **scanner.get_summary()})
-    return web.json_response({"ok": True, **scanner.get_scan_summary()})
-
-
-async def scanner_config_handler(request: web.Request) -> web.Response:
-    """Update scanner config (strategy, segments, capital_pct) without full restart."""
-    body         = await request.json()
-    scanner      = request.app.get("scanner")
-    if not scanner:
-        return web.json_response({"ok": False, "error": "Scanner not running"}, status=404)
-
-    if "strategy_key" in body:
-        new_key = body["strategy_key"]
-        if new_key in STRATEGY_MAP:
-            scanner.strategy_key = new_key
-            scanner._cfg_cls, scanner._cfg_type = STRATEGY_MAP[new_key]
-            scanner._strategies.clear()   # reset per-stock instances
-    if "segments" in body:
-        segs = body["segments"]
-        fno_sc = request.app.get("fno_scanner")
-        eq_sc  = request.app.get("equity_scanner")
-
-        # F&O scanner: map NSE_FNO / BSE_FNO → active_segments
-        if fno_sc and hasattr(fno_sc, "active_segments"):
-            active = []
-            if "NSE_FNO" in segs: active.append("NSE_FNO")
-            if "BSE_FNO" in segs: active.append("BSE_FNO")
-            fno_sc.active_segments = active or []
-            # Pause entirely if no F&O segments selected
-            fno_sc._paused = len(active) == 0
-            logger.info(f"F&O scanner segments: {active} | paused={fno_sc._paused}")
-
-        # Equity scanner: pause/resume based on NSE_EQ checkbox
-        if eq_sc and hasattr(eq_sc, "_paused"):
-            eq_sc._paused = "NSE_EQ" not in segs
-            logger.info(f"Equity scanner paused={eq_sc._paused}")
-    if "capital_pct" in body:
-        scanner.capital_pct = float(body["capital_pct"])
-    if "max_positions" in body:
-        scanner.max_positions = int(body["max_positions"])
-    if "hedge_fno" in body:
-        scanner.hedge_fno = bool(body["hedge_fno"])
-
-    resp: dict = {"ok": True}
-    if hasattr(scanner, "strategy_key"):
-        resp["strategy_key"] = scanner.strategy_key
-    if hasattr(scanner, "active_segments"):
-        resp["segments"] = scanner.active_segments
-    elif hasattr(scanner, "segments"):
-        resp["segments"] = scanner.segments
-    if hasattr(scanner, "capital_pct"):
-        resp["capital_pct"] = scanner.capital_pct
-    return web.json_response(resp)
 
 
 async def logs_handler(_request: web.Request) -> web.Response:
@@ -675,125 +380,18 @@ async def trades_handler(request: web.Request) -> web.Response:
     })
 
 
-async def backtest_run_handler(request: web.Request) -> web.Response:
-    body        = await request.json()
-    strategy_key = body.get("strategy", "sma_crossover")
-    security_id  = body.get("security_id", "2885")
-    segment      = body.get("segment", "NSE_EQ")
-    from_date    = body.get("from_date", "2026-01-01")
-    to_date      = body.get("to_date",   "2026-05-01")
-    quantity     = int(body.get("quantity",    1))
-    fast_period  = int(body.get("fast_period", 9))
-    slow_period  = int(body.get("slow_period", 21))
-    interval     = body.get("interval", "D")
-
-    try:
-        client = request.app["client"]
-
-        # ── Fetch historical bars ─────────────────────────────────────────────
-        instrument = "EQUITY" if segment == "NSE_EQ" else "INDEX"
-        if interval == "D":
-            raw = await client.get_daily_historical(
-                security_id=security_id, exchange_segment=segment,
-                instrument=instrument, from_date=from_date, to_date=to_date,
-            )
-        else:
-            raw = await client.get_intraday_historical(
-                security_id=security_id, exchange_segment=segment,
-                instrument=instrument, interval=interval,
-                from_date=from_date, to_date=to_date,
-            )
-
-        closes     = raw.get("close",     [])
-        opens      = raw.get("open",      closes)
-        highs      = raw.get("high",      closes)
-        lows       = raw.get("low",       closes)
-        volumes    = raw.get("volume",    [0] * len(closes))
-        timestamps = raw.get("timestamp", raw.get("start_Time", list(range(len(closes)))))
-
-        if not closes:
-            return web.json_response({
-                "ok": False,
-                "error": "No historical data returned — check security_id, segment and date range."
-            }, status=400)
-
-        bars = [
-            {
-                "date":   str(timestamps[i])[:10] if i < len(timestamps) else str(i),
-                "open":   opens[i],
-                "high":   highs[i],
-                "low":    lows[i],
-                "close":  closes[i],
-                "volume": volumes[i] if i < len(volumes) else 0,
-            }
-            for i in range(len(closes))
-        ]
-
-        # ── Build strategy + backtester ───────────────────────────────────────
-        base_kwargs = dict(
-            security_id=security_id, exchange_segment=segment,
-            product_type="INTRADAY", quantity=quantity, paper_trading=True,
-        )
-
-        if strategy_key == "sma_crossover":
-            cfg = SMAConfig(name=f"SMA_{fast_period}_{slow_period}",
-                            fast_period=fast_period, slow_period=slow_period,
-                            **base_kwargs)
-            bt = Backtester(SMACrossoverStrategy, cfg)
-
-        elif strategy_key == "rsi_scalper":
-            cfg = RSIConfig(name="RSI_Scalper", **base_kwargs)
-            bt  = Backtester(RSIScalperStrategy, cfg)
-
-        elif strategy_key == "momentum_breakout":
-            cfg = MomentumConfig(name="Momentum_Breakout", **base_kwargs)
-            bt  = Backtester(MomentumBreakoutStrategy, cfg)
-
-        elif strategy_key == "mean_reversion":
-            cfg = MeanReversionConfig(name="Mean_Reversion", **base_kwargs)
-            bt  = Backtester(MeanReversionStrategy, cfg)
-
-        elif strategy_key == "bollinger":
-            cfg = BollingerConfig(name="Bollinger_Reversion", **base_kwargs)
-            bt  = Backtester(BollingerReversionStrategy, cfg)
-
-        elif strategy_key == "vwap_reversion":
-            cfg = VWAPConfig(name="VWAP_Reversion", **base_kwargs)
-            bt  = Backtester(VWAPReversionStrategy, cfg)
-
-        else:
-            return web.json_response({"ok": False, "error": f"Unknown strategy: {strategy_key}"}, status=400)
-
-        result = await bt.run(bars)
-        return web.json_response({
-            "ok":           True,
-            "bars":         len(bars),
-            "strategy":     strategy_key,
-            "symbol":       body.get("symbol", security_id),
-            "summary":      result.summary(),
-            "equity_curve": result.equity_curve,
-            "trades":       result.trades,
-        })
-
-    except Exception as e:
-        logger.error(f"Backtest error: {e}")
-        return web.json_response({"ok": False, "error": str(e)}, status=500)
-
-
-# ── New: data pipeline + AI handlers ─────────────────────────────────────────
+# ── Data pipeline + AI handlers ───────────────────────────────────────────────
 
 # Simple TTL caches so slow queries/subprocesses don't block every poll
 _CACHE: dict = {}
 
 def _cache_get(key: str, ttl_seconds: int):
-    import time
     entry = _CACHE.get(key)
     if entry and (time.monotonic() - entry["ts"]) < ttl_seconds:
         return entry["val"]
     return None
 
 def _cache_set(key: str, val):
-    import time
     _CACHE[key] = {"val": val, "ts": time.monotonic()}
 
 
@@ -965,9 +563,9 @@ async def hermes_status_handler(_request: web.Request) -> web.Response:
 async def start_server(app: web.Application):
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", WEBHOOK_PORT)
+    site = web.TCPSite(runner, "0.0.0.0", cfg.webhook_port)
     await site.start()
-    logger.info(f"🌐 Dashboard: http://localhost:{WEBHOOK_PORT}")
+    logger.info(f"🌐 Dashboard: http://localhost:{cfg.webhook_port}")
     return runner
 
 
@@ -975,10 +573,8 @@ def build_app() -> web.Application:
     """Create the web app with all routes and pre-init placeholder state.
 
     Called BEFORE the heavy startup work (token, watchlist, screener) so the
-    port binds within seconds. The external watchdog probes /api/status — if
-    binding waited for the screener query (slow while the backfill hammers
-    the DB), the watchdog would kill the process mid-boot. Handlers must
-    tolerate the placeholder Nones until main() fills in the real objects.
+    port binds within seconds. Handlers must tolerate the placeholder Nones
+    until main() fills in the real objects.
     """
     app = web.Application(middlewares=[cors_middleware])
 
@@ -987,8 +583,10 @@ def build_app() -> web.Application:
     app["risk"]           = None
     app["client"]         = None
     app["auth_manager"]   = None
+    app["orb_strategies"] = []
+    app["orb_tasks"]      = []
     app["start_time"]     = time.time()
-    app["paper_trading"]  = PAPER_TRADING
+    app["paper_trading"]  = cfg.paper_trading
     app["runtime_config"] = {}
 
     # ── Data pipeline + AI endpoints ──────────────────────────────────────
@@ -1008,27 +606,18 @@ def build_app() -> web.Application:
     app.router.add_get("/api/signals",            signals_handler)
     app.router.add_get("/api/funds",              funds_handler)
     app.router.add_get("/api/positions",          positions_handler)
-    app.router.add_get("/api/paper/positions",   paper_positions_handler)
-    app.router.add_get("/api/scalper",            scalper_handler)
-    app.router.add_get("/api/instruments",        instruments_handler)
+    app.router.add_get("/api/paper/positions",    paper_positions_handler)
     app.router.add_get("/api/auth",               auth_handler)
     app.router.add_get("/api/config",             config_handler)
-    app.router.add_get("/api/payoff",             payoff_handler)
     app.router.add_get("/api/instruments/search", instrument_search_handler)
     app.router.add_get("/api/instruments/price",  instrument_price_handler)
-    app.router.add_post("/api/strategy/switch",   switch_strategy_handler)
     app.router.add_post("/api/killswitch",        killswitch_handler)
     app.router.add_get("/api/logs",               logs_handler)
     app.router.add_get("/api/feed",               feed_handler)
     app.router.add_get("/api/trades",             trades_handler)
-    app.router.add_post("/api/backtest/run",      backtest_run_handler)
     app.router.add_get("/api/market",             market_status_handler)
     app.router.add_get("/api/watchlist",          watchlist_handler)
     app.router.add_post("/api/watchlist/refresh", watchlist_refresh_handler)
-    app.router.add_get("/api/scanner",            scanner_handler)
-    app.router.add_get("/api/scanner/fno",        lambda r: web.json_response({"ok":True, **r.app["fno_scanner"].get_summary()}))
-    app.router.add_get("/api/scanner/equity",     lambda r: web.json_response({"ok":True, **r.app["equity_scanner"].get_scan_summary()}))
-    app.router.add_post("/api/scanner/config",    scanner_config_handler)
     app.router.add_post("/postback",              postback_handler)
 
     # Serve React build assets if available
@@ -1041,50 +630,47 @@ def build_app() -> web.Application:
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 async def main():
     logger.info("=" * 60)
-    logger.info("  DhanHQ Algo Trading Platform  v1.0")
-    logger.info(f"  Mode:     {'📝 PAPER TRADING' if PAPER_TRADING else '🔴 LIVE TRADING'}")
-    logger.info(f"  Strategy: {STRATEGY.upper()}")
-    logger.info(f"  Client:   {CLIENT_ID}")
+    logger.info("  DhanHQ Algo Trading Platform  v2.0")
+    logger.info(f"  Mode:     {'📝 PAPER TRADING' if cfg.paper_trading else '🔴 LIVE TRADING'}")
+    logger.info(f"  Strategy: ORB + Kronos ({'SHADOW' if cfg.kronos_shadow_mode else 'ENFORCING'} gate)")
+    logger.info(f"  Client:   {cfg.dhan_client_id}")
     logger.info("=" * 60)
 
-    if not PAPER_TRADING:
+    if not cfg.paper_trading:
         logger.warning("⚠️  LIVE TRADING MODE — real money at risk!")
 
     # ── Web server FIRST — bind the port before any slow startup work ─────────
     app = build_app()
     server_runner = await start_server(app)
 
-    # ── Auth: use MasterTokenManager (single owner of token refresh) ──────────
+    # ── Auth: MasterTokenManager is the single owner of token refresh ─────────
     # backfill.py reads the token from dhan_token.json — never generates itself
     from core.token_manager import MasterTokenManager
-    global _auth_manager
     master_tm = MasterTokenManager()
     access_token = await master_tm.load_or_generate()
-    _auth_manager = master_tm   # kept for /api/auth endpoint compat
     logger.info("🔑 MasterTokenManager active — sole token owner")
 
     async with DhanClient(
-        client_id=CLIENT_ID,
+        client_id=cfg.dhan_client_id,
         access_token=access_token,
         auth_manager=master_tm,
-        sandbox=PAPER_TRADING,
     ) as dhan:
 
-        # max_loss_per_trade: premium paid per options position (full upfront cost)
-        # Paper: 20% of paper balance → ₹100k with default ₹5L, covers FINNIFTY lots
-        # Live:  tighten to ₹25,000 before going live
-        _trade_risk = int(PAPER_BALANCE * 0.20) if PAPER_TRADING else 25_000
+        # max_loss_per_trade: notional cap per position.
+        # Paper: 20% of paper balance. Live: tighten before going live.
+        _trade_risk = int(cfg.paper_balance * 0.20) if cfg.paper_trading else 25_000
+
         # ── DB backend (non-blocking audit trail) ─────────────────────────────
         from core.journal import get_db_backend
         db = get_db_backend()
         await db.connect()
         run_id = await db.log_run_start(
-            mode="PAPER" if PAPER_TRADING else "LIVE",
-            strategy=STRATEGY,
+            mode="PAPER" if cfg.paper_trading else "LIVE",
+            strategy="orb",
         )
 
         risk_cfg = RiskConfig(
-            max_daily_loss=MAX_DAILY_LOSS,
+            max_daily_loss=cfg.max_daily_loss,
             max_open_positions=10,
             max_loss_per_trade=_trade_risk,
             check_interval_seconds=30,
@@ -1098,67 +684,57 @@ async def main():
         # ── Watchlist (top movers from NSE) ──────────────────────────────────
         watchlist = await WatchlistManager.build()
 
-        # ── Strategy: ORB + Kronos (the only active strategy) ────────────────
-        # SMA/scalper/straddle are kept in strategies/ for reference but are
-        # not started here. ORB is the sole execution engine; Kronos gates entries.
+        # ── Strategy: ORB + Kronos (the only strategy) ───────────────────────
         from strategies.strategy_orb import ORBStrategy, ORBConfig
         from core.kronos_signal import get_kronos_engine
 
         # Kronos engine is a lazy singleton — model loads from HuggingFace on
-        # first _kronos_allows() call (market open). Don't pre-load here:
-        # backfill (152MB) + Hermes (190MB) already consume most of the 1GB RAM
-        # on t4g.micro. PyTorch adds ~300MB — pre-loading would OOM the instance.
-        # Upgrade to t4g.medium if you want eager model loading.
+        # first score call. Don't pre-load: PyTorch adds ~300MB and the box
+        # also runs the backfill + Hermes.
         kronos = get_kronos_engine()
 
         # ── Watchlist: dynamic screener only — no static fallback ────────────
-        n_watch = int(os.getenv("WATCHLIST_N", "5"))
         from core.nse_screener import get_top_volatile
-        from urllib.parse import quote_plus
         from db import init_db as _init_db_screener
-        _init_db_screener(
-            f"postgresql+psycopg2://{quote_plus(_cfg.db_user)}:{quote_plus(_cfg.db_password)}"
-            f"@{_cfg.db_host}:{_cfg.db_port}/{_cfg.db_name}"
-        )
+        _init_db_screener(cfg.db_url)
         # Executor: this scan takes up to its 20s statement timeout while the
         # backfill writes to the same DB — must not block the event loop.
         screener_results = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: get_top_volatile(n=n_watch, min_avg_volume=10_000)
+            None, lambda: get_top_volatile(n=cfg.watchlist_n, min_avg_volume=10_000)
         )
         watchlist_ids = [r["security_id"] for r in screener_results]
         if watchlist_ids:
             logger.info("Screener watchlist (%d): %s", len(watchlist_ids), watchlist_ids)
         else:
-            # Screener timed out (backfill contention) or bars table empty — fall back to cached watchlist
-            watchlist_ids = [s.security_id for s in watchlist.get()[:n_watch]]
+            # Screener timed out (backfill contention) or bars table empty
+            watchlist_ids = [s.security_id for s in watchlist.get()[:cfg.watchlist_n]]
             if watchlist_ids:
-                logger.warning("Screener returned 0 — using cached watchlist fallback (%d): %s", len(watchlist_ids), watchlist_ids)
+                logger.warning("Screener returned 0 — using cached watchlist fallback (%d): %s",
+                               len(watchlist_ids), watchlist_ids)
             else:
                 logger.warning("Screener and watchlist cache both empty — no ORB strategies will run")
+
         orb_cfg = ORBConfig(
-            orb_minutes=_cfg.orb_range_minutes,
+            orb_minutes=cfg.orb_range_minutes,
             use_kronos=True,
-            kronos_min_confidence=float(os.getenv("KRONOS_MIN_CONFIDENCE", "0.4")),
+            kronos_min_confidence=cfg.kronos_min_confidence,
+            kronos_shadow=cfg.kronos_shadow_mode,
         )
+        from strategies.strategy_base import StrategyConfig
         strategies_list = []
-        # Stagger poll intervals so N concurrent strategies don't burst-hit
-        # the quote endpoint simultaneously.
-        # Each gets an extra (index * stagger) seconds, then all poll at
-        # POLL_INTERVAL thereafter.  With 4 strategies + 5s stagger = one
-        # quote call every 5s across the group = 0.2 req/s (well under 1/s).
-        base_interval = float(os.getenv("POLL_INTERVAL", "20.0"))  # 20s default
-        stagger_sec   = base_interval / max(len(watchlist_ids), 1)
+        # Stagger poll starts so N concurrent strategies don't burst-hit the
+        # quote endpoint simultaneously (Dhan quote limit ~1 req/s).
+        stagger_sec = cfg.poll_interval / max(len(watchlist_ids), 1)
         for idx, sid in enumerate(watchlist_ids):
-            from strategies.strategy_base import StrategyConfig
             scfg = StrategyConfig(
                 name=f"ORB_{sid}",
                 security_id=sid,
-                exchange_segment=_cfg.watchlist_exchange_segment,
+                exchange_segment=cfg.watchlist_exchange_segment,
                 product_type="INTRADAY",
-                quantity=int(os.getenv("TRADE_QUANTITY", "1")),
-                poll_interval=base_interval,
-                paper_trading=PAPER_TRADING,
-                max_orders=int(os.getenv("MAX_ORDERS_PER_SESSION", "4")),
+                quantity=cfg.trade_quantity,
+                poll_interval=cfg.poll_interval,
+                paper_trading=cfg.paper_trading,
+                max_orders=cfg.max_orders_per_session,
             )
             strategies_list.append(
                 ORBStrategy(dhan, risk, scfg, orb_config=orb_cfg,
@@ -1169,101 +745,50 @@ async def main():
             )
 
         logger.info("ORB+Kronos active on %d securities: %s", len(strategies_list), watchlist_ids)
-        # Use the first strategy as the primary for /api/status duck-typing
         strategy = strategies_list[0] if strategies_list else None
 
-        # ── Live WebSocket feed (replaces REST polling for all securities) ───
-        live_feed = LiveFeed(CLIENT_ID, access_token)
-
-        # Subscribe all index underlyings (F&O scanner)
-        live_feed.subscribe({"IDX_I": [13, 25, 51, 27, 38, 93]})
-
-        # Subscribe top NSE_EQ stocks from watchlist
-        eq_sids = [int(s.security_id) for s in watchlist.get() if s.security_id.isdigit()]
+        # ── Live WebSocket feed ───────────────────────────────────────────────
+        # Phase 1 wires this into a BarBuilder → bars table so Kronos scores
+        # fresh data. For now it backs /api/feed.
+        live_feed = LiveFeed(cfg.dhan_client_id, access_token)
+        eq_sids = sorted({int(sid) for sid in watchlist_ids if sid.isdigit()} |
+                         {int(s.security_id) for s in watchlist.get() if s.security_id.isdigit()})
         if eq_sids:
             live_feed.subscribe({"NSE_EQ": eq_sids})
-
         logger.info(f"🔌 Live feed subscribed: {len(live_feed.all_subscribed_sids())} instruments via WebSocket")
 
-        # ── Both scanners run in parallel ────────────────────────────────────
-        # 1. Index Options Scanner (NSE_FNO + BSE_FNO) — always runs
-        fno_scanner = IndexOptionsScanner(
-            client        = dhan,
-            risk_manager  = risk,
-            live_feed     = live_feed,      # WebSocket ticks; REST fallback if not connected
-            paper_trading = PAPER_TRADING,
-            capital_pct   = 0.35,
-            poll_interval = 10.0,
-            paper_balance = PAPER_BALANCE,
-        )
-        logger.info("🔭 F&O Scanner: NIFTY · BANKNIFTY · SENSEX · FINNIFTY · NIFTYNXT50 · MIDCPNIFTY")
-
-        # 2. Equity Scanner (NSE_EQ top movers) — always runs
-        # Equity: poll every 60s → SMA 20/50 = 20-min/50-min (institutional standard)
-        # Avoids false crosses on 10s noisy REST data
-        equity_scanner = MultiStockScanner(
-            client        = dhan,
-            risk_manager  = risk,
-            watchlist     = watchlist,
-            strategy_key  = STRATEGY if STRATEGY not in ("scalper","index_options") else "momentum_breakout",
-            segments      = ["NSE_EQ"],
-            paper_trading = PAPER_TRADING,
-            capital_pct   = 0.35,
-            hedge_fno     = False,
-            max_positions = 999,
-            poll_interval = 60.0,   # 60s candles → cleaner signals, less noise
-            paper_balance = PAPER_BALANCE,
-        )
-        logger.info("📊 Equity Scanner: top 15 NSE movers · SMA crossover")
-
-        # ── Launch ORB strategies (market hours only — see run() override below) ─
+        # ── Launch ORB strategies (market-hours gated inside run()) ──────────
         orb_tasks = [asyncio.create_task(s.run(), name=f"orb_{s.config.security_id}")
                      for s in strategies_list]
 
-        # Legacy scanners: do NOT start their run() loops — they hit the quote
-        # API continuously and cause 429 errors. Kept only so /api/scanner
-        # endpoints can return their last in-memory state if polled.
-        fno_task    = asyncio.create_task(asyncio.sleep(0), name="fno_noop")
-        equity_task = asyncio.create_task(asyncio.sleep(0), name="equity_noop")
-
         # ── Kronos live scanner — continuous screener + scoring ──────────────
-        # Gated by KRONOS_SCANNER_ENABLED (default on). Disable to free CPU for
-        # the historical backfill — Kronos inference is CPU-heavy on t4g.
-        scanner_task = None
-        if os.getenv("KRONOS_SCANNER_ENABLED", "true").lower() in ("1", "true", "yes"):
+        # Disable via KRONOS_SCANNER_ENABLED=false to free CPU for the backfill.
+        if cfg.kronos_scanner_enabled:
             from core.kronos_scanner import KronosScanner
-            kronos_scanner = KronosScanner(kronos, db_backend=db, n=int(os.getenv("WATCHLIST_N", "5")))
-            scanner_task = asyncio.create_task(kronos_scanner.run(), name="kronos_scanner")
+            kronos_scanner = KronosScanner(kronos, db_backend=db, n=cfg.watchlist_n)
+            asyncio.create_task(kronos_scanner.run(), name="kronos_scanner")
             app["kronos_scanner"] = kronos_scanner
         else:
             logger.info("Kronos live scanner DISABLED (KRONOS_SCANNER_ENABLED=false)")
 
         app["risk"]           = risk
         app["strategy"]       = strategy
-        app["strategy_task"]  = orb_tasks[0] if orb_tasks else fno_task
-        app["equity_task"]    = equity_task
+        app["orb_strategies"] = strategies_list
         app["orb_tasks"]      = orb_tasks
         app["client"]         = dhan
-        app["auth_manager"]   = _auth_manager
+        app["auth_manager"]   = master_tm
         app["start_time"]     = time.time()
-        app["paper_trading"]  = PAPER_TRADING   # mutable; updated by /api/mode
-        get_trade_logger()                      # initialise + log session start
+        app["paper_trading"]  = cfg.paper_trading   # mutable; updated by /api/mode
+        get_trade_logger()                          # initialise + log session start
         app["watchlist"]      = watchlist
-        app["fno_scanner"]    = fno_scanner
-        app["equity_scanner"] = equity_scanner
-        app["scanner"]        = fno_scanner
         app["live_feed"]      = live_feed
-        first_orb = strategies_list[0] if strategies_list else None
         app["runtime_config"] = {
-            "strategy":    "orb+kronos",
-            "segment":     _cfg.watchlist_exchange_segment,
-            "security_id": first_orb.config.security_id if first_orb else "",
-            "quantity":    first_orb.config.quantity if first_orb else 1,
-            "num_lots":    1,
+            "strategy":      "orb+kronos",
+            "kronos_gate":   "shadow" if cfg.kronos_shadow_mode else "enforcing",
+            "segment":       cfg.watchlist_exchange_segment,
+            "watchlist":     watchlist_ids,
+            "quantity":      cfg.trade_quantity,
         }
-
-        # Routes registered + server started in build_app()/start_server() at
-        # the top of main() — port must bind before slow startup work.
 
         # ── Graceful shutdown ─────────────────────────────────────────────────
         loop       = asyncio.get_event_loop()
@@ -1271,10 +796,8 @@ async def main():
 
         def _shutdown(sig, frame):
             logger.info(f"Signal {sig.name} received — shutting down…")
-            if strategy:
-                strategy.stop()
-            fno_scanner.stop()
-            equity_scanner.stop()
+            for s in strategies_list:
+                s.stop()
             stop_event.set()
 
         for s in (signal.SIGINT, signal.SIGTERM):
@@ -1284,26 +807,21 @@ async def main():
                 pass
 
         logger.info("🚀 Launching tasks…")
-        strategy_task  = app["strategy_task"]
-        equity_task    = app["equity_task"]
-        feed_task      = asyncio.create_task(live_feed.run(), name="live_feed")
+        feed_task = asyncio.create_task(live_feed.run(), name="live_feed")
 
         tasks = [
             asyncio.create_task(risk.run(),        name="risk_monitor"),
+            asyncio.create_task(master_tm.run(),   name="token_manager"),
             asyncio.create_task(stop_event.wait(), name="shutdown_watcher"),
         ]
-        if _auth_manager:
-            tasks.append(asyncio.create_task(_auth_manager.run(), name="auth_manager"))
 
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
         live_feed.stop()
-        for t in [strategy_task, equity_task, feed_task]:
+        for t in [*orb_tasks, feed_task, *pending]:
             if not t.done():
                 t.cancel()
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(strategy_task, equity_task, feed_task, *pending, return_exceptions=True)
+        await asyncio.gather(*orb_tasks, feed_task, *pending, return_exceptions=True)
         await server_runner.cleanup()
         await db.log_run_stop(run_id, outcome="stopped")
         logger.info("✅ Platform shut down cleanly")

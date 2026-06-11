@@ -58,6 +58,11 @@ class ORBConfig:
     # Kronos pre-filter: require model agreement before entering
     use_kronos: bool = True
     kronos_min_confidence: float = 0.4   # minimum Kronos confidence to allow entry
+    # Shadow mode: score and log every gate decision but NEVER block a trade.
+    # On until calibration proves the gate adds value — all decisions made
+    # before 2026-06-11 were scored on stale data (live bars weren't written)
+    # so the 0.4 threshold has no track record behind it.
+    kronos_shadow: bool = True
 
 
 class ORBStrategy(BaseStrategy):
@@ -138,10 +143,11 @@ class ORBStrategy(BaseStrategy):
             return None
 
         # ── 1. Build opening range ──────────────────────────────────────
-        or_end_t = dtime(
-            _MARKET_OPEN.hour,
-            _MARKET_OPEN.minute + self.orb_cfg.orb_minutes,
-        )
+        # timedelta arithmetic — naive dtime(h, m+orb) raises ValueError
+        # for any orb_minutes ≥ 45 (minute overflows 60)
+        from datetime import date as _date, datetime as _dt, timedelta as _td
+        or_end_t = (_dt.combine(_date.today(), _MARKET_OPEN)
+                    + _td(minutes=self.orb_cfg.orb_minutes)).time()
 
         if _MARKET_OPEN <= now_t < or_end_t and not self._or_locked:
             ohlc = tick.get("ohlc", {})
@@ -228,7 +234,12 @@ class ORBStrategy(BaseStrategy):
         return None
 
     async def _kronos_allows(self, direction: str) -> bool:
-        """Return True if Kronos agrees with the proposed trade direction (or is disabled)."""
+        """Return True if Kronos agrees with the proposed trade direction.
+
+        In shadow mode the verdict is computed and logged but never enforced —
+        the trade always proceeds. This collects gate-decision data without
+        betting on an uncalibrated threshold.
+        """
         if not self.orb_cfg.use_kronos or self._kronos is None:
             return True
         try:
@@ -239,10 +250,18 @@ class ORBStrategy(BaseStrategy):
             model_side = result.get("side", "HOLD")
             confidence = result.get("confidence", 0.0)
             agrees = (model_side == direction) and (confidence >= self.orb_cfg.kronos_min_confidence)
+            verdict = "ALLOW" if agrees else "BLOCK"
+            if self.orb_cfg.kronos_shadow:
+                logger.info(
+                    "[%s] [SHADOW] Kronos says %s (conf=%.2f, fcst_ret=%.4f)  ORB wants %s  "
+                    "→ would %s (not enforced)",
+                    self.config.name, model_side, confidence,
+                    result.get("forecasted_return", 0.0), direction, verdict,
+                )
+                return True
             logger.info(
                 "[%s] Kronos says %s (conf=%.2f)  ORB wants %s  → %s",
-                self.config.name, model_side, confidence, direction,
-                "ALLOW" if agrees else "BLOCK",
+                self.config.name, model_side, confidence, direction, verdict,
             )
             return agrees
         except Exception as exc:
