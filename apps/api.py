@@ -84,6 +84,91 @@ async def health_handler(_r: web.Request) -> web.Response:
     })
 
 
+async def snapshot_handler(_r: web.Request) -> web.Response:
+    """One payload for the dashboard's fast loop — replaces 5 separate 1s
+    pollers. Everything here is a file read; never touches the DB."""
+    hb, alive = read_heartbeat()
+    return web.json_response({
+        "ok": True,
+        "alive": alive,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "trader": hb,
+        "limits": {
+            "max_daily_loss": cfg.max_daily_loss,
+            "paper_balance": cfg.paper_balance,
+            "max_orders_per_session": cfg.max_orders_per_session,
+            "max_open_positions": cfg.max_open_positions,
+        },
+    })
+
+
+async def kronos_gate_handler(_r: web.Request) -> web.Response:
+    """Today's persisted gate verdicts + the latest calibration verdict."""
+    cached = _cache_get("gate_panel", 20)
+    if cached:
+        return web.json_response(cached)
+
+    def _decisions():
+        from db import get_engine
+        from sqlalchemy import text
+        with get_engine().connect() as conn:
+            rows = conn.execute(text("""
+                SELECT s.security_id, s.side, s.confidence, s.ts,
+                       s.features_snapshot, i.ticker
+                FROM signals s
+                LEFT JOIN instruments i ON i.security_id = s.security_id
+                WHERE s.strategy = 'orb_gate' AND s.ts::date = CURRENT_DATE
+                ORDER BY s.ts DESC LIMIT 50
+            """)).fetchall()
+        out = []
+        for sid, side, conf, ts, feat, ticker in rows:
+            f = feat if isinstance(feat, dict) else json.loads(feat or "{}")
+            out.append({
+                "security_id": sid, "ticker": ticker or sid,
+                "model_side": side, "confidence": float(conf or 0),
+                "ts": str(ts),
+                "requested_direction": f.get("requested_direction"),
+                "verdict": f.get("verdict"),
+                "shadow": f.get("shadow", True),
+                "data_age_min": f.get("data_age_min"),
+                "stale": f.get("stale"),
+            })
+        return out
+
+    def _calibration():
+        # Heavy-ish; separately cached for 10 minutes
+        cached_cal = _cache_get("gate_calibration", 600)
+        if cached_cal:
+            return cached_cal
+        from ml.calibration import build_report
+        rep = build_report(days=30)
+        cal = {
+            "recommendation": rep["recommendation"],
+            "fresh_n": rep["model_accuracy"]["fresh"]["n"],
+            "fresh_accuracy": rep["model_accuracy"]["fresh"]["accuracy"],
+            "recommended_min_confidence": rep["recommended_min_confidence"],
+            "gate_value": rep["gate_value"],
+        }
+        _cache_set("gate_calibration", cal)
+        return cal
+
+    loop = asyncio.get_event_loop()
+    try:
+        decisions = await loop.run_in_executor(None, _decisions)
+    except Exception as exc:
+        decisions = []
+        logger.warning("gate decisions query failed: %s", exc)
+    try:
+        calibration = await loop.run_in_executor(None, _calibration)
+    except Exception as exc:
+        calibration = None
+        logger.warning("calibration summary failed: %s", exc)
+
+    result = {"ok": True, "decisions": decisions, "calibration": calibration}
+    _cache_set("gate_panel", result)
+    return web.json_response(result)
+
+
 async def status_handler(request: web.Request) -> web.Response:
     hb, alive = read_heartbeat()
     strategies = hb.get("strategies", [])
@@ -590,6 +675,8 @@ def build_app() -> web.Application:
 
     app.router.add_get("/", dashboard_handler)
     app.router.add_get("/health", health_handler)
+    app.router.add_get("/api/snapshot", snapshot_handler)
+    app.router.add_get("/api/kronos/gate", kronos_gate_handler)
     app.router.add_get("/api/status", status_handler)
     app.router.add_get("/api/risk", risk_handler)
     app.router.add_get("/api/feed", feed_handler)

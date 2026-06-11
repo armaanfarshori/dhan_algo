@@ -1,32 +1,64 @@
 import { usePoller } from './usePoller'
 
 export function useDashboardData() {
-  // ── Fast (1s) — live trading data ─────────────────────────────────────────
-  const status        = usePoller('/api/status',           1000)
-  const risk          = usePoller('/api/risk',             1000)
-  const signals       = usePoller('/api/signals',          1000)
-  const logs          = usePoller('/api/logs?limit=60',    1000)
+  // ── Fast loop: ONE snapshot every 2s (heartbeat file read, no DB) ──────────
+  // Replaces the old 1s pollers for status / risk / paper positions.
+  const snapshot = usePoller('/api/snapshot', 2000)
+  const trader   = snapshot.data?.trader ?? null
+  const alive    = snapshot.data?.alive ?? false
+  const limits   = snapshot.data?.limits ?? {}
 
-  // ── Medium (5s) — position + backfill progress ────────────────────────────
-  const positions      = usePoller('/api/positions',        5000)
-  const paperPositions = usePoller('/api/paper/positions',  1000)
-  const tradelog       = usePoller('/api/trades?limit=500', 5000)
-  const backfill       = usePoller('/api/backfill/status',  5000)
+  // ── Medium ─────────────────────────────────────────────────────────────────
+  const signals  = usePoller('/api/signals',          5000)
+  const logs     = usePoller('/api/logs?limit=60',    3000)
+  const tradelog = usePoller('/api/trades?limit=500', 10000)
+  const backfill = usePoller('/api/backfill/status',  10000)
+  const positions = usePoller('/api/positions',       10000)
 
-  // ── Slow (15-60s) — account / DB / AI data ────────────────────────────────
-  const funds         = usePoller('/api/funds',            10000)
-  const config        = usePoller('/api/config',           10000)
-  const watchlist     = usePoller('/api/watchlist',        15000)
-  const market        = usePoller('/api/market',           30000)
-  const dbStats       = usePoller('/api/db/stats',         60000)   // cached 60s server-side
-  const kronosSignals = usePoller('/api/kronos/signals',   30000)
-  const kronosLive    = usePoller('/api/kronos/live',      10000)   // live scanner state
-  const screener      = usePoller('/api/kronos/screener',  120000)  // ATR screener is expensive
-  const hermes        = usePoller('/api/hermes/status',    60000)   // cached 30s server-side
+  // ── Slow ───────────────────────────────────────────────────────────────────
+  const gate          = usePoller('/api/kronos/gate',    30000)
+  const funds         = usePoller('/api/funds',          15000)
+  const watchlist     = usePoller('/api/watchlist',      30000)
+  const market        = usePoller('/api/market',         30000)
+  const dbStats       = usePoller('/api/db/stats',       60000)
+  const kronosSignals = usePoller('/api/kronos/signals', 30000)
+  const kronosLive    = usePoller('/api/kronos/live',    15000)
+  const screener      = usePoller('/api/kronos/screener', 300000)  // server caches 5 min
+  const hermes        = usePoller('/api/hermes/status',  60000)
+
+  // ── Legacy-shape adapters (older panels expect /api/status & /api/risk) ───
+  const first = trader?.strategies?.[0]
+  const status = {
+    loading: snapshot.loading, error: snapshot.error,
+    data: trader ? {
+      mode: trader.mode,
+      paper_trading: trader.mode !== 'LIVE',
+      trader_alive: alive,
+      uptime_seconds: trader.uptime_seconds,
+      kronos_gate: trader.kronos_gate,
+      strategy_name: first ? `ORB_${first.security_id}` : 'none',
+      strategy_running: alive && !!first?.running,
+    } : null,
+  }
+  const risk = {
+    loading: snapshot.loading, error: snapshot.error,
+    data: trader?.risk ?? null,
+  }
+  const paperPositions = {
+    loading: snapshot.loading, error: snapshot.error,
+    data: {
+      ok: true,
+      data: (trader?.portfolio?.open_positions ?? []).map(p => ({
+        security_id: p.security_id, qty: p.qty,
+        entry_price: p.avg_price, strategy: p.strategy, in_position: true,
+      })),
+    },
+  }
 
   return {
-    status, risk, signals, funds, positions, paperPositions,
-    config, watchlist, market, tradelog, logs,
+    snapshot, trader, alive, limits, gate,
+    status, risk, paperPositions,
+    signals, funds, positions, watchlist, market, tradelog, logs,
     dbStats, kronosSignals, kronosLive, screener, backfill, hermes,
   }
 }

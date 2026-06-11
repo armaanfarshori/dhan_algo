@@ -50,77 +50,113 @@ function ClockIST() {
 // ─────────────────────────────────────────────────────────────────
 // Header
 // ─────────────────────────────────────────────────────────────────
-function Header({ status, risk, funds }) {
-  const mode     = status?.data?.paper_trading !== false ? 'PAPER' : 'LIVE'
-  const halted   = risk?.data?.halted ?? false
-  const pnl      = risk?.data?.total_pnl ?? 0
-  const agentUp  = !status?.loading && !status?.error
-  const balance  = funds?.data?.data?.availabelBalance ?? 0
+function Badge({ label, tone, pulse }) {
+  const tones = {
+    live:   { bg: T.redD,  fg: T.red,   bd: T.red },
+    paper:  { bg: T.bg3,   fg: T.ink1,  bd: T.line2 },
+    shadow: { bg: T.bg3,   fg: T.amber, bd: T.amber },
+    armed:  { bg: T.bg3,   fg: T.cyan,  bd: T.cyan },
+    ok:     { bg: T.bg3,   fg: T.green, bd: T.greenD },
+    down:   { bg: T.redD,  fg: T.red,   bd: T.red },
+    dim:    { bg: T.bg3,   fg: T.ink3,  bd: T.line },
+  }
+  const c = tones[tone] ?? tones.dim
+  return (
+    <span style={{
+      fontFamily: T.mono, fontSize: 9, letterSpacing: '0.18em',
+      padding: '3px 8px', whiteSpace: 'nowrap',
+      background: c.bg, color: c.fg, border: `1px solid ${c.bd}`,
+      animation: pulse ? 'pulse 1s ease-in-out infinite' : 'none',
+    }}>{label}</span>
+  )
+}
+
+// The status spine answers "is everything OK?" in one glance, on every tab:
+// mode · gate · engine · feed · balance · day P&L · halt — all from the
+// 2s snapshot (trader heartbeat), so a dead engine shows up within seconds.
+function StatusSpine({ data }) {
+  const t       = data.trader
+  const alive   = data.alive
+  const mode    = t?.mode ?? 'PAPER'
+  const gate    = (t?.kronos_gate ?? 'shadow').toUpperCase()
+  const feedOk  = !!t?.feed?.connected
+  const pnl     = t?.portfolio?.total_pnl ?? 0
+  const halted  = !!t?.risk?.halted
+  const balance = data.funds?.data?.data?.availabelBalance ?? 0
 
   return (
     <header style={{
       position: 'sticky', top: 0, zIndex: 100,
       background: T.bg0,
       borderBottom: `1px solid ${T.line}`,
-      display: 'flex', alignItems: 'center', gap: 20,
-      padding: '0 24px', height: 44,
+      display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap',
+      padding: '0 24px', minHeight: 44,
     }}>
-      {/* Logo */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginRight: 8 }}>
-        <span style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 700, color: T.ink0, letterSpacing: '0.1em' }}>
-          DHAN<span style={{ color: T.cyan }}>AI</span>
-        </span>
-      </div>
-
-      {/* Mode badge */}
-      <span style={{
-        fontFamily: T.mono, fontSize: 9, letterSpacing: '0.2em',
-        padding: '3px 8px',
-        background: mode === 'LIVE' ? T.redD : T.bg3,
-        color:      mode === 'LIVE' ? T.red   : T.ink2,
-        border: `1px solid ${mode === 'LIVE' ? T.red : T.line}`,
-      }}>
-        {mode}
+      <span style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 700, color: T.ink0, letterSpacing: '0.1em', marginRight: 4 }}>
+        DHAN<span style={{ color: T.cyan }}>AI</span>
       </span>
 
-      {/* Agent pulse */}
+      <Badge label={mode} tone={mode === 'LIVE' ? 'live' : 'paper'} />
+      <Badge label={`GATE ${gate}`} tone={gate === 'SHADOW' ? 'shadow' : 'armed'} />
+
+      {/* Engine heartbeat */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         <div style={{
           width: 6, height: 6, borderRadius: '50%',
-          background: agentUp ? T.green : T.ink3,
-          boxShadow: agentUp ? `0 0 8px ${T.green}` : 'none',
+          background: alive ? T.green : T.red,
+          boxShadow: `0 0 8px ${alive ? T.green : T.red}`,
+          animation: alive ? 'none' : 'pulse 1s ease-in-out infinite',
         }} />
+        <span style={{ fontFamily: T.mono, fontSize: 10, color: alive ? T.ink3 : T.red }}>
+          {alive ? `ENGINE ${fmtUptime(t?.uptime_seconds ?? 0)}` : 'ENGINE OFFLINE'}
+        </span>
+      </div>
+
+      {/* WS feed */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div style={{ width: 6, height: 6, borderRadius: '50%',
+          background: feedOk ? T.cyan : T.ink3,
+          boxShadow: feedOk ? `0 0 6px ${T.cyan}` : 'none' }} />
         <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>
-          {agentUp ? 'AGENT' : 'OFFLINE'}
+          {feedOk ? `FEED ${t?.feed?.subscribed ?? 0}` : 'FEED —'}
         </span>
       </div>
 
       <div style={{ flex: 1 }} />
 
-      {/* Balance */}
-      <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink2 }}>
-        {INR(balance)}
-      </span>
+      <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink2 }}>{INR(balance)}</span>
 
-      {/* Today PnL */}
       <span style={{
-        fontFamily: T.dot, fontSize: 20,
-        color: colorPnl(pnl),
-        minWidth: 100, textAlign: 'right',
+        fontFamily: T.dot, fontSize: 22,
+        color: colorPnl(pnl), minWidth: 100, textAlign: 'right',
       }}>
         {pnl >= 0 ? '+' : ''}{INR0(pnl)}
       </span>
 
-      {halted && (
-        <span style={{
-          fontFamily: T.mono, fontSize: 9, letterSpacing: '0.2em',
-          padding: '3px 8px', background: T.redD, color: T.red,
-          border: `1px solid ${T.red}`, animation: 'pulse 1s ease-in-out infinite',
-        }}>⛔ HALTED</span>
-      )}
-
+      {halted && <Badge label="⛔ HALTED" tone="down" pulse />}
       <ClockIST />
     </header>
+  )
+}
+
+// Full-width alarm strip when the engine or the API itself is gone. The
+// worst dashboard failure is confidently showing stale numbers — this makes
+// staleness impossible to miss.
+function OfflineBanner({ data }) {
+  const apiDown = !!data.snapshot.error
+  const stale   = !apiDown && data.snapshot.data != null && !data.alive
+  if (!apiDown && !stale) return null
+  const msg = apiDown
+    ? 'DASHBOARD API UNREACHABLE — data frozen · check dhan-api service'
+    : `TRADING ENGINE OFFLINE — last heartbeat ${fmtTime(data.trader?.ts)} · positions are NOT being managed`
+  return (
+    <div style={{
+      background: T.redD, borderBottom: `1px solid ${T.red}`,
+      padding: '8px 24px', display: 'flex', alignItems: 'center', gap: 10,
+    }}>
+      <span style={{ fontFamily: T.mono, fontSize: 11, color: T.red, fontWeight: 700 }}>⛔</span>
+      <span style={{ fontFamily: T.mono, fontSize: 10, color: T.red, letterSpacing: '0.08em' }}>{msg}</span>
+    </div>
   )
 }
 
@@ -301,87 +337,6 @@ function SessionBar({ status }) {
 // ─────────────────────────────────────────────────────────────────
 // Signal card (compact)
 // ─────────────────────────────────────────────────────────────────
-function KronosBoard({ kronosLive }) {
-  const state    = kronosLive?.data ?? {}
-  const results  = state.results ?? []
-  const scanning = state.scanning ?? false
-  const scanCount= state.scan_count ?? 0
-  const lastScan = state.last_scan
-
-  return (
-    <section>
-      {/* Section header with live scanning indicator */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div style={{
-            width: 8, height: 8, borderRadius: '50%',
-            background: scanning ? T.amber : results.length ? T.cyan : T.ink3,
-            boxShadow: (scanning || results.length) ? `0 0 10px ${scanning ? T.amber : T.cyan}` : 'none',
-            animation: scanning ? 'pulse 1s ease-in-out infinite' : 'none',
-          }} />
-          <span style={{ fontFamily: T.mono, fontSize: 11, letterSpacing: '0.22em', color: T.ink0 }}>
-            KRONOS AI
-          </span>
-        </div>
-        <span style={{
-          fontFamily: T.mono, fontSize: 9,
-          color: scanning ? T.amber : T.ink3,
-          letterSpacing: '0.1em',
-        }}>
-          {scanning ? '◉ SCANNING…' : `AAAI 2026 · SCAN #${scanCount}`}
-        </span>
-        {lastScan && (
-          <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, marginLeft: 'auto' }}>
-            LAST SCAN {fmtTime(lastScan)} · re-scans every 3 min
-          </span>
-        )}
-      </div>
-
-      {results.length === 0 ? (
-        <div style={{
-          border: `1px dashed ${T.line2}`, padding: '40px 24px', textAlign: 'center',
-          fontFamily: T.mono, fontSize: 11, color: T.ink3, letterSpacing: '0.1em',
-        }}>
-          {scanning ? 'KRONOS SCANNING WATCHLIST…' : 'WAITING FOR FIRST SCAN'}
-          <div style={{ fontSize: 10, marginTop: 8, color: T.ink3 }}>
-            Scanner runs the ATR screener, then Kronos scores each security
-          </div>
-        </div>
-      ) : (
-        <>
-          {/* Summary strip */}
-          <div style={{ display: 'flex', gap: 20, marginBottom: 14 }}>
-            {[
-              ['BUY',  results.filter(s => s.side==='BUY').length,  T.green],
-              ['SELL', results.filter(s => s.side==='SELL').length, T.red],
-              ['HOLD', results.filter(s => s.side==='HOLD').length, T.ink3],
-            ].map(([label, count, color]) => (
-              <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ fontFamily: T.dot, fontSize: 22, color }}>{count}</span>
-                <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>{label}</span>
-              </div>
-            ))}
-            <span style={{ marginLeft: 'auto', fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>
-              {results.length} SCORED THIS SCAN
-            </span>
-          </div>
-
-          {/* Cards grid — uses names */}
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))',
-            gap: 8,
-          }}>
-            {results.map(sig => (
-              <SignalCard key={sig.security_id} sig={sig} />
-            ))}
-          </div>
-        </>
-      )}
-    </section>
-  )
-}
-
 // ─────────────────────────────────────────────────────────────────
 // Screened-today panel — the day's full screened universe
 // ─────────────────────────────────────────────────────────────────
@@ -428,151 +383,13 @@ function ScreenedToday({ kronosLive }) {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Live signal feed (real-time strategy signals)
-// ─────────────────────────────────────────────────────────────────
-function LiveFeed({ signals }) {
-  // signals API returns a bare list, usePoller wraps it: {data: [...], loading, error}
-  const raw  = signals?.data
-  const rows = (Array.isArray(raw) ? raw : []).slice(0, 12)
-  const ACTION_COLOR = { BUY: T.green, SELL: T.red, EXIT: T.amber, HOLD: T.ink3 }
-
-  return (
-    <section style={{ marginTop: 28 }}>
-      <div style={{
-        fontFamily: T.mono, fontSize: 9, letterSpacing: '0.22em',
-        color: T.ink3, marginBottom: 10,
-        display: 'flex', alignItems: 'center', gap: 8,
-      }}>
-        <div style={{ width: 6, height: 6, borderRadius: '50%', background: T.amber, boxShadow: `0 0 6px ${T.amber}` }} />
-        LIVE SIGNAL FEED
-      </div>
-      {rows.length === 0 ? (
-        <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3, padding: '8px 0' }}>
-          Waiting for first signal…
-        </div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          {rows.map((s, i) => (
-            <div key={i} style={{
-              display: 'flex', gap: 16, alignItems: 'center',
-              padding: '5px 10px',
-              background: i % 2 === 0 ? T.bg1 : 'transparent',
-              borderLeft: `2px solid ${ACTION_COLOR[s.action] ?? T.line}`,
-            }}>
-              <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, minWidth: 55 }}>
-                {fmtTime(s.timestamp)}
-              </span>
-              <span style={{ fontFamily: T.mono, fontSize: 10, fontWeight: 700, color: ACTION_COLOR[s.action] ?? T.ink1, minWidth: 36 }}>
-                {s.action}
-              </span>
-              {s.price && (
-                <span style={{ fontFamily: T.dot, fontSize: 16, color: T.ink0, minWidth: 70 }}>
-                  ₹{s.price}
-                </span>
-              )}
-              <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {s.reason}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-    </section>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────────
-// Positions strip
-// ─────────────────────────────────────────────────────────────────
-function PositionStrip({ positions, paperPositions, risk }) {
-  // positions API: {ok, data:[...]}  → need .data.data
-  // paperPositions API: {ok, count, data:{data:[...]}} → need .data.data
-  const live  = (positions?.data?.data ?? []).filter(p => p.netQty !== 0)
-  const paper = (paperPositions?.data?.data?.data ?? paperPositions?.data?.data ?? []).filter(p => p.in_position)
-  const open  = live.length > 0 ? live : paper
-  const rpnl  = risk?.data?.realised_pnl   ?? 0
-  const upnl  = risk?.data?.unrealised_pnl ?? 0
-  const total = risk?.data?.total_pnl      ?? 0
-
-  return (
-    <section style={{ marginTop: 28 }}>
-      {/* PnL numbers */}
-      <div style={{ display: 'flex', gap: 32, alignItems: 'flex-end', marginBottom: 16 }}>
-        <div>
-          <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em', marginBottom: 4 }}>TODAY P&L</div>
-          <div style={{ fontFamily: T.dot, fontSize: 38, color: colorPnl(total), lineHeight: 1 }}>
-            {total >= 0 ? '+' : ''}{INR0(total)}
-          </div>
-        </div>
-        <div>
-          <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em', marginBottom: 4 }}>REALISED</div>
-          <div style={{ fontFamily: T.dot, fontSize: 24, color: colorPnl(rpnl) }}>
-            {rpnl >= 0 ? '+' : ''}{INR0(rpnl)}
-          </div>
-        </div>
-        <div>
-          <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em', marginBottom: 4 }}>UNREALISED</div>
-          <div style={{ fontFamily: T.dot, fontSize: 24, color: colorPnl(upnl) }}>
-            {upnl >= 0 ? '+' : ''}{INR0(upnl)}
-          </div>
-        </div>
-      </div>
-
-      {/* Open positions */}
-      <div style={{ fontFamily: T.mono, fontSize: 9, letterSpacing: '0.18em', color: T.ink3, marginBottom: 8 }}>
-        OPEN POSITIONS ({open.length})
-      </div>
-      {open.length === 0 ? (
-        <div style={{
-          fontFamily: T.mono, fontSize: 10, color: T.ink3,
-          padding: 16,
-          border: `1px solid ${T.line}`,
-          borderLeft: `2px solid ${T.line2}`,
-        }}>
-          No open positions
-        </div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {open.map((p, i) => {
-            const sid    = p.securityId ?? p.security_id ?? '—'
-            const qty    = p.netQty ?? p.qty ?? 0
-            const entry  = p.buyAvg ?? p.entry_price ?? 0
-            const upnl   = p.unrealisedProfit ?? 0
-            const side   = qty > 0 ? 'LONG' : 'SHORT'
-            return (
-              <div key={i} style={{
-                display: 'flex', gap: 20, alignItems: 'center',
-                padding: 16,
-                background: T.bg1,
-                border: `1px solid ${T.line}`,
-                borderLeft: `3px solid ${qty > 0 ? T.green : T.red}`,
-              }}>
-                <span style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.ink0, minWidth: 60 }}>{sid}</span>
-                <span style={{ fontFamily: T.mono, fontSize: 9, color: qty > 0 ? T.green : T.red }}>{side}</span>
-                <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink2 }}>{Math.abs(qty)} × ₹{entry?.toFixed?.(2)}</span>
-                <span style={{ marginLeft: 'auto', fontFamily: T.dot, fontSize: 20, color: colorPnl(upnl) }}>
-                  {upnl >= 0 ? '+' : ''}{INR0(upnl)}
-                </span>
-              </div>
-            )
-          })}
-        </div>
-      )}
-    </section>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────────
-// Signals tab
-// ─────────────────────────────────────────────────────────────────
-// ─────────────────────────────────────────────────────────────────
 // Action watchlist — persistent (securities with live trades/positions)
 // ─────────────────────────────────────────────────────────────────
 function ActionWatchlist({ positions, paperPositions, tradelog, kronosSignals }) {
   const live   = (positions?.data?.data ?? []).filter(p => p.netQty !== 0)
   const paper  = (paperPositions?.data?.data?.data ?? paperPositions?.data?.data ?? []).filter(p => p.in_position)
   const recent = (tradelog?.data?.trades ?? [])
-    .filter(t => t.type === 'ENTRY')
+    .filter(t => t.status === 'OPEN')
     .slice(-5)
     .map(t => t.symbol ?? t.security_id ?? '?')
   const active = live.length > 0 ? live : paper
@@ -639,11 +456,11 @@ function ActionWatchlist({ positions, paperPositions, tradelog, kronosSignals })
 // ─────────────────────────────────────────────────────────────────
 // Right panel — PnL summary + live signals feed
 // ─────────────────────────────────────────────────────────────────
-function RightPanel({ risk, signals }) {
+function RightPanel({ risk, signals, limits }) {
   const rpnl  = risk?.data?.realised_pnl   ?? 0
   const upnl  = risk?.data?.unrealised_pnl ?? 0
   const total = risk?.data?.total_pnl      ?? 0
-  const limit = 5000
+  const limit = limits?.max_daily_loss ?? 5000
   const losspct = Math.min(Math.abs(Math.min(total, 0)) / limit * 100, 100)
   const raw   = signals?.data
   const feed  = (Array.isArray(raw) ? raw : []).slice(0, 15)
@@ -721,21 +538,212 @@ function RightPanel({ risk, signals }) {
   )
 }
 
+// ─────────────────────────────────────────────────────────────────
+// ORB cockpit — one card per runner, straight from the trader heartbeat.
+// The range ladder answers the question the strategy itself asks:
+// where is price relative to the opening range?
+// ─────────────────────────────────────────────────────────────────
+const VERDICT_TONE = { ALLOW: T.green, BLOCK: T.red }
+
+function RangeLadder({ s }) {
+  const lo = s.or_low, hi = s.or_high, px = s.last_price
+  if (!lo || !hi || hi <= lo) {
+    return (
+      <div style={{ height: 34, display: 'flex', alignItems: 'center' }}>
+        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>
+          {s.or_locked ? 'zero-width range — no trade' : 'building opening range…'}
+        </span>
+      </div>
+    )
+  }
+  const range = hi - lo
+  const pad   = Math.max(range * 0.6, hi * 0.002)
+  const wLo   = lo - pad, span = (hi + pad) - wLo
+  const pct   = v => Math.min(98.5, Math.max(1.5, ((v - wLo) / span) * 100))
+  const inPos = s.position !== 0
+
+  return (
+    <div style={{ padding: '6px 0 2px' }}>
+      <div style={{ position: 'relative', height: 18, background: T.bg3 }}>
+        <div style={{ position: 'absolute', top: 0, bottom: 0,
+          left: `${pct(lo)}%`, width: `${pct(hi) - pct(lo)}%`,
+          background: T.bg2, borderLeft: `2px solid ${T.redD}`, borderRight: `2px solid ${T.greenD}` }} />
+        {inPos && s.entry_price > 0 && (
+          <div style={{ position: 'absolute', top: 2, bottom: 2, left: `${pct(s.entry_price)}%`,
+            width: 1, background: T.ink1 }} />
+        )}
+        {px > 0 && (
+          <div style={{ position: 'absolute', top: -2, bottom: -2, left: `calc(${pct(px)}% - 1px)`,
+            width: 3, background: px > hi ? T.green : px < lo ? T.red : T.cyan,
+            boxShadow: `0 0 8px ${px > hi ? T.green : px < lo ? T.red : T.cyan}` }} />
+        )}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+        <span style={{ fontFamily: T.dot, fontSize: 14, color: T.red }}>{lo.toFixed(2)}</span>
+        <span style={{ fontFamily: T.dot, fontSize: 16, color: T.ink0 }}>
+          {px > 0 ? px.toFixed(2) : '—'}
+        </span>
+        <span style={{ fontFamily: T.dot, fontSize: 14, color: T.green }}>{hi.toFixed(2)}</span>
+      </div>
+    </div>
+  )
+}
+
+function ORBCard({ s, gateDec, maxEntries }) {
+  const inPos = s.position !== 0
+  const side  = s.position > 0 ? 'LONG' : 'SHORT'
+  const state = !s.or_locked ? 'BUILDING' : inPos ? side : 'WATCHING'
+  const stateColor = !s.or_locked ? T.amber : inPos ? (s.position > 0 ? T.green : T.red) : T.ink2
+
+  return (
+    <div style={{ background: T.bg1, border: `1px solid ${T.line}`,
+      borderTop: `2px solid ${stateColor}`, padding: '12px 14px' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 4 }}>
+        <span style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 700, color: T.ink0 }}>
+          {s.security_id}
+        </span>
+        <span style={{ fontFamily: T.mono, fontSize: 9, letterSpacing: '0.15em', color: stateColor }}>
+          {state}{inPos ? ` ${Math.abs(s.position)} @ ₹${(s.entry_price ?? 0).toFixed(2)}` : ''}
+        </span>
+        <span style={{ marginLeft: 'auto', fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>
+          entries {s.entries_today ?? 0}/{maxEntries}
+        </span>
+      </div>
+
+      <RangeLadder s={s} />
+
+      <div style={{ marginTop: 8, minHeight: 16 }}>
+        {gateDec ? (
+          <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink2 }}>
+            <span style={{ color: T.amber }}>{gateDec.shadow ? '[SHADOW] ' : ''}</span>
+            kronos {gateDec.model_side} {Math.round(gateDec.confidence * 100)}%
+            {' → '}
+            <span style={{ color: VERDICT_TONE[gateDec.verdict] ?? T.ink2 }}>
+              {gateDec.shadow ? `would ${gateDec.verdict}` : gateDec.verdict}
+            </span>
+            {gateDec.data_age_min != null && (
+              <span style={{ color: gateDec.stale ? T.red : T.ink3 }}> · data {gateDec.data_age_min}m</span>
+            )}
+          </span>
+        ) : (
+          <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>no gate decision yet</span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ORBCockpit({ data }) {
+  const strategies = data.trader?.strategies ?? []
+  const maxEntries = data.limits?.max_orders_per_session ?? 4
+  const gateBySid  = {}
+  ;(data.gate?.data?.decisions ?? []).forEach(d => {
+    if (!gateBySid[d.security_id]) gateBySid[d.security_id] = d   // newest first
+  })
+
+  return (
+    <section style={{ marginBottom: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+        <span style={{ fontFamily: T.mono, fontSize: 11, letterSpacing: '0.22em', color: T.ink0 }}>
+          ORB COCKPIT
+        </span>
+        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>
+          {strategies.length} runners · opening range vs price
+        </span>
+      </div>
+      {strategies.length === 0 ? (
+        <div style={{ padding: 20, border: `1px solid ${T.line}`, fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>
+          {data.alive ? 'No runners — screener returned 0 securities' : 'Engine offline — no live strategy state'}
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(290px, 1fr))', gap: 12 }}>
+          {strategies.map(s => (
+            <ORBCard key={s.security_id} s={s} gateDec={gateBySid[s.security_id]} maxEntries={maxEntries} />
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Kronos gate panel — today's verdicts + the calibration countdown.
+// Shadow mode is an experiment; this makes its progress visible.
+// ─────────────────────────────────────────────────────────────────
+function GatePanel({ gate }) {
+  const decisions = gate?.data?.decisions ?? []
+  const cal       = gate?.data?.calibration
+
+  return (
+    <div style={{ background: T.bg1, border: `1px solid ${T.line}` }}>
+      <div style={{ padding: '10px 16px', borderBottom: `1px solid ${T.line}`,
+        display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.amber, letterSpacing: '0.18em', textTransform: 'uppercase' }}>
+          KRONOS GATE
+        </span>
+        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>
+          {decisions.length} decisions today
+        </span>
+      </div>
+
+      {cal && (
+        <div style={{ padding: '10px 16px', borderBottom: `1px solid ${T.line}`,
+          fontFamily: T.mono, fontSize: 9, color: T.ink2, lineHeight: 1.7 }}>
+          <span style={{ color: T.ink3, letterSpacing: '0.12em' }}>CALIBRATION · </span>
+          {cal.recommendation}
+          {cal.fresh_n != null && (
+            <span style={{ color: T.ink3 }}> ({cal.fresh_n} fresh outcomes{cal.fresh_accuracy != null ? `, acc ${cal.fresh_accuracy}` : ''})</span>
+          )}
+        </div>
+      )}
+
+      {decisions.length === 0 ? (
+        <div style={{ padding: 16, fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>
+          No gate decisions today — they fire on ORB breakouts
+        </div>
+      ) : (
+        <div style={{ maxHeight: 220, overflowY: 'auto' }}>
+          {decisions.map((d, i) => (
+            <div key={i} style={{
+              display: 'grid', gridTemplateColumns: '52px 70px 44px 1fr 60px', gap: 8,
+              padding: '6px 16px', alignItems: 'center',
+              background: i % 2 === 0 ? T.bg1 : T.bg2,
+              borderLeft: `2px solid ${VERDICT_TONE[d.verdict] ?? T.line}`,
+            }}>
+              <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>{fmtTime(d.ts)}</span>
+              <span style={{ fontFamily: T.mono, fontSize: 10, fontWeight: 700, color: T.ink0 }}>{d.ticker}</span>
+              <span style={{ fontFamily: T.mono, fontSize: 9,
+                color: d.requested_direction === 'BUY' ? T.green : T.red }}>{d.requested_direction}</span>
+              <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink2 }}>
+                model {d.model_side} {Math.round(d.confidence * 100)}%
+                {d.data_age_min != null && <span style={{ color: d.stale ? T.red : T.ink3 }}> · {d.data_age_min}m</span>}
+              </span>
+              <span style={{ fontFamily: T.mono, fontSize: 9, textAlign: 'right',
+                color: VERDICT_TONE[d.verdict] ?? T.ink3 }}>
+                {d.shadow ? `~${d.verdict}` : d.verdict}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function SignalsTab({ data }) {
   return (
     <div style={{ padding: '20px 24px 60px' }}>
       <SessionBar status={data.status} />
+      <ORBCockpit data={data} />
 
-      {/* Main 2-col layout: Kronos board (left) + PnL+feed (right) */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16, marginBottom: 16 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <KronosBoard kronosLive={data.kronosLive} />
+          <GatePanel gate={data.gate} />
           <ScreenedToday kronosLive={data.kronosLive} />
         </div>
-        <RightPanel risk={data.risk} signals={data.signals} />
+        <RightPanel risk={data.risk} signals={data.signals} limits={data.limits} />
       </div>
 
-      {/* Action watchlist — full width below */}
       <ActionWatchlist
         positions={data.positions}
         paperPositions={data.paperPositions}
@@ -751,8 +759,8 @@ function SignalsTab({ data }) {
 // ─────────────────────────────────────────────────────────────────
 function EquityCurve({ tradelog }) {
   const trades = tradelog?.data?.trades ?? []
-  const exits  = trades.filter(t => t.type === 'EXIT' && t.pnl != null)
-    .sort((a,b) => a.ts?.localeCompare(b.ts ?? '') ?? 0)
+  const exits  = trades.filter(t => t.status === 'CLOSED' && t.pnl != null)
+    .sort((a,b) => (a.exit_ts ?? '').localeCompare(b.exit_ts ?? ''))
   let eq = 0
   const pts = [{ v: 0 }]
   exits.forEach(t => { eq += t.pnl || 0; pts.push({ v: Math.round(eq) }) })
@@ -790,9 +798,8 @@ function EquityCurve({ tradelog }) {
 
 function TradeTable({ tradelog }) {
   const trades = (tradelog?.data?.trades ?? [])
-    .filter(t => t.type === 'EXIT')
-    .slice(-30)
-    .reverse()
+    .filter(t => t.status === 'CLOSED')
+    .slice(0, 30)
 
   return (
     <div style={{ background: T.bg1, border: `1px solid ${T.line}` }}>
@@ -814,10 +821,10 @@ function TradeTable({ tradelog }) {
             <tbody>
               {trades.map((t, i) => (
                 <tr key={i} style={{ borderBottom: `1px solid ${T.line}` }}>
-                  <td style={{ padding: '7px 10px', fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>{fmtTime(t.ts)}</td>
+                  <td style={{ padding: '7px 10px', fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>{fmtTime(t.exit_ts)}</td>
                   <td style={{ padding: '7px 10px', fontFamily: T.mono, fontSize: 10, color: T.ink0, fontWeight: 700 }}>{t.symbol}</td>
                   <td style={{ padding: '7px 10px', fontFamily: T.mono, fontSize: 9, color: t.action === 'EXIT' ? T.amber : T.ink1 }}>{t.action}</td>
-                  <td style={{ padding: '7px 10px', fontFamily: T.dot, fontSize: 15, color: T.ink0 }}>₹{t.price}</td>
+                  <td style={{ padding: '7px 10px', fontFamily: T.dot, fontSize: 15, color: T.ink0 }}>₹{t.entry_price} → ₹{t.exit_price}</td>
                   <td style={{ padding: '7px 10px', fontFamily: T.dot, fontSize: 15, color: colorPnl(t.pnl ?? 0) }}>
                     {(t.pnl ?? 0) >= 0 ? '+' : ''}{INR0(t.pnl ?? 0)}
                   </td>
@@ -834,7 +841,7 @@ function TradeTable({ tradelog }) {
 
 function PortfolioMetrics({ tradelog, risk }) {
   const trades = tradelog?.data?.trades ?? []
-  const exits  = trades.filter(t => t.type === 'EXIT' && t.pnl != null)
+  const exits  = trades.filter(t => t.status === 'CLOSED' && t.pnl != null)
   const wins   = exits.filter(t => (t.pnl ?? 0) > 0)
   const losses = exits.filter(t => (t.pnl ?? 0) <= 0)
   const winRate  = exits.length ? ((wins.length / exits.length) * 100).toFixed(0) : '—'
@@ -875,12 +882,12 @@ function PortfolioMetrics({ tradelog, risk }) {
 
 function CalendarPnL({ tradelog }) {
   const trades = tradelog?.data?.trades ?? []
-  const exits  = trades.filter(t => t.type === 'EXIT' && t.pnl != null && t.ts)
+  const exits  = trades.filter(t => t.status === 'CLOSED' && t.pnl != null && t.exit_ts)
 
   // Group by date
   const byDate = {}
   exits.forEach(t => {
-    const d = t.ts?.slice(0, 10)
+    const d = t.exit_ts?.slice(0, 10)
     if (d) byDate[d] = (byDate[d] ?? 0) + (t.pnl ?? 0)
   })
 
@@ -924,7 +931,7 @@ function PortfolioTab({ data }) {
   const rpnl    = data.risk?.data?.realised_pnl ?? 0
   const upnl    = data.risk?.data?.unrealised_pnl ?? 0
   const total   = data.risk?.data?.total_pnl ?? 0
-  const limit   = 5000
+  const limit   = data.limits?.max_daily_loss ?? 5000
   const losspct = Math.min(Math.abs(Math.min(total, 0)) / limit * 100, 100)
 
   return (
@@ -1332,7 +1339,8 @@ export default function App() {
         `}</style>
 
         <FloatingKillSwitch onKill={() => {}} />
-        <Header status={data.status} risk={data.risk} funds={data.funds} />
+        <StatusSpine data={data} />
+        <OfflineBanner data={data} />
         <TabBar active={tab} onChange={setTab} />
 
         <ErrorBoundary>
