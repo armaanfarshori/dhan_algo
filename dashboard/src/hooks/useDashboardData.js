@@ -24,7 +24,7 @@ export function useDashboardData() {
   const kronosSignals = usePoller('/api/kronos/signals', 30000)
   const kronosLive    = usePoller('/api/kronos/live',    15000)
   const screener      = usePoller('/api/kronos/screener', 300000)  // server caches 5 min
-  const hermes        = usePoller('/api/hermes/status',  60000)
+  const systemHealth  = usePoller('/api/system/health',  30000)
 
   // ── Legacy-shape adapters (older panels expect /api/status & /api/risk) ───
   const first = trader?.strategies?.[0]
@@ -59,6 +59,6 @@ export function useDashboardData() {
     snapshot, trader, alive, limits, gate,
     status, risk, paperPositions,
     signals, funds, positions, watchlist, market, tradelog, logs,
-    dbStats, kronosSignals, kronosLive, screener, backfill, hermes,
+    dbStats, kronosSignals, kronosLive, screener, backfill, systemHealth,
   }
 }

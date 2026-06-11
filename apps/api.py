@@ -393,36 +393,61 @@ def _cache_set(key: str, val):
 
 
 async def db_stats_handler(_r: web.Request) -> web.Response:
+    """DB health + sizes using ONLY instant queries. Cached 60s.
+
+    The old version ran COUNT(*) over the bars hypertable (332M+ rows) —
+    minutes under backfill write load, so the panel sat on "Connecting…"
+    forever. approximate_row_count() reads planner stats, hypertable_size()
+    reads the catalog — both answer in milliseconds.
+    """
     cached = _cache_get("db_stats", 60)
     if cached:
         return web.json_response(cached)
 
     def _query():
+        import time as _t
         from db import get_engine
         from sqlalchemy import text
         with get_engine().connect() as conn:
-            bars = conn.execute(text("""
-                SELECT timeframe, COUNT(*), MIN(time)::date, MAX(time)::date
-                FROM bars GROUP BY timeframe ORDER BY timeframe
+            t0 = _t.monotonic()
+            conn.execute(text("SELECT 1"))
+            ping_ms = round((_t.monotonic() - t0) * 1000, 1)
+
+            db_size = conn.execute(text(
+                "SELECT pg_size_pretty(pg_database_size(current_database()))")).scalar()
+            hts = conn.execute(text("""
+                SELECT hypertable_name,
+                       pg_size_pretty(hypertable_size(format('%I.%I', hypertable_schema, hypertable_name)::regclass)),
+                       approximate_row_count(format('%I.%I', hypertable_schema, hypertable_name)::regclass)
+                FROM timescaledb_information.hypertables
             """)).fetchall()
-            seg_bars = conn.execute(text("""
-                SELECT i.exchange_segment, COUNT(DISTINCT b.security_id), COUNT(*),
-                       MIN(b.time)::date, MAX(b.time)::date
-                FROM bars b JOIN instruments i ON i.security_id = b.security_id
-                WHERE b.timeframe = '1m'
-                GROUP BY i.exchange_segment ORDER BY COUNT(*) DESC
+            compression = conn.execute(text("""
+                SELECT hypertable_name, count(*) FILTER (WHERE is_compressed), count(*)
+                FROM timescaledb_information.chunks GROUP BY 1
             """)).fetchall()
+            # Span via the time index — first/last row, no scan
+            earliest = conn.execute(text(
+                "SELECT time::date FROM bars ORDER BY time ASC LIMIT 1")).scalar()
+            latest = conn.execute(text(
+                "SELECT time::date FROM bars ORDER BY time DESC LIMIT 1")).scalar()
             instruments = conn.execute(text(
                 "SELECT exchange_segment, COUNT(*) FROM instruments GROUP BY exchange_segment"
             )).fetchall()
             signals_count = conn.execute(text("SELECT COUNT(*) FROM signals")).scalar()
             trades_count = conn.execute(text("SELECT COUNT(*) FROM trades")).scalar()
+            alembic = conn.execute(text(
+                "SELECT version_num FROM alembic_version")).scalar()
+
+        comp = {r[0]: {"compressed": r[1], "total": r[2]} for r in compression}
         return {
-            "ok": True,
-            "bars": [{"timeframe": r[0], "rows": r[1], "earliest": str(r[2]),
-                      "latest": str(r[3])} for r in bars],
-            "segments": [{"segment": r[0], "securities": r[1], "bars": r[2],
-                          "earliest": str(r[3]), "latest": str(r[4])} for r in seg_bars],
+            "ok": True, "up": True, "ping_ms": ping_ms,
+            "db_size": db_size, "alembic": alembic,
+            "hypertables": [{
+                "name": r[0], "size": r[1], "approx_rows": int(r[2] or 0),
+                "chunks_compressed": comp.get(r[0], {}).get("compressed", 0),
+                "chunks_total": comp.get(r[0], {}).get("total", 0),
+            } for r in hts],
+            "bars_span": {"earliest": str(earliest), "latest": str(latest)},
             "instruments": {r[0]: r[1] for r in instruments},
             "signals": signals_count, "trades": trades_count,
         }
@@ -432,8 +457,7 @@ async def db_stats_handler(_r: web.Request) -> web.Response:
         _cache_set("db_stats", result)
         return web.json_response(result)
     except Exception as exc:
-        return web.json_response({"ok": False, "error": str(exc),
-                                  "bars": [], "segments": [], "instruments": {}})
+        return web.json_response({"ok": False, "up": False, "error": str(exc)})
 
 
 async def kronos_signals_handler(request: web.Request) -> web.Response:
@@ -619,7 +643,14 @@ async def watchlist_refresh_handler(request: web.Request) -> web.Response:
 
 
 async def backfill_status_handler(_r: web.Request) -> web.Response:
+    """Backfill progress: checkpoint (authoritative) + process + log tail."""
     import subprocess
+    ckpt = {}
+    try:
+        ckpt = json.loads(Path("/opt/dhan-trading/backfill_ckpt_NSE_EQ.json").read_text())
+        ckpt["pct"] = round(ckpt["index"] / max(ckpt["total"], 1) * 100, 1)
+    except Exception:
+        pass
     lines: list[str] = []
     try:
         result = subprocess.run(["tail", "-30", "/tmp/backfill.log"],
@@ -629,25 +660,53 @@ async def backfill_status_handler(_r: web.Request) -> web.Response:
         pass
     running = subprocess.run(["pgrep", "-f", "backfill.py"],
                              capture_output=True).returncode == 0
-    return web.json_response({"ok": True, "running": running, "log_tail": lines})
+    return web.json_response({"ok": True, "running": running,
+                              "checkpoint": ckpt, "log_tail": lines})
 
 
-async def hermes_status_handler(_r: web.Request) -> web.Response:
-    cached = _cache_get("hermes_status", 30)
+async def system_health_handler(_r: web.Request) -> web.Response:
+    """Automation health: cron schedule, alert channel, recent error count.
+    Replaces the Hermes panel — the gateway was retired 2026-06-11."""
+    cached = _cache_get("system_health", 30)
     if cached:
         return web.json_response(cached)
-    import subprocess
-    try:
-        result = subprocess.run(
-            ["bash", "-c", "export PATH=$HOME/.local/bin:$PATH; hermes gateway status 2>&1 | head -5"],
-            capture_output=True, text=True, timeout=5)
-        val = {"ok": True, "running": "active (running)" in result.stdout,
-               "raw": result.stdout.strip()[:300],
-               "model": "meta-llama/llama-3.3-70b-instruct", "provider": "openrouter"}
-        _cache_set("hermes_status", val)
-        return web.json_response(val)
-    except Exception as exc:
-        return web.json_response({"ok": False, "running": False, "error": str(exc)})
+
+    def _collect():
+        import subprocess
+        crons = []
+        try:
+            out = subprocess.run(["crontab", "-l"], capture_output=True,
+                                 text=True, timeout=3).stdout
+            for ln in out.splitlines():
+                ln = ln.strip()
+                if ln and not ln.startswith("#"):
+                    sched = " ".join(ln.split()[:5])
+                    label = ("backfill watchdog" if "backfill_resume" in ln else
+                             "EOD summary" if "eod_summary" in ln else
+                             "calibration" if "ml.calibration" in ln else
+                             ln.split("&&")[-1][:40])
+                    crons.append({"schedule": sched, "job": label})
+        except Exception:
+            pass
+        errors_today = 0
+        try:
+            log = Path("/var/log/dhan/trader.log").read_text(errors="replace")
+            today = datetime.now(timezone.utc).date().isoformat()
+            errors_today = sum(1 for l in log.splitlines()
+                               if l.startswith(today) and ("ERROR" in l or "CRITICAL" in l))
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "telegram_configured": bool(cfg.telegram_bot_token and cfg.telegram_chat_id),
+            "crons": crons,
+            "trader_errors_today": errors_today,
+            "hermes": "retired 2026-06-11 — plain Telegram alerts via core/notify.py",
+        }
+
+    result = await asyncio.get_event_loop().run_in_executor(None, _collect)
+    _cache_set("system_health", result)
+    return web.json_response(result)
 
 
 async def dashboard_handler(_r: web.Request) -> web.Response:
@@ -700,7 +759,7 @@ def build_app() -> web.Application:
     app.router.add_get("/api/kronos/screener", kronos_screener_handler)
     app.router.add_get("/api/kronos/live", kronos_live_handler)
     app.router.add_get("/api/backfill/status", backfill_status_handler)
-    app.router.add_get("/api/hermes/status", hermes_status_handler)
+    app.router.add_get("/api/system/health", system_health_handler)
     app.router.add_post("/postback", postback_handler)
 
     if (DIST_DIR / "assets").exists():

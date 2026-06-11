@@ -1040,222 +1040,147 @@ function BigStat({ label, value, unit, color, sub }) {
   )
 }
 
-function DBPanel({ dbStats }) {
-  const d     = dbStats?.data
-  const b1m   = d?.bars?.find(b => b.timeframe === '1m')
-  const b1d   = d?.bars?.find(b => b.timeframe === '1d')
-  const nseEq = d?.instruments?.NSE_EQ ?? 0
-  const total = Object.values(d?.instruments ?? {}).reduce((a,b) => a+b, 0)
+function ServiceCard({ label, ok, value, sub, warn }) {
+  const color = ok == null ? T.ink3 : ok ? T.green : T.red
+  return (
+    <div style={{ background: T.bg1, border: `1px solid ${T.line}`,
+      borderTop: `2px solid ${warn ? T.amber : color}`, padding: '12px 14px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 8 }}>
+        <div style={{ width: 7, height: 7, borderRadius: '50%', background: warn ? T.amber : color,
+          boxShadow: ok || warn ? `0 0 7px ${warn ? T.amber : color}` : 'none' }} />
+        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em',
+          textTransform: 'uppercase' }}>{label}</span>
+      </div>
+      <div style={{ fontFamily: T.dot, fontSize: 26, color: T.ink0, lineHeight: 1, marginBottom: 5 }}>{value}</div>
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>{sub}</div>
+    </div>
+  )
+}
 
+function ServicesRow({ data }) {
+  const t = data.trader
+  const db = data.dbStats?.data
+  const bf = data.backfill?.data
+  const ck = bf?.checkpoint ?? {}
+  const bars = t?.bars ?? {}
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+      gap: 12, marginBottom: 16 }}>
+      <ServiceCard label="Engine" ok={data.alive}
+        value={data.alive ? fmtUptime(t?.uptime_seconds ?? 0) : 'DOWN'}
+        sub={data.alive ? `${t?.strategies?.length ?? 0} runners · ${t?.mode}` : 'heartbeat stale'} />
+      <ServiceCard label="Market data" ok={t?.feed?.connected}
+        value={t?.feed?.connected ? `${t?.feed?.subscribed ?? 0} WS` : 'OFFLINE'}
+        sub={`bars written ${bars.bars_written ?? 0} · pending ${bars.pending ?? 0}`} />
+      <ServiceCard label="TimescaleDB" ok={db?.up}
+        value={db?.up ? `${db.ping_ms}ms` : db ? 'DOWN' : '…'}
+        sub={db?.up ? `${db.db_size} · schema ${db.alembic}` : (db?.error ?? 'waiting for first poll').slice(0, 48)} />
+      <ServiceCard label="Backfill" ok={bf?.running} warn={bf && !bf.running && (ck.pct ?? 0) < 100}
+        value={ck.pct != null ? `${ck.pct}%` : '—'}
+        sub={ck.index != null ? `${ck.index}/${ck.total} NSE_EQ · ${bf?.running ? 'running' : 'stopped'}` : 'no checkpoint'} />
+    </div>
+  )
+}
+
+function DBPanel({ dbStats }) {
+  const d = dbStats?.data
   if (!d) return (
     <SysPanel title="TimescaleDB" right="10.0.1.155:5432">
-      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>Connecting…</div>
+      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>Waiting for first poll…</div>
     </SysPanel>
   )
-
+  if (!d.up) return (
+    <SysPanel title="TimescaleDB" right="10.0.1.155:5432" accent={T.red}>
+      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.red }}>UNREACHABLE — {(d.error ?? '').slice(0, 120)}</div>
+    </SysPanel>
+  )
+  const fmtRows = n => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(0) + 'K' : String(n)
   return (
-    <SysPanel title="TimescaleDB" right="10.0.1.155 / dhan_trading" accent={T.cyan}>
-      <BigStat label="1-min bars" value={b1m ? (b1m.rows/1000).toFixed(0)+'K' : '—'} color={T.cyan}
-        sub={b1m ? `${b1m.earliest} → ${b1m.latest}` : 'No data'} />
-      <BigStat label="Daily bars" value={b1d ? (b1d.rows/1000).toFixed(1)+'K' : '—'} color={T.cyan}
-        sub={b1d ? `${b1d.earliest} → ${b1d.latest}` : 'No data'} />
-
-      <div style={{ height: 1, background: T.line, margin: '12px 0' }} />
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-        {[
-          ['NSE Equities', nseEq.toLocaleString('en-IN'), T.amber],
-          ['Total Instruments', total.toLocaleString('en-IN'), T.ink1],
-          ['Signals recorded', d.signals ?? 0, T.green],
-          ['Trades recorded',  d.trades  ?? 0, T.green],
-        ].map(([label, val, color]) => (
-          <div key={label} style={{ background: T.bg2, border: `1px solid ${T.line}`, padding: '8px 10px' }}>
-            <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 3 }}>{label}</div>
-            <div style={{ fontFamily: T.dot, fontSize: 20, color }}>{val}</div>
-          </div>
-        ))}
+    <SysPanel title="TimescaleDB" right={`${d.db_size} · ping ${d.ping_ms}ms`} accent={T.cyan}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 64px 70px 70px', gap: 6,
+        fontFamily: T.mono, fontSize: 8, color: T.ink3, letterSpacing: '0.1em', marginBottom: 6 }}>
+        <span>HYPERTABLE</span><span>SIZE</span><span>~ROWS</span><span>COMPRESSED</span>
       </div>
-    </SysPanel>
-  )
-}
-
-function BackfillPanel({ backfill, dbStats }) {
-  const d       = backfill?.data
-  const running = d?.running ?? false
-  const logs    = d?.log_tail ?? []
-
-  // Extract current security from ANY log line matching the patterns:
-  //   "═══ security_id=1008 ═══"  or  "  [1m] 1008  2023-08-20 ..."
-  const findSec = (lines) => {
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const m = lines[i].match(/security_id=(\d+)/) || lines[i].match(/\[1m\]\s+(\d+)\s+\d{4}/)
-      if (m) return m[1]
-    }
-    return null
-  }
-  const curSec = findSec(logs)
-
-  // Extract current date chunk from log lines like: "[1m] 1008  2023-08-20 → 2023-11-17"
-  const findChunk = (lines) => {
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const m = lines[i].match(/(\d{4}-\d{2}-\d{2})\s+→\s+(\d{4}-\d{2}-\d{2})/)
-      if (m) return `${m[1]} → ${m[2]}`
-    }
-    return null
-  }
-  const curChunk = findChunk(logs)
-
-  // Progress from DB: how many securities actually have bars loaded
-  const loaded = (() => {
-    const bars = dbStats?.data?.bars?.find(b => b.timeframe === '1m')
-    // Can't get distinct security count from dbStats directly,
-    // but we can estimate from the security_id in log (0-indexed position in sorted list)
-    // Better: use loaded count from the DB bars endpoint if available
-    return null  // will show from curSec estimate
-  })()
-
-  const TOTAL    = 22646
-  // Estimate position: sort by security_id is numeric, IDs range 100–~15000
-  // Use curSec as rough index — not perfectly accurate but directional
-  const secNum   = parseInt(curSec ?? '0', 10)
-  const pct      = curSec ? Math.min((secNum / 15000) * 100, 99) : 0
-  // Each security ≈ 21 API calls (20 intraday + 1 daily); rate = 5 req/s
-  const remaining= curSec ? Math.ceil((TOTAL - (TOTAL * pct / 100)) * 21 / 5 / 3600) : null
-
-  const stripPrefix = l => l.replace(/^\d{2}:\d{2}:\d{2}\s+\w+\s+dhan\.\w+\s+[—–]\s+/, '')
-
-  return (
-    <SysPanel title="Backfill Progress" right={`${TOTAL.toLocaleString('en-IN')} NSE equities`}
-      accent={running ? T.green : T.ink3}>
-
-      {/* Status */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
-        <div style={{
-          width: 10, height: 10, borderRadius: '50%',
-          background: running ? T.green : T.ink3,
-          boxShadow: running ? `0 0 10px ${T.green}` : 'none', flexShrink: 0,
-        }} />
-        <span style={{ fontFamily: T.mono, fontSize: 11, fontWeight: 600,
-          color: running ? T.green : T.ink2, letterSpacing: '0.1em' }}>
-          {running ? 'RUNNING' : 'IDLE'}
-        </span>
-        {curSec && (
-          <span style={{ fontFamily: T.dot, fontSize: 18, color: T.ink1 }}>
-            #{curSec}
+      {(d.hypertables ?? []).filter(h => h.approx_rows > 0 || h.chunks_total > 0).map(h => (
+        <div key={h.name} style={{ display: 'grid', gridTemplateColumns: '1fr 64px 70px 70px', gap: 6,
+          padding: '5px 0', borderBottom: `1px solid ${T.line}`,
+          fontFamily: T.mono, fontSize: 10 }}>
+          <span style={{ color: T.ink0, fontWeight: 700 }}>{h.name}</span>
+          <span style={{ color: T.cyan }}>{h.size}</span>
+          <span style={{ color: T.ink1 }}>{fmtRows(h.approx_rows)}</span>
+          <span style={{ color: h.chunks_compressed === h.chunks_total ? T.green : T.amber }}>
+            {h.chunks_compressed}/{h.chunks_total}
           </span>
-        )}
-      </div>
-
-      {/* Progress bar — always shown when running */}
-      {running && (
-        <div style={{ marginBottom: 16 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between',
-            fontFamily: T.mono, fontSize: 9, color: T.ink3, marginBottom: 6 }}>
-            <span>PROGRESS (APPROX)</span>
-            <span style={{ color: pct > 0 ? T.green : T.ink3 }}>
-              {pct.toFixed(1)}%
-            </span>
-          </div>
-          <div style={{ height: 6, background: T.bg3, position: 'relative', overflow: 'hidden' }}>
-            <div style={{
-              height: '100%', width: `${pct}%`,
-              background: `linear-gradient(90deg, ${T.green}, ${T.cyan})`,
-              transition: 'width 2s ease',
-            }} />
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between',
-            fontFamily: T.mono, fontSize: 9, color: T.ink3, marginTop: 5 }}>
-            {curChunk
-              ? <span style={{ color: T.ink2 }}>{curChunk}</span>
-              : <span>Scanning…</span>
-            }
-            {remaining !== null && remaining > 0 && (
-              <span style={{ color: T.amber }}>~{remaining}h left</span>
-            )}
-          </div>
         </div>
-      )}
-
-      {/* Recent log */}
-      <SysLabel>Recent activity</SysLabel>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 160, overflowY: 'auto' }}>
-        {logs.length === 0
-          ? <span style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>No activity</span>
-          : logs.map((l, i) => (
-            <div key={i} style={{
-              fontFamily: T.mono, fontSize: 9, lineHeight: 1.8,
-              color: l.includes('ERROR') ? T.red : l.includes('done') || l.includes('upserted') ? T.green : T.ink2,
-              borderLeft: `2px solid ${l.includes('ERROR') ? T.red : l.includes('done') || l.includes('upserted') ? T.green : T.line}`,
-              paddingLeft: 8,
-            }}>
-              {stripPrefix(l)}
-            </div>
-          ))
-        }
+      ))}
+      <div style={{ marginTop: 10, fontFamily: T.mono, fontSize: 9, color: T.ink3, lineHeight: 1.8 }}>
+        bars span {d.bars_span?.earliest} → {d.bars_span?.latest}<br />
+        instruments {Object.values(d.instruments ?? {}).reduce((a, b) => a + b, 0).toLocaleString('en-IN')} ·
+        signals {d.signals} · trades {d.trades}
       </div>
     </SysPanel>
   )
 }
 
-function HermesPanel({ hermes }) {
-  const d       = hermes?.data
-  const running = d?.running ?? false
-  const CRONS = [
-    ['Pre-market brief',   '08:45 IST', 'Mon–Fri', T.cyan],
-    ['Drawdown check',     'Every 5min','Market hrs', T.amber],
-    ['Position reconcile', 'Every 30min','Market hrs', T.green],
-    ['Backfill watchdog',  'Every 15min','Always',    T.green],
-    ['EOD trade review',   '15:45 IST', 'Mon–Fri',   T.cyan],
-    ['Data quality scan',  '02:00 IST', 'Nightly',   T.ink2],
-    ['Gap scan',           '02:30 IST', 'Nightly',   T.ink2],
-    ['Strategy perf.',     '09:00 IST', 'Sunday',    T.amber],
-    ['Signal calibration', '09:30 IST', 'Sunday',    T.amber],
-    ['Health report',      '09:00 IST', 'Sunday',    T.cyan],
-  ]
-
+function BackfillPanel({ backfill }) {
+  const d = backfill?.data
+  const ck = d?.checkpoint ?? {}
+  const pct = ck.pct ?? 0
+  const tail = (d?.log_tail ?? []).slice(-8)
   return (
-    <SysPanel title="Hermes Gateway · @farshoribot"
-      accent={running ? T.cyan : T.red}>
-      {/* Status */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-        <div style={{
-          width: 10, height: 10, borderRadius: '50%',
-          background: running ? T.green : T.red,
-          boxShadow: running ? `0 0 10px ${T.green}` : 'none', flexShrink: 0,
-        }} />
-        <span style={{ fontFamily: T.mono, fontSize: 11, color: running ? T.green : T.red,
-          letterSpacing: '0.1em', fontWeight: 600 }}>
-          {running ? 'ONLINE' : 'OFFLINE'}
+    <SysPanel title="Backfill — NSE_EQ raw layer"
+      right={d ? (d.running ? '◉ RUNNING' : '■ STOPPED') : '…'}
+      accent={d?.running ? T.green : T.amber}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 6 }}>
+        <span style={{ fontFamily: T.dot, fontSize: 30, color: T.ink0 }}>{pct}%</span>
+        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>
+          {ck.index ?? '—'}/{ck.total ?? '—'} securities · last {ck.last_id ?? '—'}
         </span>
       </div>
-
-      {/* Model info */}
-      {d?.model && (
-        <div style={{ background: T.bg2, border: `1px solid ${T.line}`, padding: '8px 12px', marginBottom: 14 }}>
-          <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.14em', marginBottom: 3 }}>MODEL</div>
-          <div style={{ fontFamily: T.mono, fontSize: 10, color: T.cyan }}>{d.model}</div>
-          {d.provider && <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, marginTop: 2 }}>via {d.provider}</div>}
-        </div>
-      )}
-
-      {/* Cron schedule */}
-      <SysLabel>Autonomous schedules ({CRONS.length})</SysLabel>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        {CRONS.map(([name, time, freq, color]) => (
-          <div key={name} style={{
-            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-            padding: '5px 8px',
-            borderLeft: `2px solid ${color}`,
-            background: T.bg2,
-          }}>
-            <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink1 }}>{name}</span>
-            <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-              <span style={{ fontFamily: T.dot, fontSize: 15, color }}>{time}</span>
-              <span style={{ fontFamily: T.mono, fontSize: 8, color: T.ink3, minWidth: 55, textAlign: 'right' }}>{freq}</span>
-            </div>
-          </div>
-        ))}
+      <div style={{ height: 5, background: T.bg3, marginBottom: 12 }}>
+        <div style={{ height: '100%', width: `${pct}%`, background: T.green, transition: 'width 1s' }} />
       </div>
+      <div style={{ background: T.bg0, border: `1px solid ${T.line}`, padding: '8px 10px',
+        maxHeight: 150, overflowY: 'auto' }}>
+        {tail.length === 0
+          ? <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>no log output</span>
+          : tail.map((l, i) => (
+            <div key={i} style={{ fontFamily: T.mono, fontSize: 8.5, color: T.ink2,
+              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', lineHeight: 1.7 }}>{l}</div>
+          ))}
+      </div>
+    </SysPanel>
+  )
+}
+
+function AutomationPanel({ systemHealth }) {
+  const d = systemHealth?.data
+  return (
+    <SysPanel title="Automation & alerts"
+      right={d?.telegram_configured ? 'telegram ✓' : 'telegram NOT SET'}
+      accent={d?.telegram_configured ? T.green : T.red}>
+      {!d ? (
+        <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>Loading…</div>
+      ) : (
+        <>
+          <SysLabel>SCHEDULED (plain cron — ₹0/mo)</SysLabel>
+          {(d.crons ?? []).map((c, i) => (
+            <div key={i} style={{ display: 'flex', gap: 10, padding: '4px 0',
+              borderBottom: `1px solid ${T.line}` }}>
+              <span style={{ fontFamily: T.mono, fontSize: 9, color: T.cyan, minWidth: 95 }}>{c.schedule}</span>
+              <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink1 }}>{c.job}</span>
+            </div>
+          ))}
+          <div style={{ marginTop: 12 }}>
+            <SysLabel>TRADER ERR/CRIT TODAY</SysLabel>
+            <span style={{ fontFamily: T.dot, fontSize: 24,
+              color: d.trader_errors_today > 0 ? T.amber : T.green }}>{d.trader_errors_today}</span>
+          </div>
+          <div style={{ marginTop: 12, fontFamily: T.mono, fontSize: 8.5, color: T.ink3, lineHeight: 1.6 }}>
+            {d.hermes}
+          </div>
+        </>
+      )}
     </SysPanel>
   )
 }
@@ -1304,14 +1229,12 @@ function FullLogPanel({ logs }) {
 function SystemTab({ data }) {
   return (
     <div style={{ padding: '20px 24px 40px' }}>
-      {/* Top row: 3 equal columns */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16, marginBottom: 16 }}>
+      <ServicesRow data={data} />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16, marginBottom: 16 }}>
         <DBPanel       dbStats={data.dbStats} />
-        <BackfillPanel backfill={data.backfill} dbStats={data.dbStats} />
-        <HermesPanel   hermes={data.hermes} />
+        <BackfillPanel backfill={data.backfill} />
+        <AutomationPanel systemHealth={data.systemHealth} />
       </div>
-
-      {/* Bottom: full-width log, taller */}
       <div style={{ height: 420 }}>
         <FullLogPanel logs={data.logs} />
       </div>
