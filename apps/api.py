@@ -1,0 +1,631 @@
+"""
+dhan-api — dashboard + analytics process.
+
+Serves the React dashboard and every read endpoint from:
+  • run/trader_heartbeat.json  — live engine state exported by dhan-trader
+  • TimescaleDB                — signals, trades, bars, instruments
+  • a READ-ONLY DhanClient     — funds/positions/LTP (data APIs only;
+                                 order placement never happens here)
+
+Control surface is deliberately tiny: POST /api/killswitch writes a flag
+file the trader's risk loop picks up within seconds. Trading mode changes
+require editing .env and restarting dhan-trader — there is no auth layer
+until M6, so nothing dangerous is one HTTP request away.
+
+This process can crash, hang, or redeploy without touching order flow.
+"""
+import asyncio
+import json
+import logging
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+from aiohttp import web
+from dotenv import load_dotenv
+
+load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("dhan.api")
+
+from config import get_config
+
+cfg = get_config()
+
+ROOT = Path(__file__).parent.parent
+RUN_DIR = ROOT / "run"
+HEARTBEAT_FILE = RUN_DIR / "trader_heartbeat.json"
+KILLSWITCH_FILE = RUN_DIR / "killswitch"
+TRADER_LOG = Path("/var/log/dhan/trader.log")
+DIST_DIR = ROOT / "dashboard" / "dist"
+STATIC_DIR = ROOT / "static"
+
+HEARTBEAT_STALE_S = 30
+
+
+# ── Heartbeat access ──────────────────────────────────────────────────────────
+
+def read_heartbeat() -> tuple[dict, bool]:
+    """Returns (heartbeat, alive). alive=False if missing or stale."""
+    try:
+        hb = json.loads(HEARTBEAT_FILE.read_text())
+        age = (datetime.now(timezone.utc)
+               - datetime.fromisoformat(hb["ts"])).total_seconds()
+        return hb, age < HEARTBEAT_STALE_S
+    except Exception:
+        return {}, False
+
+
+# ── Middleware ────────────────────────────────────────────────────────────────
+
+@web.middleware
+async def cors_middleware(request, handler):
+    resp = await handler(request)
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return resp
+
+
+# ── Heartbeat-backed handlers ─────────────────────────────────────────────────
+
+async def health_handler(_r: web.Request) -> web.Response:
+    hb, alive = read_heartbeat()
+    return web.json_response({
+        "status": "ok",
+        "trader_alive": alive,
+        "paper": hb.get("mode", "PAPER") == "PAPER",
+    })
+
+
+async def status_handler(request: web.Request) -> web.Response:
+    hb, alive = read_heartbeat()
+    strategies = hb.get("strategies", [])
+    first = strategies[0] if strategies else {}
+    return web.json_response({
+        "mode": hb.get("mode", "PAPER" if cfg.paper_trading else "LIVE"),
+        "client_id": cfg.dhan_client_id,
+        "uptime_seconds": hb.get("uptime_seconds", 0),
+        "trader_alive": alive,
+        "strategy_name": f"ORB_{first.get('security_id')}" if first else "none",
+        "strategy_running": alive and bool(first.get("running")),
+        "orders_placed": sum(s.get("entries_today", 0) for s in strategies),
+        "position": first.get("position", 0),
+        "entry_price": first.get("entry_price", 0.0),
+        "warmup": {"ready": bool(strategies)},
+        "kronos_gate": hb.get("kronos_gate", "shadow"),
+        "strategies": strategies,
+        "note": None if alive else "trader heartbeat stale — is dhan-trader running?",
+    })
+
+
+async def risk_handler(_r: web.Request) -> web.Response:
+    hb, alive = read_heartbeat()
+    risk = hb.get("risk")
+    if not risk:
+        return web.json_response({"ok": False, "trader_alive": alive}, status=503)
+    return web.json_response({**risk, "trader_alive": alive})
+
+
+async def feed_handler(_r: web.Request) -> web.Response:
+    hb, alive = read_heartbeat()
+    feed = hb.get("feed", {})
+    return web.json_response({
+        "ok": alive,
+        "connected": feed.get("connected", False),
+        "subscribed": feed.get("subscribed", 0),
+        "bars": hb.get("bars", {}),
+    })
+
+
+async def paper_positions_handler(_r: web.Request) -> web.Response:
+    hb, _alive = read_heartbeat()
+    pf = hb.get("portfolio", {})
+    if hb.get("mode") == "LIVE":
+        return web.json_response({"ok": True, "count": 0, "data": [],
+                                  "note": "Live mode — see /api/positions"})
+    positions = [{
+        "engine": "EQ", "strategy": p.get("strategy", "ORB"),
+        "symbol": p["security_id"], "segment": cfg.watchlist_exchange_segment,
+        "qty": p["qty"], "entry_price": p["avg_price"],
+    } for p in pf.get("open_positions", [])]
+    return web.json_response({
+        "ok": True, "count": len(positions), "data": positions,
+        "realized_pnl": pf.get("realized_pnl", 0),
+        "unrealized_pnl": pf.get("unrealized_pnl", 0),
+    })
+
+
+async def config_handler(_r: web.Request) -> web.Response:
+    hb, _ = read_heartbeat()
+    return web.json_response({
+        "strategy": "orb+kronos",
+        "kronos_gate": hb.get("kronos_gate", "shadow"),
+        "segment": cfg.watchlist_exchange_segment,
+        "watchlist": hb.get("watchlist", []),
+        "mode": hb.get("mode"),
+    })
+
+
+async def trading_mode_handler(request: web.Request) -> web.Response:
+    if request.method == "POST":
+        return web.json_response({
+            "ok": False,
+            "error": "Mode is fixed per process: set PAPER_TRADING in .env and "
+                     "`sudo systemctl restart dhan-trader` (no auth layer until M6)",
+        }, status=409)
+    hb, _ = read_heartbeat()
+    paper = hb.get("mode", "PAPER") == "PAPER"
+    return web.json_response({"ok": True, "paper": paper,
+                              "mode": "PAPER" if paper else "LIVE"})
+
+
+async def killswitch_handler(request: web.Request) -> web.Response:
+    RUN_DIR.mkdir(exist_ok=True)
+    KILLSWITCH_FILE.write_text(f"dashboard @ {datetime.now(timezone.utc).isoformat()}")
+    logger.critical("⛔ KILL SWITCH requested via dashboard — flag written for trader")
+    return web.json_response({"ok": True, "halted": True,
+                              "message": "Kill switch flag set — trader halts within ~10s"})
+
+
+async def kronos_live_handler(_r: web.Request) -> web.Response:
+    hb, _ = read_heartbeat()
+    state = hb.get("kronos_scanner")
+    if not state:
+        return web.json_response({"ok": False, "error": "scanner not running",
+                                  "results": [], "screened_today": {}})
+    return web.json_response(state)
+
+
+# ── Log tail (trader process log) ─────────────────────────────────────────────
+
+async def logs_handler(request: web.Request) -> web.Response:
+    limit = int(request.rel_url.query.get("limit", 50))
+
+    def _tail():
+        if not TRADER_LOG.exists():
+            return []
+        lines = TRADER_LOG.read_text(errors="replace").splitlines()[-limit:]
+        out = []
+        for ln in lines:
+            parts = ln.split("  ", 2)
+            level = parts[1].strip() if len(parts) > 2 else "INFO"
+            out.append({
+                "ts": parts[0] if len(parts) > 2 else "",
+                "level": level,
+                "icon": {"INFO": "·", "WARNING": "⚠", "ERROR": "✗", "CRITICAL": "⛔"}.get(level, "·"),
+                "name": "trader",
+                "msg": parts[2] if len(parts) > 2 else ln,
+            })
+        return out
+
+    logs = await asyncio.get_event_loop().run_in_executor(None, _tail)
+    return web.json_response({"ok": True, "logs": logs})
+
+
+# ── DB-backed handlers ────────────────────────────────────────────────────────
+
+async def signals_handler(_r: web.Request) -> web.Response:
+    """Trade entries/exits from the trades table, newest first."""
+    def _query():
+        from db import get_engine
+        from sqlalchemy import text
+        with get_engine().connect() as conn:
+            return conn.execute(text("""
+                SELECT security_id, side, qty, entry_ts, entry_price,
+                       exit_ts, exit_price, pnl, strategy, status
+                FROM trades ORDER BY entry_ts DESC LIMIT 100
+            """)).fetchall()
+    try:
+        rows = await asyncio.get_event_loop().run_in_executor(None, _query)
+    except Exception as exc:
+        return web.json_response([])
+    sigs = []
+    for sid, side, qty, ets, ep, xts, xp, pnl, strat, status in rows:
+        sigs.append({"action": side, "price": float(ep or 0),
+                     "reason": f"{strat} entry x{qty}",
+                     "timestamp": str(ets), "source": f"{strat}_{sid}"})
+        if xts:
+            sigs.append({"action": "EXIT", "price": float(xp or 0),
+                         "reason": f"{strat} exit  PnL ₹{float(pnl or 0):+.2f}",
+                         "timestamp": str(xts), "source": f"{strat}_{sid}"})
+    sigs.sort(key=lambda x: x["timestamp"], reverse=True)
+    return web.json_response(sigs[:100])
+
+
+async def trades_handler(request: web.Request) -> web.Response:
+    limit = int(request.rel_url.query.get("limit", 200))
+
+    def _query():
+        from db import get_engine
+        from sqlalchemy import text
+        with get_engine().connect() as conn:
+            rows = conn.execute(text("""
+                SELECT security_id, side, qty, entry_ts, entry_price,
+                       exit_ts, exit_price, pnl, strategy, status
+                FROM trades ORDER BY entry_ts DESC LIMIT :lim
+            """), {"lim": limit}).fetchall()
+            summary = conn.execute(text("""
+                SELECT COUNT(*) FILTER (WHERE status='CLOSED'),
+                       COALESCE(SUM(pnl) FILTER (WHERE status='CLOSED'), 0),
+                       COUNT(*) FILTER (WHERE status='CLOSED' AND pnl > 0)
+                FROM trades WHERE entry_ts::date = CURRENT_DATE
+            """)).fetchone()
+        return rows, summary
+
+    try:
+        rows, summary = await asyncio.get_event_loop().run_in_executor(None, _query)
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": str(exc), "trades": []})
+
+    closed, pnl_sum, wins = summary or (0, 0, 0)
+    return web.json_response({
+        "ok": True, "count": len(rows),
+        "summary": {"closed_today": int(closed or 0),
+                    "pnl_today": float(pnl_sum or 0),
+                    "wins_today": int(wins or 0)},
+        "trades": [{
+            "symbol": r[0], "action": r[1], "qty": r[2],
+            "entry_ts": str(r[3]), "entry_price": float(r[4] or 0),
+            "exit_ts": str(r[5]) if r[5] else None,
+            "exit_price": float(r[6] or 0) if r[6] is not None else None,
+            "pnl": float(r[7] or 0) if r[7] is not None else None,
+            "strategy": r[8], "status": r[9],
+        } for r in rows],
+    })
+
+
+# Simple TTL cache for slow endpoints
+_CACHE: dict = {}
+
+def _cache_get(key: str, ttl: int):
+    e = _CACHE.get(key)
+    return e["val"] if e and (time.monotonic() - e["ts"]) < ttl else None
+
+def _cache_set(key: str, val):
+    _CACHE[key] = {"val": val, "ts": time.monotonic()}
+
+
+async def db_stats_handler(_r: web.Request) -> web.Response:
+    cached = _cache_get("db_stats", 60)
+    if cached:
+        return web.json_response(cached)
+
+    def _query():
+        from db import get_engine
+        from sqlalchemy import text
+        with get_engine().connect() as conn:
+            bars = conn.execute(text("""
+                SELECT timeframe, COUNT(*), MIN(time)::date, MAX(time)::date
+                FROM bars GROUP BY timeframe ORDER BY timeframe
+            """)).fetchall()
+            seg_bars = conn.execute(text("""
+                SELECT i.exchange_segment, COUNT(DISTINCT b.security_id), COUNT(*),
+                       MIN(b.time)::date, MAX(b.time)::date
+                FROM bars b JOIN instruments i ON i.security_id = b.security_id
+                WHERE b.timeframe = '1m'
+                GROUP BY i.exchange_segment ORDER BY COUNT(*) DESC
+            """)).fetchall()
+            instruments = conn.execute(text(
+                "SELECT exchange_segment, COUNT(*) FROM instruments GROUP BY exchange_segment"
+            )).fetchall()
+            signals_count = conn.execute(text("SELECT COUNT(*) FROM signals")).scalar()
+            trades_count = conn.execute(text("SELECT COUNT(*) FROM trades")).scalar()
+        return {
+            "ok": True,
+            "bars": [{"timeframe": r[0], "rows": r[1], "earliest": str(r[2]),
+                      "latest": str(r[3])} for r in bars],
+            "segments": [{"segment": r[0], "securities": r[1], "bars": r[2],
+                          "earliest": str(r[3]), "latest": str(r[4])} for r in seg_bars],
+            "instruments": {r[0]: r[1] for r in instruments},
+            "signals": signals_count, "trades": trades_count,
+        }
+
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(None, _query)
+        _cache_set("db_stats", result)
+        return web.json_response(result)
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": str(exc),
+                                  "bars": [], "segments": [], "instruments": {}})
+
+
+async def kronos_signals_handler(request: web.Request) -> web.Response:
+    limit = int(request.rel_url.query.get("limit", 50))
+
+    def _query():
+        from db import get_engine
+        from sqlalchemy import text
+        with get_engine().connect() as conn:
+            return conn.execute(text("""
+                SELECT s.security_id, s.side, s.score, s.confidence, s.strategy, s.ts,
+                       s.features_snapshot, i.ticker, i.name
+                FROM signals s
+                LEFT JOIN instruments i ON i.security_id = s.security_id
+                ORDER BY s.ts DESC LIMIT :lim
+            """), {"lim": limit}).fetchall()
+
+    try:
+        rows = await asyncio.get_event_loop().run_in_executor(None, _query)
+        return web.json_response({"ok": True, "signals": [
+            {"security_id": r[0], "side": r[1], "score": float(r[2] or 0),
+             "confidence": float(r[3] or 0), "strategy": r[4], "ts": str(r[5]),
+             "features": r[6], "ticker": r[7] or r[0], "name": r[8] or ""}
+            for r in rows]})
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": str(exc), "signals": []})
+
+
+async def kronos_screener_handler(request: web.Request) -> web.Response:
+    n = int(request.rel_url.query.get("n", 20))
+
+    def _query():
+        from core.nse_screener import get_top_volatile
+        from db import get_engine
+        from sqlalchemy import text
+        candidates = get_top_volatile(n=n)
+        sids = [c["security_id"] for c in candidates]
+        names = {}
+        if sids:
+            with get_engine().connect() as conn:
+                rows = conn.execute(text(
+                    "SELECT security_id, ticker, name FROM instruments WHERE security_id = ANY(:ids)"
+                ), {"ids": sids}).fetchall()
+                names = {r[0]: {"ticker": r[1] or r[0], "name": r[2] or ""} for r in rows}
+        for c in candidates:
+            meta = names.get(c["security_id"], {})
+            c["ticker"] = meta.get("ticker", c["security_id"])
+            c["name"] = meta.get("name", "")
+        return candidates
+
+    try:
+        candidates = await asyncio.get_event_loop().run_in_executor(None, _query)
+        return web.json_response({"ok": True, "candidates": candidates,
+                                  "count": len(candidates)})
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": str(exc), "candidates": []})
+
+
+# ── Dhan read-only client (funds / positions / LTP) ───────────────────────────
+
+class _ReadOnlyDhan:
+    """Lazy DhanClient that re-reads the shared token on auth errors.
+    Data APIs only — this process never places orders."""
+
+    def __init__(self):
+        self._client = None
+
+    async def _get(self):
+        from core.client import DhanClient
+        from core.token_manager import read_current_token
+        if self._client is None:
+            token = read_current_token() or cfg.dhan_access_token
+            self._client = DhanClient(cfg.dhan_client_id, token)
+            await self._client.__aenter__()
+        return self._client
+
+    async def call(self, method: str, *args, **kwargs):
+        client = await self._get()
+        try:
+            return await getattr(client, method)(*args, **kwargs)
+        except Exception as exc:
+            if "DH-901" in str(exc):
+                from core.token_manager import read_current_token
+                fresh = read_current_token()
+                if fresh:
+                    client._on_token_refreshed(fresh)
+                    return await getattr(client, method)(*args, **kwargs)
+            raise
+
+
+_dhan_ro = _ReadOnlyDhan()
+
+
+async def funds_handler(_r: web.Request) -> web.Response:
+    try:
+        data = await _dhan_ro.call("get_funds")
+        return web.json_response({"ok": True, "data": data})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=503)
+
+
+async def positions_handler(_r: web.Request) -> web.Response:
+    try:
+        data = await _dhan_ro.call("get_positions")
+        return web.json_response({"ok": True, "data": data})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=503)
+
+
+async def instrument_price_handler(request: web.Request) -> web.Response:
+    sid = request.rel_url.query.get("security_id", "")
+    segment = request.rel_url.query.get("segment", "NSE_EQ")
+    if not sid:
+        return web.json_response({"ok": False, "error": "security_id required"}, status=400)
+    seg_map = {"NSE_EQ": "NSE_EQ", "NSE_FNO": "NSE_FNO", "MCX": "MCX_COMM"}
+    api_seg = seg_map.get(segment, segment)
+    try:
+        data = await _dhan_ro.call("get_ltp", {api_seg: [int(sid)]})
+        price = data.get("data", {}).get(api_seg, {}).get(sid, {}).get("last_price", 0.0)
+        return web.json_response({"ok": True, "security_id": sid, "price": price,
+                                  "segment": segment})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=503)
+
+
+async def instrument_search_handler(request: web.Request) -> web.Response:
+    from core.instruments import InstrumentMaster
+    q = request.rel_url.query.get("q", "").strip()
+    segment = request.rel_url.query.get("segment", "NSE_EQ")
+    if len(q) < 2:
+        return web.json_response({"ok": False, "error": "Query must be at least 2 characters"},
+                                 status=400)
+    results = await asyncio.get_event_loop().run_in_executor(
+        None, InstrumentMaster.search_instruments, q, segment)
+    return web.json_response({"ok": True, "results": results})
+
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+
+async def market_status_handler(_r: web.Request) -> web.Response:
+    from datetime import time as dtime
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("Asia/Kolkata"))
+    t, wd = now.time(), now.weekday()
+    is_weekday, is_saturday = wd < 5, wd == 5
+    nse = "OPEN" if is_weekday and dtime(9, 15) <= t <= dtime(15, 30) else "CLOSED"
+    pre = "PRE" if is_weekday and dtime(9, 0) <= t < dtime(9, 15) else None
+    if is_weekday:
+        mcx = "OPEN" if dtime(9, 0) <= t <= dtime(23, 30) else "CLOSED"
+    elif is_saturday:
+        mcx = "OPEN" if dtime(9, 0) <= t <= dtime(14, 0) else "CLOSED"
+    else:
+        mcx = "CLOSED"
+    return web.json_response({
+        "nse_equity": pre or nse, "nse_fno": pre or nse, "mcx": mcx,
+        "ist_time": now.strftime("%H:%M:%S"), "weekday": now.strftime("%A"),
+        "is_weekend": not is_weekday and not is_saturday,
+    })
+
+
+async def watchlist_handler(request: web.Request) -> web.Response:
+    wl = request.app.get("watchlist")
+    if not wl:
+        return web.json_response({"ok": False, "error": "Watchlist not initialised"}, status=503)
+    return web.json_response({"ok": True, **wl.summary()})
+
+
+async def watchlist_refresh_handler(request: web.Request) -> web.Response:
+    wl = request.app.get("watchlist")
+    if not wl:
+        return web.json_response({"ok": False, "error": "Watchlist not initialised"}, status=503)
+    try:
+        await wl.refresh()
+        return web.json_response({"ok": True, "count": len(wl.get()),
+                                  "stocks": [s.symbol for s in wl.get()]})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
+async def backfill_status_handler(_r: web.Request) -> web.Response:
+    import subprocess
+    lines: list[str] = []
+    try:
+        result = subprocess.run(["tail", "-30", "/tmp/backfill.log"],
+                                capture_output=True, text=True, timeout=3)
+        lines = [l for l in result.stdout.strip().split("\n") if l]
+    except Exception:
+        pass
+    running = subprocess.run(["pgrep", "-f", "backfill.py"],
+                             capture_output=True).returncode == 0
+    return web.json_response({"ok": True, "running": running, "log_tail": lines})
+
+
+async def hermes_status_handler(_r: web.Request) -> web.Response:
+    cached = _cache_get("hermes_status", 30)
+    if cached:
+        return web.json_response(cached)
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["bash", "-c", "export PATH=$HOME/.local/bin:$PATH; hermes gateway status 2>&1 | head -5"],
+            capture_output=True, text=True, timeout=5)
+        val = {"ok": True, "running": "active (running)" in result.stdout,
+               "raw": result.stdout.strip()[:300],
+               "model": "meta-llama/llama-3.3-70b-instruct", "provider": "openrouter"}
+        _cache_set("hermes_status", val)
+        return web.json_response(val)
+    except Exception as exc:
+        return web.json_response({"ok": False, "running": False, "error": str(exc)})
+
+
+async def dashboard_handler(_r: web.Request) -> web.Response:
+    react_index = DIST_DIR / "index.html"
+    if react_index.exists():
+        return web.FileResponse(react_index)
+    return web.FileResponse(STATIC_DIR / "index.html")
+
+
+async def postback_handler(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+        logger.info("📬 Postback: %s order %s → %s",
+                    payload.get("tradingSymbol", "?"), payload.get("orderId"),
+                    payload.get("orderStatus"))
+        return web.json_response({"ack": "ok"})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=400)
+
+
+# ── App ───────────────────────────────────────────────────────────────────────
+
+def build_app() -> web.Application:
+    app = web.Application(middlewares=[cors_middleware])
+
+    app.router.add_get("/", dashboard_handler)
+    app.router.add_get("/health", health_handler)
+    app.router.add_get("/api/status", status_handler)
+    app.router.add_get("/api/risk", risk_handler)
+    app.router.add_get("/api/feed", feed_handler)
+    app.router.add_get("/api/signals", signals_handler)
+    app.router.add_get("/api/trades", trades_handler)
+    app.router.add_get("/api/logs", logs_handler)
+    app.router.add_get("/api/mode", trading_mode_handler)
+    app.router.add_post("/api/mode", trading_mode_handler)
+    app.router.add_post("/api/killswitch", killswitch_handler)
+    app.router.add_get("/api/paper/positions", paper_positions_handler)
+    app.router.add_get("/api/config", config_handler)
+    app.router.add_get("/api/funds", funds_handler)
+    app.router.add_get("/api/positions", positions_handler)
+    app.router.add_get("/api/instruments/search", instrument_search_handler)
+    app.router.add_get("/api/instruments/price", instrument_price_handler)
+    app.router.add_get("/api/market", market_status_handler)
+    app.router.add_get("/api/watchlist", watchlist_handler)
+    app.router.add_post("/api/watchlist/refresh", watchlist_refresh_handler)
+    app.router.add_get("/api/db/stats", db_stats_handler)
+    app.router.add_get("/api/kronos/signals", kronos_signals_handler)
+    app.router.add_get("/api/kronos/screener", kronos_screener_handler)
+    app.router.add_get("/api/kronos/live", kronos_live_handler)
+    app.router.add_get("/api/backfill/status", backfill_status_handler)
+    app.router.add_get("/api/hermes/status", hermes_status_handler)
+    app.router.add_post("/postback", postback_handler)
+
+    if (DIST_DIR / "assets").exists():
+        app.router.add_static("/assets", DIST_DIR / "assets")
+    return app
+
+
+async def main():
+    logger.info("dhan-api starting on port %d", cfg.webhook_port)
+    from db import init_db
+    init_db(cfg.db_url)
+
+    app = build_app()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", cfg.webhook_port)
+    await site.start()
+    logger.info("🌐 Dashboard: http://localhost:%d", cfg.webhook_port)
+
+    # Watchlist for /api/watchlist (cache-file based, refreshed on demand)
+    from core.watchlist import WatchlistManager
+    try:
+        app["watchlist"] = await WatchlistManager.build()
+    except Exception as exc:
+        logger.warning("Watchlist init failed: %s", exc)
+
+    while True:
+        await asyncio.sleep(3600)
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        sys.exit(0)

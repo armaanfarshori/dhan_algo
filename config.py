@@ -39,6 +39,9 @@ class Config(BaseSettings):
     risk_per_trade: float = 0.01          # fraction of equity risked per trade
     paper_balance: float = 500_000.0
     max_orders_per_session: int = 4
+    max_open_positions: int = 10
+    max_notional_per_trade: float = 100_000.0
+    paper_slippage_bps: float = 2.0       # adverse slippage on simulated fills
 
     # ── ORB strategy ────────────────────────────────────────────────────────
     orb_range_minutes: int = 15

@@ -429,14 +429,17 @@ ssh ubuntu@13.206.66.237 "tail -f /tmp/backfill.log"
 # Check platform logs
 curl -s http://localhost:8765/api/logs?limit=20
 
-# Restart platform (systemd since 2026-06-11 — NOT screen, NOT the cron watchdog)
-ssh ubuntu@13.206.66.237 "sudo systemctl restart dhan-platform"
-ssh ubuntu@13.206.66.237 "systemctl status dhan-platform --no-pager"
-ssh ubuntu@13.206.66.237 "journalctl -u dhan-platform -n 50 --no-pager"   # service-level events
-# Unit file: infra/systemd/dhan-platform.service → /etc/systemd/system/
-# The old scripts/platform_watchdog.sh crontab entry was REMOVED (it kill -9'd
-# main.py whenever a slow DB query blocked /api/status and truncated the log).
-# Do not re-add it — systemd Restart=on-failure handles crashes.
+# TWO PROCESSES since Phase 1 (2026-06-11) — main.py is GONE:
+#   dhan-trader  (apps/trader.py) — order flow only; exports run/trader_heartbeat.json
+#   dhan-api     (apps/api.py)    — dashboard on :8765; reads DB + heartbeat only
+ssh ubuntu@13.206.66.237 "sudo systemctl restart dhan-trader"
+ssh ubuntu@13.206.66.237 "sudo systemctl restart dhan-api"
+ssh ubuntu@13.206.66.237 "tail -50 /var/log/dhan/trader.log"   # also: api.log
+# Unit files: infra/systemd/dhan-{trader,api}.service → /etc/systemd/system/
+# Mode change (paper↔live): edit .env, then restart dhan-trader — POST /api/mode
+# is read-only by design (no auth until M6). Kill switch: POST /api/killswitch
+# (api writes run/killswitch; trader's risk loop halts within ~10s).
+# The old platform_watchdog.sh cron was REMOVED — do not re-add it.
 
 # Deploy update (from agent EC2)
 bash ~/.hermes/skills/dhan/deploy_update/scripts/deploy.sh

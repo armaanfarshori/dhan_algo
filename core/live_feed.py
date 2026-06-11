@@ -94,7 +94,7 @@ class LiveFeed:
     Thread-safe within a single asyncio event loop.
     """
 
-    def __init__(self, client_id: str, access_token: str):
+    def __init__(self, client_id: str, access_token: str, on_tick=None):
         self._client_id    = client_id
         self._access_token = access_token
         self._subscriptions: list = []      # list of (exchange_code, security_id)
@@ -104,6 +104,9 @@ class LiveFeed:
         self._running  = False
         self._feed: Optional[MarketFeed] = None
         self._connected = asyncio.Event()
+        # Optional sync callback(sid, ltp, cum_volume) — BarBuilder hooks in
+        # here to persist 1-minute bars to the DB. Must never raise/block.
+        self._on_tick_cb = on_tick
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -209,6 +212,12 @@ class LiveFeed:
 
         self._ticks[sid] = data
         self._candles[sid].on_tick(ltp, volume)
+
+        if self._on_tick_cb is not None:
+            try:
+                self._on_tick_cb(sid, ltp, volume)
+            except Exception as exc:
+                logger.debug("LiveFeed on_tick callback error: %s", exc)
 
     def stop(self):
         self._running = False

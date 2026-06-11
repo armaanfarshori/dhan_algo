@@ -155,7 +155,17 @@ class KronosSignalEngine:
         if df.empty:
             return _hold("No data in DB")
 
-        return await self.score(df, pred_len=pred_len)
+        result = await self.score(df, pred_len=pred_len)
+        # Data freshness — the gate logs this so calibration can separate
+        # decisions made on live bars from ones made on stale history.
+        try:
+            last_ts = pd.to_datetime(df["ts"].iloc[-1], utc=True)
+            result["last_bar_ts"] = last_ts.isoformat()
+            result["data_age_min"] = round(
+                (datetime.now(timezone.utc) - last_ts).total_seconds() / 60, 1)
+        except Exception:
+            pass
+        return result
 
     # ------------------------------------------------------------------
     # Batch scoring (multiple securities)

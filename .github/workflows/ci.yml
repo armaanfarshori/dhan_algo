@@ -23,7 +23,7 @@ jobs:
                       aiohttp sqlalchemy pandas numpy pytz pyotp dhanhq
 
       - name: Compile all modules
-        run: python -m compileall -q main.py backfill.py config.py db.py core/ strategies/
+        run: python -m compileall -q backfill.py config.py db.py apps/ core/ engine/ ml/ strategies/
 
       - name: Run tests
         run: pytest tests/ -v --tb=short

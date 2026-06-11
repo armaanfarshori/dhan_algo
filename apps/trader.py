@@ -1,0 +1,271 @@
+"""
+dhan-trader — the trading process. No web server, no analytics queries.
+
+Wires:  LiveFeed ─→ BarBuilder ─→ bars table        (M2: live data lands in DB)
+        LiveFeed ─→ StrategyRunner ─→ ORB (pure)
+                        └─ KronosGate (shadow) ─→ signals table
+                        └─ RiskEngine ─→ Paper/Live executor ─→ Portfolio (DB)
+
+State the dashboard needs is exported via run/trader_heartbeat.json every
+few seconds; the dhan-api process serves it. The two processes share nothing
+but the DB and that file — an analytics query can no longer delay an order.
+
+Run: systemd unit dhan-trader (apps/api.py is the dashboard process).
+"""
+import asyncio
+import json
+import logging
+import signal
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("dhan.trader")
+
+from config import get_config
+
+cfg = get_config()
+
+RUN_DIR = Path(__file__).parent.parent / "run"
+HEARTBEAT_FILE = RUN_DIR / "trader_heartbeat.json"
+KILLSWITCH_FILE = RUN_DIR / "killswitch"
+HEARTBEAT_INTERVAL = 5.0
+
+
+async def write_heartbeat(*, runners, portfolio, risk, feed, bar_builder,
+                          kronos_scanner, start_time):
+    """Atomically export trader state for the api process."""
+    while True:
+        try:
+            payload = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "pid": __import__("os").getpid(),
+                "mode": portfolio.mode,
+                "uptime_seconds": int(time.time() - start_time),
+                "kronos_gate": "shadow" if cfg.kronos_shadow_mode else "enforcing",
+                "watchlist": [r.sid for r in runners],
+                "strategies": [r.status() for r in runners],
+                "portfolio": portfolio.summary(feed.get_ltp),
+                "risk": risk.get_summary(),
+                "feed": {
+                    "connected": feed.is_connected(),
+                    "subscribed": len(feed.all_subscribed_sids()),
+                },
+                "bars": bar_builder.status(),
+                "kronos_scanner": kronos_scanner.get_state() if kronos_scanner else None,
+            }
+            tmp = HEARTBEAT_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload))
+            tmp.replace(HEARTBEAT_FILE)
+        except Exception as exc:
+            logger.warning("Heartbeat write failed: %s", exc)
+        await asyncio.sleep(HEARTBEAT_INTERVAL)
+
+
+async def main():
+    logger.info("=" * 60)
+    logger.info("  dhan-trader  —  ORB + Kronos engine")
+    logger.info(f"  Mode:  {'📝 PAPER' if cfg.paper_trading else '🔴 LIVE'}"
+                f"   Gate: {'SHADOW' if cfg.kronos_shadow_mode else 'ENFORCING'}")
+    logger.info("=" * 60)
+    if not cfg.paper_trading:
+        logger.warning("⚠️  LIVE TRADING MODE — real money at risk!")
+
+    RUN_DIR.mkdir(exist_ok=True)
+    start_time = time.time()
+
+    from db import init_db
+    init_db(cfg.db_url)
+
+    # ── Token (single owner) + client ─────────────────────────────────────────
+    from core.token_manager import MasterTokenManager
+    from core.client import DhanClient
+    master_tm = MasterTokenManager()
+    access_token = await master_tm.load_or_generate()
+
+    async with DhanClient(
+        client_id=cfg.dhan_client_id,
+        access_token=access_token,
+        auth_manager=master_tm,
+    ) as dhan:
+
+        # ── Journal + run record ───────────────────────────────────────────────
+        from core.journal import get_db_backend
+        db = get_db_backend()
+        await db.connect()
+        run_id = await db.log_run_start(
+            mode="PAPER" if cfg.paper_trading else "LIVE", strategy="orb")
+
+        # ── Portfolio (DB-persisted) — reconcile before anything trades ───────
+        from engine.portfolio import Portfolio
+        portfolio = Portfolio(mode="PAPER" if cfg.paper_trading else "LIVE", db_backend=db)
+        await portfolio.reconcile_on_boot()
+
+        # ── Market data: WebSocket feed → BarBuilder → bars table ─────────────
+        from core.live_feed import LiveFeed
+        from engine.bar_builder import BarBuilder
+        bar_builder = BarBuilder(exchange_segment=cfg.watchlist_exchange_segment)
+        feed = LiveFeed(cfg.dhan_client_id, access_token, on_tick=bar_builder.on_tick)
+
+        # ── Watchlist from screener (cached watchlist as fallback) ─────────────
+        from core.nse_screener import get_top_volatile
+        from core.watchlist import WatchlistManager
+        watchlist = await WatchlistManager.build()
+        screener_results = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: get_top_volatile(n=cfg.watchlist_n, min_avg_volume=10_000))
+        watchlist_ids = [r["security_id"] for r in screener_results]
+        if not watchlist_ids:
+            watchlist_ids = [s.security_id for s in watchlist.get()[:cfg.watchlist_n]]
+            logger.warning("Screener empty — cached watchlist fallback: %s", watchlist_ids)
+        # Reconciled positions must keep streaming + trading even if today's
+        # screener dropped them (orphan protection).
+        for p in portfolio.open_positions():
+            if p.security_id not in watchlist_ids:
+                watchlist_ids.append(p.security_id)
+                logger.warning("Watchlist += %s (open position, not in screener)", p.security_id)
+        logger.info("Watchlist (%d): %s", len(watchlist_ids), watchlist_ids)
+
+        eq_sids = [int(s) for s in watchlist_ids if s.isdigit()]
+        if eq_sids:
+            feed.subscribe({cfg.watchlist_exchange_segment: eq_sids})
+
+        # ── Kronos gate (shadow until calibrated) ──────────────────────────────
+        from core.kronos_signal import get_kronos_engine
+        from ml.kronos_gate import KronosGate
+        kronos = get_kronos_engine()
+        gate = KronosGate(kronos, db_backend=db,
+                          min_confidence=cfg.kronos_min_confidence,
+                          shadow=cfg.kronos_shadow_mode)
+
+        # ── Execution + risk ───────────────────────────────────────────────────
+        from engine.execution import PaperExecutor, LiveExecutor
+        from engine.risk import RiskEngine, RiskParams
+        if cfg.paper_trading:
+            executor = PaperExecutor(db_backend=db, run_id=run_id,
+                                     slippage_bps=cfg.paper_slippage_bps)
+        else:
+            executor = LiveExecutor(dhan, db_backend=db, run_id=run_id)
+
+        runners: list = []
+
+        def ltp_lookup(sid: str) -> float:
+            ltp = feed.get_ltp(sid)
+            if ltp > 0:
+                return ltp
+            for r in runners:
+                if r.sid == sid:
+                    return r.last_price
+            return 0.0
+
+        risk = RiskEngine(
+            RiskParams(
+                max_daily_loss=cfg.max_daily_loss,
+                max_open_positions=cfg.max_open_positions,
+                risk_per_trade=cfg.risk_per_trade,
+                max_notional_per_trade=cfg.max_notional_per_trade,
+                equity=cfg.paper_balance if cfg.paper_trading else cfg.capital,
+                killswitch_file=KILLSWITCH_FILE,
+            ),
+            portfolio, ltp_lookup, db_backend=db)
+
+        @risk.on_halt
+        async def on_halt(reason: str):
+            logger.critical("⛔ HALT: %s — flattening open positions", reason)
+            for r in runners:
+                pos = portfolio.get(r.sid)
+                if pos.qty != 0 and r.last_price > 0:
+                    from engine.types import OrderIntent
+                    side = "SELL" if pos.qty > 0 else "BUY"
+                    fill = await executor.submit(OrderIntent(
+                        security_id=r.sid, exchange_segment=cfg.watchlist_exchange_segment,
+                        side=side, qty=abs(pos.qty), strategy="ORB",
+                        reason=f"risk halt: {reason}"), ref_price=r.last_price)
+                    if fill:
+                        await portfolio.apply_fill(fill, strategy="ORB")
+                        r.strategy.notify_flat()
+
+        # ── Strategy runners ───────────────────────────────────────────────────
+        from engine.runner import StrategyRunner
+        from strategies.orb import ORB, ORBParams
+        params = ORBParams(orb_minutes=cfg.orb_range_minutes)
+        stagger = cfg.poll_interval / max(len(watchlist_ids), 1)
+        for idx, sid in enumerate(watchlist_ids):
+            orb = ORB(sid, params)
+            pos = portfolio.get(sid)
+            if pos.qty != 0:   # resync reconciled position into the strategy
+                orb.position = pos.qty
+                orb.entry_price = pos.avg_price
+            runners.append(StrategyRunner(
+                orb, client=dhan, feed=feed, gate=gate, risk=risk,
+                executor=executor, portfolio=portfolio,
+                exchange_segment=cfg.watchlist_exchange_segment,
+                poll_interval=cfg.poll_interval, poll_offset=idx * stagger,
+                max_entries_per_session=cfg.max_orders_per_session))
+        logger.info("ORB engine on %d securities (gate: %s)",
+                    len(runners), "shadow" if cfg.kronos_shadow_mode else "enforcing")
+
+        # ── Optional Kronos live scanner ───────────────────────────────────────
+        kronos_scanner = None
+        if cfg.kronos_scanner_enabled:
+            from core.kronos_scanner import KronosScanner
+            kronos_scanner = KronosScanner(kronos, db_backend=db, n=cfg.watchlist_n)
+
+        # ── Launch ────────────────────────────────────────────────────────────
+        stop_event = asyncio.Event()
+        loop = asyncio.get_event_loop()
+
+        def _shutdown(sig_, _frame=None):
+            logger.info("Signal %s — shutting down…", getattr(sig_, "name", sig_))
+            stop_event.set()
+
+        for s in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(s, _shutdown, s)
+            except NotImplementedError:
+                pass
+
+        tasks = [
+            asyncio.create_task(feed.run(), name="feed"),
+            asyncio.create_task(bar_builder.run(), name="bars"),
+            asyncio.create_task(risk.run(), name="risk"),
+            asyncio.create_task(master_tm.run(), name="token"),
+            asyncio.create_task(write_heartbeat(
+                runners=runners, portfolio=portfolio, risk=risk, feed=feed,
+                bar_builder=bar_builder, kronos_scanner=kronos_scanner,
+                start_time=start_time), name="heartbeat"),
+            *[asyncio.create_task(r.run(), name=f"orb_{r.sid}") for r in runners],
+        ]
+        if kronos_scanner:
+            tasks.append(asyncio.create_task(kronos_scanner.run(), name="kronos_scanner"))
+
+        logger.info("🚀 dhan-trader running (%d tasks)", len(tasks))
+        await stop_event.wait()
+
+        # ── Graceful shutdown: flush bars, stop everything ─────────────────────
+        for r in runners:
+            r.stop()
+        feed.stop()
+        bar_builder.stop()
+        await bar_builder.flush()
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await db.log_run_stop(run_id, outcome="stopped")
+        logger.info("✅ dhan-trader shut down cleanly")
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        sys.exit(0)

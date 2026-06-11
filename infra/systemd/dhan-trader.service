@@ -1,0 +1,24 @@
+[Unit]
+Description=DhanAIBot trader (ORB + Kronos engine — order flow only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/dhan-trading
+Environment=PYTHONUNBUFFERED=1
+# apps/trader.py loads /opt/dhan-trading/.env via load_dotenv()
+ExecStart=/opt/dhan-trading/.venv/bin/python3 -m apps.trader
+Restart=on-failure
+RestartSec=10
+# Graceful: trader flushes pending bars + journals run stop on SIGTERM.
+# The DB-persisted portfolio reconciles on the next boot either way.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# /var/log/dhan must exist (deploy creates it; fs.protected_regular blocks /tmp)
+StandardOutput=append:/var/log/dhan/trader.log
+StandardError=append:/var/log/dhan/trader.log
+
+[Install]
+WantedBy=multi-user.target
