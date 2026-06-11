@@ -207,23 +207,27 @@ Market open → NSE screener (ATR%) → top-N volatile equities
 
 ---
 
-## Hermes orchestration
+## Alerts — plain Telegram (Hermes gateway RETIRED 2026-06-11)
 
-- **Version:** v0.15.1
-- **LLM:** OpenRouter → `meta-llama/llama-3.3-70b-instruct` (NOT Groq direct — Groq free tier is 12K TPM, Hermes system prompt is 18K tokens, it breaks)
-- **Telegram bot:** `@farshoribot` (chat_id: `7229051134`, owner: `@lolsisi`)
-- **Skills:** 19 skills in `~/.hermes/skills/dhan/` + `hermes_skills/dhan/` in repo
-- **Cron jobs:** 14 scheduled (pre-market 8:45, drawdown every 5min market hours, position reconcile every 30min, backfill watchdog every 15min, EOD review 15:45, data quality 2AM, gap scan 2:30AM, strategy performance Sunday, signal calibration Sunday)
+The Hermes LLM gateway burned the entire $10 OpenRouter budget in ONE day
+(Jun 4: 170 agent sessions — every 5-min cron paid the 18K-token system
+prompt per tool step) and ran as a zombie for a week after (8,700
+insufficient-credit errors). It is stopped + disabled
+(`systemctl --user disable hermes-gateway`); `~/.hermes/` left intact if
+ever needed.
 
-**Common Telegram commands:**
-```
-check data freshness    → backfill_check skill
-run Kronos forecast     → kronos_forecast skill  
-system status           → execution_loop skill
-HALT                    → kill_switch skill (emergency)
-```
-
-**Why OpenRouter not Groq:** Groq free tier has 12K TPM limit. Hermes system prompt alone is ~18K tokens. Every request would fail. OpenRouter has credit-based billing, no TPM cap.
+**Replacement — ₹0/month, no LLM:**
+- `core/notify.py` — plain bot-API sender to `@farshoribot`
+  (chat_id `7229051134`); creds in agent `.env` (`TELEGRAM_BOT_TOKEN`,
+  `TELEGRAM_CHAT_ID`). CLI: `... | python -m core.notify --stdin`
+  (sends only when the pipeline produced output).
+- **Halt alerts:** trader's `on_halt` → instant Telegram (incl. external
+  kill switch — now routed through `_halt()` so flatten + alert fire).
+- **Agent crontab:** backfill watchdog every 15 min (`resume.py`, pings
+  Telegram on restart) · calibration fill+report 16:45 IST weekdays ·
+  EOD summary 17:00 IST weekdays (`scripts/eod_summary.py`).
+- The repo's `hermes_skills/dhan/*/scripts/*.py` are plain Python — usable
+  directly from cron; the LLM wrapper around them is what was wasteful.
 
 ---
 
