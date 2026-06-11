@@ -28,7 +28,9 @@ load_dotenv()
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
-    datefmt="%H:%M:%S",
+    # Full ISO + offset (box runs UTC) — the api tails this file for the
+    # dashboard, and the browser needs a parseable timestamp
+    datefmt="%Y-%m-%dT%H:%M:%S+00:00",
 )
 logger = logging.getLogger("dhan.trader")
 

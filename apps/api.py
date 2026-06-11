@@ -30,7 +30,7 @@ load_dotenv()
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
-    datefmt="%H:%M:%S",
+    datefmt="%Y-%m-%dT%H:%M:%S+00:00",
 )
 logger = logging.getLogger("dhan.api")
 
@@ -189,15 +189,25 @@ async def logs_handler(request: web.Request) -> web.Response:
     limit = int(request.rel_url.query.get("limit", 50))
 
     def _tail():
+        import re
         if not TRADER_LOG.exists():
             return []
         lines = TRADER_LOG.read_text(errors="replace").splitlines()[-limit:]
+        today = datetime.now(timezone.utc).date()
         out = []
         for ln in lines:
             parts = ln.split("  ", 2)
             level = parts[1].strip() if len(parts) > 2 else "INFO"
+            ts_raw = parts[0].strip() if len(parts) > 2 else ""
+            # Old log lines carry HH:MM:SS only — the dashboard runs
+            # new Date(ts), so a bare time renders as "Invalid Date".
+            # Lift it to full ISO (server logs in UTC).
+            if re.fullmatch(r"\d{2}:\d{2}:\d{2}", ts_raw):
+                ts = f"{today}T{ts_raw}+00:00"
+            else:
+                ts = ts_raw
             out.append({
-                "ts": parts[0] if len(parts) > 2 else "",
+                "ts": ts,
                 "level": level,
                 "icon": {"INFO": "·", "WARNING": "⚠", "ERROR": "✗", "CRITICAL": "⛔"}.get(level, "·"),
                 "name": "trader",
@@ -607,7 +617,9 @@ async def main():
     init_db(cfg.db_url)
 
     app = build_app()
-    runner = web.AppRunner(app)
+    # access_log=None: the dashboard polls several endpoints every second —
+    # access lines would bury real log content (~500KB per 5 min observed)
+    runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", cfg.webhook_port)
     await site.start()
