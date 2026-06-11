@@ -169,6 +169,40 @@ async def kronos_gate_handler(_r: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+async def equity_handler(_r: web.Request) -> web.Response:
+    """Intraday P&L curve from the equity_curve hypertable (risk engine
+    snapshots every ~10s; served as 1-minute buckets). Cached 15s."""
+    cached = _cache_get("equity_curve", 15)
+    if cached:
+        return web.json_response(cached)
+
+    def _query():
+        from db import get_engine
+        from sqlalchemy import text
+        with get_engine().connect() as conn:
+            rows = conn.execute(text("""
+                SELECT time_bucket('1 minute', time) AS t,
+                       last(realized_pnl, time)   AS rpnl,
+                       last(unrealized_pnl, time) AS upnl,
+                       last(total_equity, time)   AS equity
+                FROM equity_curve
+                WHERE time >= CURRENT_DATE
+                GROUP BY 1 ORDER BY 1
+            """)).fetchall()
+        return {"ok": True, "intraday": [
+            {"t": str(r[0])[11:16],
+             "pnl": round(float(r[1] or 0) + float(r[2] or 0), 2),
+             "equity": round(float(r[3] or 0), 2)}
+            for r in rows]}
+
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(None, _query)
+        _cache_set("equity_curve", result)
+        return web.json_response(result)
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": str(exc), "intraday": []})
+
+
 async def status_handler(request: web.Request) -> web.Response:
     hb, alive = read_heartbeat()
     strategies = hb.get("strategies", [])
@@ -737,6 +771,7 @@ def build_app() -> web.Application:
     app.router.add_get("/", dashboard_handler)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/api/snapshot", snapshot_handler)
+    app.router.add_get("/api/equity", equity_handler)
     app.router.add_get("/api/kronos/gate", kronos_gate_handler)
     app.router.add_get("/api/status", status_handler)
     app.router.add_get("/api/risk", risk_handler)

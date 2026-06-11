@@ -757,41 +757,146 @@ function SignalsTab({ data }) {
 // ─────────────────────────────────────────────────────────────────
 // Portfolio tab
 // ─────────────────────────────────────────────────────────────────
-function EquityCurve({ tradelog }) {
-  const trades = tradelog?.data?.trades ?? []
-  const exits  = trades.filter(t => t.status === 'CLOSED' && t.pnl != null)
-    .sort((a,b) => (a.exit_ts ?? '').localeCompare(b.exit_ts ?? ''))
-  let eq = 0
-  const pts = [{ v: 0 }]
-  exits.forEach(t => { eq += t.pnl || 0; pts.push({ v: Math.round(eq) }) })
-  const color = eq >= 0 ? T.green : T.red
-
+function PnlCurve({ equity }) {
+  const pts = equity?.data?.intraday ?? []
+  const last = pts[pts.length - 1]
+  const color = (last?.pnl ?? 0) >= 0 ? T.green : T.red
   return (
-    <div style={{ background: T.bg1, border: `1px solid ${T.line}`, padding: 16, marginBottom: 16 }}>
-      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em', marginBottom: 12 }}>
-        EQUITY CURVE
+    <div style={{ background: T.bg1, border: `1px solid ${T.line}`, padding: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
+        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em',
+          textTransform: 'uppercase' }}>Intraday P&L</span>
+        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>
+          {pts.length ? `${pts.length} min · 10s risk snapshots` : ''}
+        </span>
       </div>
       {pts.length < 2 ? (
-        <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3, padding: '24px 0', textAlign: 'center' }}>
-          Awaiting closed trades
+        <div style={{ height: 180, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>
+          No session data yet — curve starts at 09:15 IST
         </div>
       ) : (
-        <ResponsiveContainer width="100%" height={160}>
-          <LineChart data={pts} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
-            <CartesianGrid stroke={T.line} strokeDasharray="3 3" vertical={false} />
-            <XAxis hide />
-            <YAxis width={70} tick={{ fontFamily: T.mono, fontSize: 8, fill: T.ink3 }}
-              tickFormatter={v => '₹' + v.toLocaleString('en-IN')} />
-            <Tooltip
-              contentStyle={{ background: T.bg2, border: `1px solid ${T.line}`, fontFamily: T.mono, fontSize: 10 }}
-              itemStyle={{ color: T.ink0 }}
-              formatter={v => [INR(v), 'P&L']}
-              labelFormatter={() => ''}
-            />
-            <Line type="monotone" dataKey="v" stroke={color} strokeWidth={1.5} dot={false} />
+        <ResponsiveContainer width="100%" height={180}>
+          <LineChart data={pts} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+            <CartesianGrid stroke={T.line} strokeDasharray="2 4" vertical={false} />
+            <XAxis dataKey="t" tick={{ fontFamily: T.mono, fontSize: 9, fill: T.ink3 }}
+              tickLine={false} axisLine={{ stroke: T.line }} minTickGap={50} />
+            <YAxis tick={{ fontFamily: T.mono, fontSize: 9, fill: T.ink3 }}
+              tickLine={false} axisLine={false} width={54}
+              tickFormatter={v => '₹' + Number(v).toLocaleString('en-IN')} />
+            <Tooltip contentStyle={{ background: T.bg2, border: `1px solid ${T.line2}`,
+              fontFamily: T.mono, fontSize: 10 }}
+              labelStyle={{ color: T.ink2 }} formatter={v => ['₹' + Number(v).toLocaleString('en-IN'), 'P&L']} />
+            <Line type="stepAfter" dataKey="pnl" stroke={color} strokeWidth={1.5}
+              dot={false} isAnimationActive={false} />
           </LineChart>
         </ResponsiveContainer>
       )}
+    </div>
+  )
+}
+
+function PortfolioHero({ data }) {
+  const risk  = data.trader?.risk ?? {}
+  const total = risk.total_pnl ?? 0
+  const rpnl  = risk.realised_pnl ?? 0
+  const upnl  = risk.unrealised_pnl ?? 0
+  const limit = data.limits?.max_daily_loss ?? 5000
+  const losspct = Math.min(Math.abs(Math.min(total, 0)) / limit * 100, 100)
+  const f     = data.funds?.data?.data ?? {}
+  const todays = data.tradelog?.data?.summary ?? {}
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))',
+      gap: 12, marginBottom: 16 }}>
+      {/* Day P&L + loss meter */}
+      <div style={{ background: T.bg1, border: `1px solid ${T.line}`,
+        borderTop: `2px solid ${colorPnl(total)}`, padding: '14px 16px' }}>
+        <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em',
+          textTransform: 'uppercase', marginBottom: 8 }}>Today P&L · {data.trader?.mode ?? '—'}</div>
+        <div style={{ fontFamily: T.dot, fontSize: 40, color: colorPnl(total), lineHeight: 1 }}>
+          {total >= 0 ? '+' : ''}{INR0(total)}
+        </div>
+        <div style={{ display: 'flex', gap: 14, margin: '8px 0 10px' }}>
+          <span style={{ fontFamily: T.mono, fontSize: 9, color: colorPnl(rpnl) }}>
+            R {rpnl >= 0 ? '+' : ''}{INR0(rpnl)}</span>
+          <span style={{ fontFamily: T.mono, fontSize: 9, color: colorPnl(upnl) }}>
+            U {upnl >= 0 ? '+' : ''}{INR0(upnl)}</span>
+          <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>
+            {todays.closed_today ?? 0} closed · {todays.wins_today ?? 0} wins</span>
+        </div>
+        <div style={{ height: 5, background: T.bg3 }}>
+          <div style={{ height: '100%', width: `${losspct}%`,
+            background: `linear-gradient(90deg, ${T.green}, ${T.amber} 60%, ${T.red})`,
+            transition: 'width 0.5s' }} />
+        </div>
+        <div style={{ fontFamily: T.mono, fontSize: 9, color: losspct > 75 ? T.red : T.ink3, marginTop: 4 }}>
+          loss limit {losspct.toFixed(0)}% of ₹{Number(limit).toLocaleString('en-IN')}
+          {risk.halted && <span style={{ color: T.red, fontWeight: 700 }}>  ⛔ HALTED</span>}
+        </div>
+      </div>
+
+      {/* Account */}
+      <div style={{ background: T.bg1, border: `1px solid ${T.line}`, padding: '14px 16px' }}>
+        <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em',
+          textTransform: 'uppercase', marginBottom: 8 }}>Broker account</div>
+        {[['Available', f.availabelBalance, T.green],
+          ['SOD limit', f.sodLimit, T.ink1],
+          ['Deployed', f.utilizedAmount, T.amber]].map(([l, v, c]) => (
+          <div key={l} style={{ display: 'flex', justifyContent: 'space-between',
+            alignItems: 'baseline', padding: '5px 0', borderBottom: `1px solid ${T.line}` }}>
+            <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3,
+              letterSpacing: '0.12em', textTransform: 'uppercase' }}>{l}</span>
+            <span style={{ fontFamily: T.dot, fontSize: 20, color: c }}>
+              ₹{Number(v ?? 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</span>
+          </div>
+        ))}
+        <div style={{ fontFamily: T.mono, fontSize: 8.5, color: T.ink3, marginTop: 8 }}>
+          paper equity ₹{Number(data.limits?.paper_balance ?? 0).toLocaleString('en-IN')} ·
+          risk/trade {((data.limits?.max_daily_loss ?? 0) > 0 ? '1%' : '—')}
+        </div>
+      </div>
+
+      {/* Open positions */}
+      <OpenPositionsCard data={data} />
+    </div>
+  )
+}
+
+function OpenPositionsCard({ data }) {
+  const positions = data.trader?.portfolio?.open_positions ?? []
+  const priceBySid = {}
+  ;(data.trader?.strategies ?? []).forEach(s => { priceBySid[s.security_id] = s.last_price })
+
+  return (
+    <div style={{ background: T.bg1, border: `1px solid ${T.line}`, padding: '14px 16px' }}>
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em',
+        textTransform: 'uppercase', marginBottom: 8 }}>
+        Open positions ({positions.length})
+      </div>
+      {positions.length === 0 ? (
+        <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3, padding: '14px 0' }}>
+          Flat — no exposure
+        </div>
+      ) : positions.map((p, i) => {
+        const ltp  = priceBySid[p.security_id] || 0
+        const upnl = ltp ? (ltp - p.avg_price) * p.qty : null
+        return (
+          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10,
+            padding: '7px 0', borderBottom: `1px solid ${T.line}` }}>
+            <span style={{ fontFamily: T.mono, fontSize: 11, fontWeight: 700, color: T.ink0,
+              minWidth: 56 }}>{p.security_id}</span>
+            <span style={{ fontFamily: T.mono, fontSize: 9,
+              color: p.qty > 0 ? T.green : T.red }}>{p.qty > 0 ? 'LONG' : 'SHORT'}</span>
+            <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink2 }}>
+              {Math.abs(p.qty)} @ ₹{Number(p.avg_price).toFixed(2)}</span>
+            <span style={{ marginLeft: 'auto', fontFamily: T.dot, fontSize: 18,
+              color: upnl == null ? T.ink3 : colorPnl(upnl) }}>
+              {upnl == null ? '—' : (upnl >= 0 ? '+' : '') + INR0(upnl)}
+            </span>
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -925,71 +1030,17 @@ function CalendarPnL({ tradelog }) {
 }
 
 function PortfolioTab({ data }) {
-  const balance = data.funds?.data?.data?.availabelBalance ?? 0
-  const sod     = data.funds?.data?.data?.sodLimit ?? 0
-  const used    = data.funds?.data?.data?.utilizedAmount ?? 0
-  const rpnl    = data.risk?.data?.realised_pnl ?? 0
-  const upnl    = data.risk?.data?.unrealised_pnl ?? 0
-  const total   = data.risk?.data?.total_pnl ?? 0
-  const limit   = data.limits?.max_daily_loss ?? 5000
-  const losspct = Math.min(Math.abs(Math.min(total, 0)) / limit * 100, 100)
-
   return (
     <div style={{ padding: '20px 24px 60px' }}>
-      {/* 6-metric row */}
-      <PortfolioMetrics tradelog={data.tradelog} risk={data.risk} />
+      <PortfolioHero data={data} />
 
-      {/* Main 3-col grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 280px', gap: 16 }}>
-        {/* Left: equity curve */}
-        <div>
-          <EquityCurve tradelog={data.tradelog} />
-          <CalendarPnL tradelog={data.tradelog} />
-        </div>
-
-        {/* Mid: trade table */}
-        <TradeTable tradelog={data.tradelog} />
-
-        {/* Right: account + loss meter */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {/* Account */}
-          <div style={{ background: T.bg1, border: `1px solid ${T.line}`, padding: 16 }}>
-            <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em', textTransform: 'uppercase', marginBottom: 12 }}>Account</div>
-            {[['Available', balance, T.green], ['SOD Limit', sod, T.ink0], ['Deployed', used, T.amber]].map(([l, v, c]) => (
-              <div key={l} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: `1px solid ${T.line}` }}>
-                <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.12em', textTransform: 'uppercase' }}>{l}</span>
-                <span style={{ fontFamily: T.dot, fontSize: 22, color: c }}>₹{Number(v).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</span>
-              </div>
-            ))}
-          </div>
-
-          {/* Today P&L */}
-          <div style={{ background: T.bg1, border: `1px solid ${T.line}`, padding: 16 }}>
-            <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em', textTransform: 'uppercase', marginBottom: 12 }}>Today P&L</div>
-            <div style={{ fontFamily: T.dot, fontSize: 36, color: colorPnl(total), lineHeight: 1, marginBottom: 12 }}>
-              {total >= 0 ? '+' : ''}₹{Math.round(total).toLocaleString('en-IN')}
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 14 }}>
-              {[['Realised', rpnl], ['Unrealised', upnl]].map(([l, v]) => (
-                <div key={l} style={{ background: T.bg2, border: `1px solid ${T.line}`, padding: '8px 10px' }}>
-                  <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, marginBottom: 3 }}>{l}</div>
-                  <div style={{ fontFamily: T.dot, fontSize: 18, color: colorPnl(v) }}>
-                    {v >= 0 ? '+' : ''}₹{Math.abs(Math.round(v)).toLocaleString('en-IN')}
-                  </div>
-                </div>
-              ))}
-            </div>
-            <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, marginBottom: 5 }}>
-              Loss limit · {losspct.toFixed(1)}% of ₹{limit.toLocaleString('en-IN')}
-            </div>
-            <div style={{ height: 6, background: T.bg3, overflow: 'hidden' }}>
-              <div style={{ height: '100%', width: `${losspct}%`,
-                background: `linear-gradient(90deg, ${T.green}, ${T.amber} 60%, ${T.red})`,
-                transition: 'width 0.5s' }} />
-            </div>
-          </div>
-        </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1.5fr 1fr', gap: 16, marginBottom: 16 }}>
+        <PnlCurve equity={data.equity} />
+        <CalendarPnL tradelog={data.tradelog} />
       </div>
+
+      <PortfolioMetrics tradelog={data.tradelog} risk={data.risk} />
+      <TradeTable tradelog={data.tradelog} />
     </div>
   )
 }

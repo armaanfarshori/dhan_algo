@@ -12,6 +12,7 @@ export function useDashboardData() {
   const signals  = usePoller('/api/signals',          5000)
   const logs     = usePoller('/api/logs?limit=60',    3000)
   const tradelog = usePoller('/api/trades?limit=500', 10000)
+  const equity   = usePoller('/api/equity',           20000)
   const backfill = usePoller('/api/backfill/status',  10000)
   const positions = usePoller('/api/positions',       10000)
 
@@ -58,7 +59,7 @@ export function useDashboardData() {
   return {
     snapshot, trader, alive, limits, gate,
     status, risk, paperPositions,
-    signals, funds, positions, watchlist, market, tradelog, logs,
+    signals, funds, positions, watchlist, market, tradelog, logs, equity,
     dbStats, kronosSignals, kronosLive, screener, backfill, systemHealth,
   }
 }
