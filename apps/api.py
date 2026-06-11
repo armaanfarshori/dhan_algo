@@ -379,6 +379,9 @@ async def kronos_signals_handler(request: web.Request) -> web.Response:
 
 async def kronos_screener_handler(request: web.Request) -> web.Response:
     n = int(request.rel_url.query.get("n", 20))
+    cached = _cache_get(f"screener_{n}", 300)   # ATR ranking barely moves intraday
+    if cached:
+        return web.json_response(cached)
 
     def _query():
         from core.nse_screener import get_top_volatile
@@ -401,8 +404,10 @@ async def kronos_screener_handler(request: web.Request) -> web.Response:
 
     try:
         candidates = await asyncio.get_event_loop().run_in_executor(None, _query)
-        return web.json_response({"ok": True, "candidates": candidates,
-                                  "count": len(candidates)})
+        result = {"ok": True, "candidates": candidates, "count": len(candidates)}
+        if candidates:
+            _cache_set(f"screener_{n}", result)
+        return web.json_response(result)
     except Exception as exc:
         return web.json_response({"ok": False, "error": str(exc), "candidates": []})
 
