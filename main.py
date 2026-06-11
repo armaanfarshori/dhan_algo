@@ -116,6 +116,16 @@ async def trading_mode_handler(request: web.Request) -> web.Response:
         body  = await request.json()
         paper = bool(body.get("paper", True))
 
+        # No auth layer exists yet (M6) — flipping to LIVE via an open HTTP
+        # endpoint is a real-money hazard. Until M6 lands, going live requires
+        # ALLOW_LIVE_TOGGLE=true in .env plus a restart.
+        if not paper and os.getenv("ALLOW_LIVE_TOGGLE", "false").lower() not in ("1", "true", "yes"):
+            logger.warning("Blocked attempt to switch to LIVE via /api/mode (ALLOW_LIVE_TOGGLE not set)")
+            return web.json_response({
+                "ok": False,
+                "error": "Live toggle disabled — set ALLOW_LIVE_TOGGLE=true in .env and restart (no auth layer until M6)",
+            }, status=403)
+
         # ── F&O scanner ──────────────────────────────────────────────────────
         if fno:
             fno.paper_trading = paper
@@ -210,7 +220,10 @@ async def status_handler(request: web.Request) -> web.Response:
 
 
 async def risk_handler(request: web.Request) -> web.Response:
-    return web.json_response(request.app["risk"].get_summary())
+    risk = request.app.get("risk")
+    if risk is None:
+        return web.json_response({"ok": False, "initializing": True}, status=503)
+    return web.json_response(risk.get_summary())
 
 
 async def signals_handler(request: web.Request) -> web.Response:
@@ -379,14 +392,17 @@ async def switch_strategy_handler(request: web.Request) -> web.Response:
     quantity      = int(body.get("quantity",  75))
     num_lots      = int(body.get("num_lots",   1))
 
-    dhan  = request.app["client"]
-    risk  = request.app["risk"]
+    dhan  = request.app.get("client")
+    risk  = request.app.get("risk")
+    if dhan is None or risk is None:
+        return web.json_response({"ok": False, "initializing": True}, status=503)
     # Always use the current live mode — not the startup global
     paper = request.app.get("paper_trading", PAPER_TRADING)
 
     # Stop old strategy
-    old = request.app["strategy"]
-    old.stop()
+    old = request.app.get("strategy")
+    if old:
+        old.stop()
     old_task = request.app.get("strategy_task")
     if old_task and not old_task.done():
         old_task.cancel()
@@ -479,10 +495,13 @@ async def instrument_price_handler(request: web.Request) -> web.Response:
 
 
 async def killswitch_handler(request: web.Request) -> web.Response:
-    risk     = request.app["risk"]
-    strategy = request.app["strategy"]
+    risk     = request.app.get("risk")
+    strategy = request.app.get("strategy")
+    if risk is None:
+        return web.json_response({"ok": False, "initializing": True}, status=503)
     risk.activate_kill_switch()
-    strategy.stop()
+    if strategy:
+        strategy.stop()
     task = request.app.get("strategy_task")
     if task and not task.done():
         task.cancel()
@@ -766,11 +785,17 @@ def _cache_set(key: str, val):
 
 
 async def db_stats_handler(_request: web.Request) -> web.Response:
-    """Row counts, date ranges, and per-segment breakdown from TimescaleDB. Cached 60s."""
+    """Row counts, date ranges, and per-segment breakdown from TimescaleDB. Cached 60s.
+
+    Query runs in a thread executor — these scans take seconds while the
+    backfill writes to the same DB, and a sync call here would freeze the
+    whole event loop (including /api/status, which the watchdog probes).
+    """
     cached = _cache_get("db_stats", 60)
     if cached:
         return web.json_response(cached)
-    try:
+
+    def _query():
         from db import get_engine
         from sqlalchemy import text
         with get_engine().connect() as conn:
@@ -797,7 +822,7 @@ async def db_stats_handler(_request: web.Request) -> web.Response:
             )).fetchall()
             signals_count = conn.execute(text("SELECT COUNT(*) FROM signals")).scalar()
             trades_count  = conn.execute(text("SELECT COUNT(*) FROM trades")).scalar()
-        result = {
+        return {
             "ok": True,
             "bars": [{"timeframe": r[0], "rows": r[1], "earliest": str(r[2]), "latest": str(r[3])} for r in bars],
             "segments": [{"segment": r[0], "securities": r[1], "bars": r[2],
@@ -806,6 +831,9 @@ async def db_stats_handler(_request: web.Request) -> web.Response:
             "signals": signals_count,
             "trades":  trades_count,
         }
+
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(None, _query)
         _cache_set("db_stats", result)
         return web.json_response(result)
     except Exception as exc:
@@ -816,16 +844,20 @@ async def kronos_signals_handler(request: web.Request) -> web.Response:
     """Latest Kronos signals from the signals table."""
     try:
         limit = int(request.rel_url.query.get("limit", 50))
-        from db import get_engine
-        from sqlalchemy import text
-        with get_engine().connect() as conn:
-            rows = conn.execute(text("""
-                SELECT s.security_id, s.side, s.score, s.confidence, s.strategy, s.ts,
-                       s.features_snapshot, i.ticker, i.name
-                FROM signals s
-                LEFT JOIN instruments i ON i.security_id = s.security_id
-                ORDER BY s.ts DESC LIMIT :lim
-            """), {"lim": limit}).fetchall()
+
+        def _query():
+            from db import get_engine
+            from sqlalchemy import text
+            with get_engine().connect() as conn:
+                return conn.execute(text("""
+                    SELECT s.security_id, s.side, s.score, s.confidence, s.strategy, s.ts,
+                           s.features_snapshot, i.ticker, i.name
+                    FROM signals s
+                    LEFT JOIN instruments i ON i.security_id = s.security_id
+                    ORDER BY s.ts DESC LIMIT :lim
+                """), {"lim": limit}).fetchall()
+
+        rows = await asyncio.get_event_loop().run_in_executor(None, _query)
         return web.json_response({"ok": True, "signals": [
             {"security_id": r[0], "side": r[1], "score": float(r[2] or 0),
              "confidence": float(r[3] or 0), "strategy": r[4],
@@ -850,23 +882,28 @@ async def kronos_screener_handler(request: web.Request) -> web.Response:
     """Top N volatile NSE equities from the ATR screener — with security names."""
     try:
         n = int(request.rel_url.query.get("n", 20))
-        from core.nse_screener import get_top_volatile
-        from db import get_engine
-        from sqlalchemy import text
-        candidates = get_top_volatile(n=n)
-        # Resolve names
-        sids = [c["security_id"] for c in candidates]
-        names = {}
-        if sids:
-            with get_engine().connect() as conn:
-                rows = conn.execute(text(
-                    "SELECT security_id, ticker, name FROM instruments WHERE security_id = ANY(:ids)"
-                ), {"ids": sids}).fetchall()
-                names = {r[0]: {"ticker": r[1] or r[0], "name": r[2] or ""} for r in rows}
-        for c in candidates:
-            meta = names.get(c["security_id"], {})
-            c["ticker"] = meta.get("ticker", c["security_id"])
-            c["name"]   = meta.get("name", "")
+
+        def _query():
+            from core.nse_screener import get_top_volatile
+            from db import get_engine
+            from sqlalchemy import text
+            candidates = get_top_volatile(n=n)
+            # Resolve names
+            sids = [c["security_id"] for c in candidates]
+            names = {}
+            if sids:
+                with get_engine().connect() as conn:
+                    rows = conn.execute(text(
+                        "SELECT security_id, ticker, name FROM instruments WHERE security_id = ANY(:ids)"
+                    ), {"ids": sids}).fetchall()
+                    names = {r[0]: {"ticker": r[1] or r[0], "name": r[2] or ""} for r in rows}
+            for c in candidates:
+                meta = names.get(c["security_id"], {})
+                c["ticker"] = meta.get("ticker", c["security_id"])
+                c["name"]   = meta.get("name", "")
+            return candidates
+
+        candidates = await asyncio.get_event_loop().run_in_executor(None, _query)
         return web.json_response({"ok": True, "candidates": candidates, "count": len(candidates)})
     except Exception as exc:
         return web.json_response({"ok": False, "error": str(exc), "candidates": []})
@@ -921,6 +958,73 @@ async def start_server(app: web.Application):
     return runner
 
 
+def build_app() -> web.Application:
+    """Create the web app with all routes and pre-init placeholder state.
+
+    Called BEFORE the heavy startup work (token, watchlist, screener) so the
+    port binds within seconds. The external watchdog probes /api/status — if
+    binding waited for the screener query (slow while the backfill hammers
+    the DB), the watchdog would kill the process mid-boot. Handlers must
+    tolerate the placeholder Nones until main() fills in the real objects.
+    """
+    app = web.Application(middlewares=[cors_middleware])
+
+    # Placeholder state — replaced during bootstrap
+    app["strategy"]       = None
+    app["risk"]           = None
+    app["client"]         = None
+    app["auth_manager"]   = None
+    app["start_time"]     = time.time()
+    app["paper_trading"]  = PAPER_TRADING
+    app["runtime_config"] = {}
+
+    # ── Data pipeline + AI endpoints ──────────────────────────────────────
+    app.router.add_get("/api/db/stats",           db_stats_handler)
+    app.router.add_get("/api/kronos/signals",     kronos_signals_handler)
+    app.router.add_get("/api/kronos/screener",    kronos_screener_handler)
+    app.router.add_get("/api/kronos/live",        kronos_live_handler)
+    app.router.add_get("/api/backfill/status",    backfill_status_handler)
+    app.router.add_get("/api/hermes/status",      hermes_status_handler)
+
+    app.router.add_get("/",                       dashboard_handler)
+    app.router.add_get("/health",                 health_handler)
+    app.router.add_get("/api/mode",               trading_mode_handler)
+    app.router.add_post("/api/mode",              trading_mode_handler)
+    app.router.add_get("/api/status",             status_handler)
+    app.router.add_get("/api/risk",               risk_handler)
+    app.router.add_get("/api/signals",            signals_handler)
+    app.router.add_get("/api/funds",              funds_handler)
+    app.router.add_get("/api/positions",          positions_handler)
+    app.router.add_get("/api/paper/positions",   paper_positions_handler)
+    app.router.add_get("/api/scalper",            scalper_handler)
+    app.router.add_get("/api/instruments",        instruments_handler)
+    app.router.add_get("/api/auth",               auth_handler)
+    app.router.add_get("/api/config",             config_handler)
+    app.router.add_get("/api/payoff",             payoff_handler)
+    app.router.add_get("/api/instruments/search", instrument_search_handler)
+    app.router.add_get("/api/instruments/price",  instrument_price_handler)
+    app.router.add_post("/api/strategy/switch",   switch_strategy_handler)
+    app.router.add_post("/api/killswitch",        killswitch_handler)
+    app.router.add_get("/api/logs",               logs_handler)
+    app.router.add_get("/api/feed",               feed_handler)
+    app.router.add_get("/api/trades",             trades_handler)
+    app.router.add_post("/api/backtest/run",      backtest_run_handler)
+    app.router.add_get("/api/market",             market_status_handler)
+    app.router.add_get("/api/watchlist",          watchlist_handler)
+    app.router.add_post("/api/watchlist/refresh", watchlist_refresh_handler)
+    app.router.add_get("/api/scanner",            scanner_handler)
+    app.router.add_get("/api/scanner/fno",        lambda r: web.json_response({"ok":True, **r.app["fno_scanner"].get_summary()}))
+    app.router.add_get("/api/scanner/equity",     lambda r: web.json_response({"ok":True, **r.app["equity_scanner"].get_scan_summary()}))
+    app.router.add_post("/api/scanner/config",    scanner_config_handler)
+    app.router.add_post("/postback",              postback_handler)
+
+    # Serve React build assets if available
+    if (DIST_DIR / "assets").exists():
+        app.router.add_static("/assets", DIST_DIR / "assets")
+
+    return app
+
+
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 async def main():
     logger.info("=" * 60)
@@ -932,6 +1036,10 @@ async def main():
 
     if not PAPER_TRADING:
         logger.warning("⚠️  LIVE TRADING MODE — real money at risk!")
+
+    # ── Web server FIRST — bind the port before any slow startup work ─────────
+    app = build_app()
+    server_runner = await start_server(app)
 
     # ── Auth: use MasterTokenManager (single owner of token refresh) ──────────
     # backfill.py reads the token from dhan_token.json — never generates itself
@@ -999,7 +1107,11 @@ async def main():
             f"postgresql+psycopg2://{quote_plus(_cfg.db_user)}:{quote_plus(_cfg.db_password)}"
             f"@{_cfg.db_host}:{_cfg.db_port}/{_cfg.db_name}"
         )
-        screener_results = get_top_volatile(n=n_watch, min_avg_volume=10_000)
+        # Executor: this scan takes up to its 20s statement timeout while the
+        # backfill writes to the same DB — must not block the event loop.
+        screener_results = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: get_top_volatile(n=n_watch, min_avg_volume=10_000)
+        )
         watchlist_ids = [r["security_id"] for r in screener_results]
         if watchlist_ids:
             logger.info("Screener watchlist (%d): %s", len(watchlist_ids), watchlist_ids)
@@ -1091,8 +1203,6 @@ async def main():
         )
         logger.info("📊 Equity Scanner: top 15 NSE movers · SMA crossover")
 
-        # ── Web app ───────────────────────────────────────────────────────────
-        app = web.Application(middlewares=[cors_middleware])
         # ── Launch ORB strategies (market hours only — see run() override below) ─
         orb_tasks = [asyncio.create_task(s.run(), name=f"orb_{s.config.security_id}")
                      for s in strategies_list]
@@ -1139,51 +1249,8 @@ async def main():
             "num_lots":    1,
         }
 
-        # ── New: data pipeline + AI endpoints ────────────────────────────────
-        app.router.add_get("/api/db/stats",           db_stats_handler)
-        app.router.add_get("/api/kronos/signals",     kronos_signals_handler)
-        app.router.add_get("/api/kronos/screener",    kronos_screener_handler)
-        app.router.add_get("/api/kronos/live",        kronos_live_handler)
-        app.router.add_get("/api/backfill/status",    backfill_status_handler)
-        app.router.add_get("/api/hermes/status",      hermes_status_handler)
-
-        app.router.add_get("/",                       dashboard_handler)
-        app.router.add_get("/health",                 health_handler)
-        app.router.add_get("/api/mode",               trading_mode_handler)
-        app.router.add_post("/api/mode",              trading_mode_handler)
-        app.router.add_get("/api/status",             status_handler)
-        app.router.add_get("/api/risk",               risk_handler)
-        app.router.add_get("/api/signals",            signals_handler)
-        app.router.add_get("/api/funds",              funds_handler)
-        app.router.add_get("/api/positions",          positions_handler)
-        app.router.add_get("/api/paper/positions",   paper_positions_handler)
-        app.router.add_get("/api/scalper",            scalper_handler)
-        app.router.add_get("/api/instruments",        instruments_handler)
-        app.router.add_get("/api/auth",               auth_handler)
-        app.router.add_get("/api/config",             config_handler)
-        app.router.add_get("/api/payoff",             payoff_handler)
-        app.router.add_get("/api/instruments/search", instrument_search_handler)
-        app.router.add_get("/api/instruments/price",  instrument_price_handler)
-        app.router.add_post("/api/strategy/switch",   switch_strategy_handler)
-        app.router.add_post("/api/killswitch",        killswitch_handler)
-        app.router.add_get("/api/logs",               logs_handler)
-        app.router.add_get("/api/feed",               feed_handler)
-        app.router.add_get("/api/trades",             trades_handler)
-        app.router.add_post("/api/backtest/run",      backtest_run_handler)
-        app.router.add_get("/api/market",             market_status_handler)
-        app.router.add_get("/api/watchlist",          watchlist_handler)
-        app.router.add_post("/api/watchlist/refresh", watchlist_refresh_handler)
-        app.router.add_get("/api/scanner",            scanner_handler)
-        app.router.add_get("/api/scanner/fno",        lambda r: web.json_response({"ok":True, **r.app["fno_scanner"].get_summary()}))
-        app.router.add_get("/api/scanner/equity",     lambda r: web.json_response({"ok":True, **r.app["equity_scanner"].get_scan_summary()}))
-        app.router.add_post("/api/scanner/config",    scanner_config_handler)
-        app.router.add_post("/postback",              postback_handler)
-
-        # Serve React build assets if available
-        if (DIST_DIR / "assets").exists():
-            app.router.add_static("/assets", DIST_DIR / "assets")
-
-        server_runner = await start_server(app)
+        # Routes registered + server started in build_app()/start_server() at
+        # the top of main() — port must bind before slow startup work.
 
         # ── Graceful shutdown ─────────────────────────────────────────────────
         loop       = asyncio.get_event_loop()

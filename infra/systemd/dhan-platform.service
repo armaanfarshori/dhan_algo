@@ -1,0 +1,25 @@
+[Unit]
+Description=DhanAIBot trading platform (main.py — ORB + Kronos, paper mode)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/dhan-trading
+Environment=PYTHONUNBUFFERED=1
+# main.py loads /opt/dhan-trading/.env itself via load_dotenv()
+ExecStart=/opt/dhan-trading/.venv/bin/python3 main.py
+Restart=on-failure
+RestartSec=10
+# Graceful shutdown: main.py traps SIGTERM (squares off paper positions,
+# logs run stop). Never SIGKILL a trading process before the grace expires.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# Keep writing to the path operators and Hermes skills already tail.
+# Logs also reachable via: journalctl -u dhan-platform
+StandardOutput=append:/tmp/platform.log
+StandardError=append:/tmp/platform.log
+
+[Install]
+WantedBy=multi-user.target

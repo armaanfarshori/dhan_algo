@@ -429,8 +429,14 @@ ssh ubuntu@13.206.66.237 "tail -f /tmp/backfill.log"
 # Check platform logs
 curl -s http://localhost:8765/api/logs?limit=20
 
-# Restart platform
-ssh ubuntu@13.206.66.237 "screen -S platform -X quit; sleep 2; screen -dmS platform bash -c 'cd /opt/dhan-trading && set -a && source .env && set +a && .venv/bin/python3 main.py >> /tmp/platform.log 2>&1'"
+# Restart platform (systemd since 2026-06-11 — NOT screen, NOT the cron watchdog)
+ssh ubuntu@13.206.66.237 "sudo systemctl restart dhan-platform"
+ssh ubuntu@13.206.66.237 "systemctl status dhan-platform --no-pager"
+ssh ubuntu@13.206.66.237 "journalctl -u dhan-platform -n 50 --no-pager"   # service-level events
+# Unit file: infra/systemd/dhan-platform.service → /etc/systemd/system/
+# The old scripts/platform_watchdog.sh crontab entry was REMOVED (it kill -9'd
+# main.py whenever a slow DB query blocked /api/status and truncated the log).
+# Do not re-add it — systemd Restart=on-failure handles crashes.
 
 # Deploy update (from agent EC2)
 bash ~/.hermes/skills/dhan/deploy_update/scripts/deploy.sh

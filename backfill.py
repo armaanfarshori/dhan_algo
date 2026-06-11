@@ -238,31 +238,52 @@ async def backfill_intraday(
     to_date: date,
     dry_run: bool = False,
 ) -> int:
+    # Transient failures (asyncio.TimeoutError stringifies to "", network
+    # blips) get retried before the chunk is skipped — a skipped chunk is a
+    # permanent 90-day hole in the raw layer. DH-905 (no data) is permanent
+    # per Dhan, so it skips immediately without burning API budget.
+    _CHUNK_RETRY_WAIT = [5, 15, 30]
+
     total = 0
     cursor = from_date
     while cursor <= to_date:
         chunk_end = min(cursor + timedelta(days=_MAX_INTRADAY_CHUNK - 1), to_date)
         logger.info("  [1m] %s  %s → %s", security_id,
                     cursor.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d"))
-        try:
-            instrument_type = _SEGMENT_INSTRUMENT.get(exchange_segment, "EQUITY")
-            data = await client.get_intraday_historical(
-                security_id=security_id,
-                exchange_segment=exchange_segment,
-                instrument=instrument_type,
-                interval="1",
-                from_date=cursor.strftime("%Y-%m-%d"),
-                to_date=chunk_end.strftime("%Y-%m-%d"),
-            )
-        except Exception as exc:
-            if _is_auth_error(exc):
-                # Token expired mid-run. If main.py already rotated it, reload
-                # and retry the SAME chunk; otherwise bubble up so the caller
-                # waits for a fresh token (and does NOT checkpoint this id).
-                if _reload_token(client):
-                    continue
-                raise _TokenExpired(str(exc))
-            logger.error("  Chunk failed: %s", exc)
+        instrument_type = _SEGMENT_INSTRUMENT.get(exchange_segment, "EQUITY")
+        data    = None
+        attempt = 0
+        while True:
+            try:
+                data = await client.get_intraday_historical(
+                    security_id=security_id,
+                    exchange_segment=exchange_segment,
+                    instrument=instrument_type,
+                    interval="1",
+                    from_date=cursor.strftime("%Y-%m-%d"),
+                    to_date=chunk_end.strftime("%Y-%m-%d"),
+                )
+                break
+            except Exception as exc:
+                if _is_auth_error(exc):
+                    # Token expired mid-run. If main.py already rotated it,
+                    # reload and retry the SAME chunk; otherwise bubble up so
+                    # the caller waits for a fresh token (and does NOT
+                    # checkpoint this id).
+                    if _reload_token(client):
+                        continue
+                    raise _TokenExpired(str(exc))
+                if "DH-905" in str(exc) or attempt >= len(_CHUNK_RETRY_WAIT):
+                    logger.error("  Chunk failed (%d attempts): %r — skipping %s → %s",
+                                 attempt + 1, exc,
+                                 cursor.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d"))
+                    break
+                wait = _CHUNK_RETRY_WAIT[attempt]
+                attempt += 1
+                logger.warning("  Chunk error: %r — retry %d/%d in %ds",
+                               exc, attempt, len(_CHUNK_RETRY_WAIT), wait)
+                await asyncio.sleep(wait)
+        if data is None:
             cursor = chunk_end + timedelta(days=1)
             continue
 
@@ -308,7 +329,7 @@ async def backfill_daily(
                     client, security_id, exchange_segment, from_date, to_date, dry_run,
                 )
             raise _TokenExpired(str(exc))
-        logger.error("  Daily fetch failed: %s", exc)
+        logger.error("  Daily fetch failed: %r", exc)
         return 0
 
     df = _parse_daily(data, security_id, exchange_segment)
