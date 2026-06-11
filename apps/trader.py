@@ -112,6 +112,9 @@ async def main():
         from engine.portfolio import Portfolio
         portfolio = Portfolio(mode="PAPER" if cfg.paper_trading else "LIVE", db_backend=db)
         await portfolio.reconcile_on_boot()
+        # LIVE: cross-check against the broker — it is the source of truth.
+        # No-op in paper mode.
+        await portfolio.reconcile_with_broker(dhan)
 
         # ── Market data: WebSocket feed → BarBuilder → bars table ─────────────
         from core.live_feed import LiveFeed

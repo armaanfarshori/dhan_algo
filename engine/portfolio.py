@@ -169,3 +169,43 @@ class Portfolio:
 
         if not rows:
             logger.info("Portfolio[%s]: no open positions to reconcile", self.mode)
+
+    async def reconcile_with_broker(self, client):
+        """LIVE mode only: the broker's book is the source of truth. Any
+        divergence from the engine's view (missed fill, manual trade, partial
+        fill drift) is adopted from the broker and reported CRITICAL."""
+        if self.mode != "LIVE":
+            return
+        try:
+            broker = await client.get_positions() or []
+        except Exception as exc:
+            logger.critical("LIVE broker reconcile FAILED (%s) — engine view may be wrong. "
+                            "Do not trust positions until this succeeds.", exc)
+            return
+
+        broker_rows = {}
+        for p in broker:
+            sid = str(p.get("securityId") or p.get("security_id") or "")
+            qty = int(p.get("netQty") or 0)
+            if sid and qty != 0:
+                avg = float(p.get("buyAvg") if qty > 0 else p.get("sellAvg")) \
+                    if (p.get("buyAvg") or p.get("sellAvg")) else float(p.get("costPrice") or 0)
+                broker_rows[sid] = (qty, avg)
+
+        for sid in set(broker_rows) | {p.security_id for p in self.open_positions()}:
+            b_qty, b_avg = broker_rows.get(sid, (0, 0.0))
+            e_qty = self.get(sid).qty
+            if b_qty == e_qty:
+                continue
+            logger.critical("LIVE RECONCILE MISMATCH %s: broker=%+d engine=%+d — "
+                            "adopting broker truth", sid, b_qty, e_qty)
+            pos = Position(security_id=sid, qty=b_qty,
+                           avg_price=b_avg if b_qty else 0.0,
+                           strategy=self.get(sid).strategy)
+            if b_qty == 0:
+                self.positions.pop(sid, None)
+            else:
+                self.positions[sid] = pos
+            await self._persist(pos)
+        logger.info("Portfolio[LIVE]: broker reconcile complete — %d broker positions",
+                    len(broker_rows))
