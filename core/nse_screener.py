@@ -54,39 +54,26 @@ def get_top_volatile(
     """
     from db import get_session
 
+    # Ranks from DAILY bars — the backfill writes both 1m and 1d. The old
+    # 1-minute aggregation scanned millions of rows and ran into its 20s
+    # statement timeout whenever the backfill was writing; the queued-up
+    # queries starved the api's thread executor and froze dashboard file
+    # serving. Identical semantics, milliseconds instead of seconds.
     sql = text("""
-        WITH daily_agg AS (
-            -- Aggregate 1-min bars into daily OHLCV
-            SELECT
-                b.security_id,
-                b.time::date                                      AS dt,
-                MAX(b.high)                                       AS day_high,
-                MIN(b.low)                                        AS day_low,
-                (ARRAY_AGG(b.close ORDER BY b.time DESC))[1]      AS last_close,
-                SUM(b.volume)                                     AS day_volume
-            FROM bars b
-            JOIN instruments i ON i.security_id = b.security_id
-            WHERE b.timeframe   = '1m'
-              AND b.time        >= NOW() - (:lookback * INTERVAL '1 day')
-              AND i.exchange_segment = :seg
-              AND i.instrument_type  = 'EQUITY'
-            GROUP BY b.security_id, b.time::date
-        ),
-        ranked AS (
-            SELECT
-                security_id,
-                COUNT(*)                                          AS trading_days,
-                -- Normalized daily range as proxy for ATR%
-                AVG((day_high - day_low) / NULLIF(last_close, 0)) AS atr_pct,
-                AVG(day_volume)                                   AS avg_volume,
-                AVG(last_close)                                   AS avg_close
-            FROM daily_agg
-            GROUP BY security_id
-            HAVING COUNT(*) >= :min_days
-        )
-        SELECT security_id, atr_pct, avg_volume, avg_close, trading_days
-        FROM ranked
-        WHERE avg_volume >= :min_vol
+        SELECT b.security_id,
+               AVG((b.high - b.low) / NULLIF(b.close, 0)) AS atr_pct,
+               AVG(b.volume)                              AS avg_volume,
+               AVG(b.close)                               AS avg_close,
+               COUNT(*)                                   AS trading_days
+        FROM bars b
+        JOIN instruments i ON i.security_id = b.security_id
+        WHERE b.timeframe = '1d'
+          AND b.time >= NOW() - (:lookback * INTERVAL '1 day')
+          AND i.exchange_segment = :seg
+          AND i.instrument_type  = 'EQUITY'
+        GROUP BY b.security_id
+        HAVING COUNT(*) >= :min_days
+           AND AVG(b.volume) >= :min_vol
         ORDER BY atr_pct DESC
         LIMIT :n
     """)

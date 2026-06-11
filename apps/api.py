@@ -618,6 +618,16 @@ def build_app() -> web.Application:
 
 async def main():
     logger.info("dhan-api starting on port %d", cfg.webhook_port)
+
+    # aiohttp's FileResponse/static serving stats+opens files in the DEFAULT
+    # executor. The DB queries this app runs there too once saturated all
+    # ~6 default threads during DB contention and froze the dashboard while
+    # JSON endpoints kept answering. Bigger dedicated pool = file serving
+    # can never queue behind slow queries.
+    from concurrent.futures import ThreadPoolExecutor
+    asyncio.get_event_loop().set_default_executor(
+        ThreadPoolExecutor(max_workers=16, thread_name_prefix="api"))
+
     from db import init_db
     init_db(cfg.db_url)
 
