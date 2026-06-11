@@ -126,12 +126,13 @@ def fill_outcomes(days: int = 14, horizon_min: int = HORIZON_MIN_DEFAULT,
     cutoff_old = datetime.now(timezone.utc) - timedelta(days=days)
 
     with get_session() as s:
+        # features_snapshot is json (not jsonb) — cast for the ? operator
         pending = s.execute(text("""
             SELECT id, security_id, side, ts FROM signals
             WHERE side IN ('BUY','SELL')
               AND ts BETWEEN :old AND :new
               AND (features_snapshot IS NULL
-                   OR NOT (features_snapshot ? 'realized_return'))
+                   OR NOT (features_snapshot::jsonb ? 'realized_return'))
             ORDER BY ts DESC LIMIT :lim
         """), {"old": cutoff_old, "new": cutoff_new, "lim": limit}).fetchall()
 
@@ -144,8 +145,8 @@ def fill_outcomes(days: int = 14, horizon_min: int = HORIZON_MIN_DEFAULT,
         with get_session() as s:
             s.execute(text("""
                 UPDATE signals
-                SET features_snapshot = COALESCE(features_snapshot, '{}'::jsonb)
-                                        || CAST(:o AS jsonb)
+                SET features_snapshot = (COALESCE(features_snapshot::jsonb, '{}'::jsonb)
+                                         || CAST(:o AS jsonb))::json
                 WHERE id = :id
             """), {"o": json.dumps(outcome), "id": sig_id})
         filled += 1
@@ -202,7 +203,7 @@ def load_calibration_rows(days: int = 30) -> list[dict]:
             SELECT security_id, side, confidence, strategy, ts, features_snapshot
             FROM signals
             WHERE ts >= :cutoff
-              AND features_snapshot ? 'realized_return'
+              AND features_snapshot::jsonb ? 'realized_return'
         """), {"cutoff": cutoff}).fetchall()
     out = []
     for sid, side, conf, strategy, ts, feat in rows:
