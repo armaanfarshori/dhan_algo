@@ -34,6 +34,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# basicConfig MUST run before install_log_buffer() — it is a no-op once the
+# root logger has any handler, and the root level would stay at WARNING. With
+# the old order the platform never wrote a single INFO line to stderr (which
+# is why /tmp/platform.log was always empty).
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+    datefmt="%H:%M:%S",
+)
+
 from core.auth import DhanAuthManager
 from core.journal import get_trade_logger, get_log_buffer, install_log_buffer
 from core.live_feed import LiveFeed
@@ -58,11 +68,6 @@ from strategies.backtest_strategies import (
     STRATEGY_REGISTRY,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
-    datefmt="%H:%M:%S",
-)
 logger = logging.getLogger("dhan.main")
 
 from config import get_config as _get_cfg
