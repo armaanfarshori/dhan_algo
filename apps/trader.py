@@ -18,7 +18,7 @@ import logging
 import signal
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -42,6 +42,55 @@ RUN_DIR = Path(__file__).parent.parent / "run"
 HEARTBEAT_FILE = RUN_DIR / "trader_heartbeat.json"
 KILLSWITCH_FILE = RUN_DIR / "killswitch"
 HEARTBEAT_INTERVAL = 5.0
+
+
+async def seed_opening_ranges(runners, dhan, segment: str, orb_minutes: int):
+    """
+    Mid-session restart: the ORB instances never saw 9:15–9:30, so without
+    this they can neither manage reconciled positions (no stop/target) nor
+    trade today. Rebuild each security's true OR from REST intraday bars;
+    breakouts that already happened while we were down are marked tried so
+    they aren't taken hours late. Failures are non-fatal — the EOD
+    square-off no longer depends on a locked OR.
+    """
+    from engine.runner import IST
+    from strategies.orb import MARKET_OPEN
+    now = datetime.now(IST)
+    or_end = (datetime.combine(now.date(), MARKET_OPEN, tzinfo=IST)
+              + timedelta(minutes=orb_minutes))
+    if now.weekday() >= 5 or now <= or_end:
+        return
+    day = now.strftime("%Y-%m-%d")
+    seeded = 0
+    for r in runners:
+        orb = r.strategy
+        if orb.or_locked:
+            continue
+        try:
+            data = await dhan.get_intraday_historical(
+                security_id=orb.security_id, exchange_segment=segment,
+                instrument="EQUITY", interval="1",
+                from_date=day, to_date=day)
+            or_h, or_l = 0.0, float("inf")
+            post_h, post_l = 0.0, float("inf")
+            for ts, h, l in zip(data.get("timestamp") or [],
+                                data.get("high") or [],
+                                data.get("low") or []):
+                bar = datetime.fromtimestamp(ts, IST)
+                if bar.date() != now.date():
+                    continue
+                if MARKET_OPEN <= bar.time() and bar < or_end:
+                    or_h, or_l = max(or_h, h), min(or_l, l)
+                elif bar >= or_end:
+                    post_h, post_l = max(post_h, h), min(post_l, l)
+            orb.seed_opening_range(now.date(), or_h, or_l, post_h, post_l)
+            seeded += orb.or_locked
+        except Exception as exc:
+            logger.warning("OR seed failed for %s (%s) — position still "
+                           "guarded by EOD square-off", orb.security_id, exc)
+    if seeded:
+        logger.info("Opening ranges seeded for %d/%d securities (mid-session boot)",
+                    seeded, len(runners))
 
 
 async def write_heartbeat(*, runners, portfolio, risk, feed, bar_builder,
@@ -244,6 +293,12 @@ async def main():
                 max_entries_per_session=cfg.max_orders_per_session))
         logger.info("ORB engine on %d securities (gate: %s)",
                     len(runners), "shadow" if cfg.kronos_shadow_mode else "enforcing")
+
+        # Mid-session restart? Rebuild today's opening ranges before any
+        # runner polls — reconciled positions need stops/targets immediately.
+        await seed_opening_ranges(runners, dhan,
+                                  cfg.watchlist_exchange_segment,
+                                  cfg.orb_range_minutes)
 
         # ── Optional Kronos live scanner ───────────────────────────────────────
         kronos_scanner = None

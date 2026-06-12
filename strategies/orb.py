@@ -98,15 +98,17 @@ class ORB:
             self.or_locked = True
             logger.info("[ORB %s] OR locked  HIGH=%.2f LOW=%.2f RANGE=%.2f",
                         self.security_id, self.or_high, self.or_low, self.or_range)
-        if not self.or_locked:
-            return None
-
-        # 3. EOD square-off
+        # 3. EOD square-off — must NOT depend on a locked OR: after a
+        # mid-session restart the range can be unknown, but an open
+        # (DB-reconciled) position must still flatten before close.
         squareoff = (datetime.combine(today, MARKET_CLOSE)
                      - timedelta(minutes=self.p.squareoff_before_close_min)).time()
         if t >= squareoff:
             if self.position != 0:
                 return Decision(action="EXIT", reason="EOD square-off")
+            return None
+
+        if not self.or_locked:
             return None
 
         # 4. Exits for the open position
@@ -152,6 +154,28 @@ class ORB:
     @property
     def or_range(self) -> float:
         return (self.or_high - self.or_low) if self.or_locked else 0.0
+
+    def seed_opening_range(self, today: date, high: float, low: float,
+                           post_or_high: float = 0.0,
+                           post_or_low: float = float("inf")):
+        """
+        Restore today's OR after a mid-session restart (from REST intraday bars).
+        post_or_high/low are the extremes AFTER the OR window: if the breakout
+        already happened while we weren't watching, mark that side as tried so
+        we don't take it hours late at a much worse price.
+        """
+        if high <= 0 or low <= 0 or high < low:
+            return
+        self._session_date = today
+        self.or_high = high
+        self.or_low = low
+        self.or_locked = True
+        if post_or_high > high:
+            self._long_tried = True
+        if post_or_low < low:
+            self._short_tried = True
+        logger.info("[ORB %s] OR seeded  HIGH=%.2f LOW=%.2f (long_tried=%s short_tried=%s)",
+                    self.security_id, high, low, self._long_tried, self._short_tried)
 
     def _reset_session(self, today: date):
         self._session_date = today

@@ -95,3 +95,43 @@ def test_45min_window_no_crash():
     assert not s.or_locked                    # still inside the window
     s.on_tick(ist(10, 1), 102)
     assert s.or_locked
+
+
+# ── Mid-session restart (positions reconciled from DB, OR never observed) ──
+
+def test_eod_squareoff_without_locked_or():
+    """A restarted trader with an open position but no OR must still flatten."""
+    s = ORB("999")
+    s.position = 100          # resynced from Portfolio at boot
+    s.entry_price = 101.0
+    d = s.on_tick(ist(15, 20), 100)
+    assert not s.or_locked
+    assert d is not None and d.action == "EXIT" and "square-off" in d.reason
+
+
+def test_seed_opening_range_restores_exits():
+    s = ORB("999")
+    s.position = 100
+    s.entry_price = 102.5
+    s.seed_opening_range(ist(12, 0).date(), 102.0, 100.0)
+    assert s.or_locked and s.or_range == 2.0
+    # stop = or_low padded — a drop through it must exit
+    d = s.on_tick(ist(12, 5), 99.0)
+    assert d is not None and d.action == "EXIT" and "Stop-loss" in d.reason
+
+
+def test_seed_marks_already_broken_sides_tried():
+    """A breakout that happened while we were down must not be taken late."""
+    s = ORB("999")
+    s.seed_opening_range(ist(12, 0).date(), 102.0, 100.0,
+                         post_or_high=105.0, post_or_low=101.0)
+    assert s._long_tried and not s._short_tried
+    assert s.on_tick(ist(12, 5), 106.0) is None          # no late long
+    d = s.on_tick(ist(12, 6), 99.5)                      # fresh short is fine
+    assert d is not None and d.action == "ENTER" and d.side == "SELL"
+
+
+def test_seed_rejects_garbage():
+    s = ORB("999")
+    s.seed_opening_range(ist(12, 0).date(), 0.0, float("inf"))
+    assert not s.or_locked
