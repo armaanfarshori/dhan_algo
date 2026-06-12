@@ -94,7 +94,12 @@ async def snapshot_handler(_r: web.Request) -> web.Response:
         "ts": datetime.now(timezone.utc).isoformat(),
         "trader": hb,
         "limits": {
-            "max_daily_loss": cfg.max_daily_loss,
+            # Approximate (base equity × pct) — the live number in the
+            # heartbeat's risk.daily_loss_budget compounds realized P&L.
+            "max_daily_loss": round(
+                (cfg.paper_balance if cfg.paper_trading else cfg.capital)
+                * cfg.max_daily_loss_pct
+                * (1.0 if cfg.paper_trading else cfg.live_risk_scale)),
             "paper_balance": cfg.paper_balance,
             "max_orders_per_session": cfg.max_orders_per_session,
             "max_open_positions": cfg.max_open_positions,

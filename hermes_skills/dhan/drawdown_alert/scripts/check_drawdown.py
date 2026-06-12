@@ -26,7 +26,7 @@ with get_session() as s:
 
 realized = float(row[0]) if row else 0.0
 trades   = int(row[1])   if row else 0
-max_loss = cfg.max_daily_loss
+max_loss = (cfg.paper_balance if cfg.paper_trading else cfg.capital) * cfg.max_daily_loss_pct
 pct      = abs(realized) / max_loss * 100 if realized < 0 else 0.0
 
 # Only alert on threshold crossings — stay silent if safe

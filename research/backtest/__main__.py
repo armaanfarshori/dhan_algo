@@ -45,7 +45,7 @@ async def run(args) -> int:
     params = BacktestParams(
         equity=args.equity,
         risk_per_trade=cfg.risk_per_trade,
-        max_notional_per_trade=cfg.max_notional_per_trade,
+        max_notional_pct=cfg.max_notional_per_trade_pct,
         slippage_bps=args.slippage_bps,
         orb=ORBParams(orb_minutes=cfg.orb_range_minutes),
     )

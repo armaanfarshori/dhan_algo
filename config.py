@@ -33,14 +33,20 @@ class Config(BaseSettings):
     allow_live_toggle: bool = False
     strategy: str = "orb"
 
-    # ── Risk ────────────────────────────────────────────────────────────────
-    max_daily_loss: float = 5_000.0
-    capital: float = 100_000.0
-    risk_per_trade: float = 0.01          # fraction of equity risked per trade
-    paper_balance: float = 500_000.0
+    # ── Risk — ALL limits are fractions of equity, never absolute rupees ─────
+    # (so paper rehearses the same geometry live will use; reworked 2026-06-13)
+    capital: float = 100_000.0            # live starting capital
+    paper_balance: float = 500_000.0      # paper starting equity
+    risk_per_trade: float = 0.005         # 0.5% of equity at risk per trade
+    max_daily_loss_pct: float = 0.02      # 2% — halt + flatten for the day
+    weekly_loss_pct: float = 0.05         # 5% — halt until next week
+    max_notional_per_trade_pct: float = 0.20
+    max_gross_exposure_pct: float = 1.00  # Σ|position notional| — no implicit leverage
+    adv_participation_pct: float = 0.01   # qty ≤ 1% of 20-day avg daily volume
+    min_stop_distance_pct: float = 0.0035 # stop floor — tiny ORB ranges can't explode size
+    live_risk_scale: float = 0.5          # live mode halves every fraction (M8 training wheels)
     max_orders_per_session: int = 4
     max_open_positions: int = 10
-    max_notional_per_trade: float = 100_000.0
     paper_slippage_bps: float = 2.0       # adverse slippage on simulated fills
 
     # ── ORB strategy ────────────────────────────────────────────────────────

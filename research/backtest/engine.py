@@ -40,7 +40,7 @@ GateFn = Callable[[str, str, pd.DataFrame], Awaitable[bool]]
 class BacktestParams:
     equity: float = 500_000.0
     risk_per_trade: float = 0.01
-    max_notional_per_trade: float = 100_000.0
+    max_notional_pct: float = 0.20
     slippage_bps: float = 2.0
     orb: ORBParams = field(default_factory=ORBParams)
 
@@ -101,8 +101,8 @@ async def replay_security_day(
 
     orb = ORB(security_id, params.orb)
     sizer = RiskEngine(
-        RiskParams(equity=params.equity, risk_per_trade=params.risk_per_trade,
-                   max_notional_per_trade=params.max_notional_per_trade),
+        RiskParams(equity_base=params.equity, risk_per_trade=params.risk_per_trade,
+                   max_notional_pct=params.max_notional_pct),
         Portfolio(mode="BACKTEST"), ltp_lookup=lambda _s: 0.0)
 
     trades: list[BTTrade] = []

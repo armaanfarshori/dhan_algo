@@ -281,16 +281,31 @@ async def main():
                     return r.last_price
             return 0.0
 
+        # Live mode runs the same fractional geometry at reduced scale
+        # (training wheels for M8) — paper validates exactly what live does.
+        scale = 1.0 if cfg.paper_trading else cfg.live_risk_scale
         risk = RiskEngine(
             RiskParams(
-                max_daily_loss=cfg.max_daily_loss,
+                equity_base=cfg.paper_balance if cfg.paper_trading else cfg.capital,
+                risk_per_trade=cfg.risk_per_trade * scale,
+                max_daily_loss_pct=cfg.max_daily_loss_pct * scale,
+                weekly_loss_pct=cfg.weekly_loss_pct * scale,
+                max_notional_pct=cfg.max_notional_per_trade_pct * scale,
+                max_gross_exposure_pct=cfg.max_gross_exposure_pct * scale,
+                adv_participation_pct=cfg.adv_participation_pct,
+                min_stop_distance_pct=cfg.min_stop_distance_pct,
                 max_open_positions=cfg.max_open_positions,
-                risk_per_trade=cfg.risk_per_trade,
-                max_notional_per_trade=cfg.max_notional_per_trade,
-                equity=cfg.paper_balance if cfg.paper_trading else cfg.capital,
                 killswitch_file=KILLSWITCH_FILE,
+                halt_file=RUN_DIR / "halt_state.json",
             ),
             portfolio, ltp_lookup, db_backend=db)
+        # Restart-proofing: restore an in-scope loss halt, seed the DB-backed
+        # P&L cache, and conservatively book one full risk budget against
+        # each reconciled position (their stops are recomputed by ORB).
+        risk.load_persisted_halt()
+        await risk.refresh_pnl()
+        for p in portfolio.open_positions():
+            risk.register_risk(p.security_id, risk.risk_budget_per_trade)
 
         @risk.on_halt
         async def on_halt(reason: str):
@@ -310,6 +325,7 @@ async def main():
                     if fill:
                         await portfolio.apply_fill(fill, strategy="ORB")
                         r.strategy.notify_flat()
+                        risk.release_risk(r.sid)
 
         # ── Strategy runners ───────────────────────────────────────────────────
         from engine.runner import StrategyRunner

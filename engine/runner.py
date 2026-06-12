@@ -134,7 +134,8 @@ class StrategyRunner:
             logger.info("Runner %s: Kronos gate blocked %s entry", self.sid, d.side)
             return
 
-        qty = self._risk.size_position(entry=price, stop=d.stop)
+        adv = await self._risk.get_adv(self.sid)
+        qty = self._risk.size_position(entry=price, stop=d.stop, adv=adv)
         intent = OrderIntent(
             security_id=self.sid, exchange_segment=self._segment,
             side=d.side, qty=qty, strategy="ORB", reason=d.reason,
@@ -149,6 +150,9 @@ class StrategyRunner:
             return
         await self._portfolio.apply_fill(fill, strategy="ORB")
         self.strategy.notify_fill(fill.side, fill.qty, fill.price)
+        # Book this position's stop-distance risk against the daily budget
+        self._risk.register_risk(self.sid,
+                                 self._risk.position_risk(fill.price, d.stop, fill.qty))
         self._entries_today += 1
 
     async def _handle_exit(self, d: Decision, price: float):
@@ -172,6 +176,7 @@ class StrategyRunner:
             return
         realized = await self._portfolio.apply_fill(fill, strategy="ORB")
         self.strategy.notify_flat()
+        self._risk.release_risk(self.sid)   # free its slice of the daily budget
         logger.info("Runner %s: exited (%s) — realized ₹%+.2f", self.sid, d.reason, realized)
 
     # ── Introspection (heartbeat) ────────────────────────────────────────────
