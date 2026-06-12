@@ -26,7 +26,7 @@ if terraform apply -auto-approve; then
     cat > aws_outputs.local << OUTPUT
 # AWS infrastructure outputs — LOCAL ONLY, never committed to git
 # Generated: $(date -u +%Y-%m-%d\ %H:%M:%S\ UTC)
-# Account: 155304839154 | Region: ap-south-1
+# Region: ap-south-1
 
 AGENT_ELASTIC_IP=$AGENT_IP
 AGENT_INSTANCE_ID=$AGENT_ID

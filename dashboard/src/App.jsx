@@ -1205,12 +1205,12 @@ function ServicesRow({ data }) {
 function DBPanel({ dbStats }) {
   const d = dbStats?.data
   if (!d) return (
-    <SysPanel title="TimescaleDB" right="10.0.1.155:5432">
+    <SysPanel title="TimescaleDB" right="private subnet :5432">
       <div style={{ fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>Waiting for first poll…</div>
     </SysPanel>
   )
   if (!d.up) return (
-    <SysPanel title="TimescaleDB" right="10.0.1.155:5432" accent={T.red}>
+    <SysPanel title="TimescaleDB" right="private subnet :5432" accent={T.red}>
       <div style={{ fontFamily: T.mono, fontSize: 10, color: T.red }}>UNREACHABLE — {(d.error ?? '').slice(0, 120)}</div>
     </SysPanel>
   )

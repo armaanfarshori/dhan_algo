@@ -1,175 +1,143 @@
 # DhanAIBot — Algorithmic Trading Platform for NSE
 
-A self-hosted algorithmic trading platform for NSE (National Stock Exchange of India) equities and index options. It combines rule-based strategies with an OHLCV foundation model (Kronos) for AI signal filtering, a Hermes agent running on Groq LLM for orchestration, and TimescaleDB for all market data and trade history.
+A self-hosted intraday trading platform for NSE (National Stock Exchange of India) equities, built on the [DhanHQ v2 API](https://dhanhq.co/docs/v2/). It runs a rule-based Opening Range Breakout strategy filtered through [Kronos](https://github.com/shiyu-coder/Kronos), an OHLCV foundation model (AAAI 2026), with TimescaleDB as the single source of truth for market data, orders, and positions.
 
-**All execution happens on AWS EC2 (ap-south-1, Mumbai). The Mac is an editor only.**
+The design priority is **evidence before exposure**: paper trading is the hard default, the AI gate runs in shadow mode until calibration proves it adds value, and live trading is gated on a 2-year backtest with realistic Indian cost modelling.
+
+> ⚠️ **Disclaimer:** educational and research software. Algorithmic trading involves substantial financial risk. Always start in paper mode. The authors are not responsible for trading losses.
 
 ---
 
 ## Architecture
 
+Two independent processes share nothing but the database and a heartbeat file — an analytics query can never delay an order.
+
 ```
-  Mac (VS Code + Claude Code)
-         │ git push
-         ▼
-     GitHub (main)
-         │ git pull
-         ▼
-  AWS ap-south-1
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  agent EC2  t4g.micro  (13.206.66.237 Elastic IP)               │
-  │                                                                  │
-  │  main.py (asyncio)                                               │
-  │  ┌──────────────┐  ┌─────────────────┐  ┌────────────────────┐  │
-  │  │  DhanClient  │  │  RiskManager    │  │  Strategy Engine   │  │
-  │  │  aiohttp     │  │  30s monitor    │  │                    │  │
-  │  │  5 req/s     │  │  kill-switch    │  │  IndexOptionsScanner│ │
-  │  │  TOTP refresh│  │  daily loss cap │  │  (6 indices, RSI)  │  │
-  │  └──────┬───────┘  └─────────────────┘  │                    │  │
-  │         │                               │  MultiStockScanner │  │
-  │         │          ┌─────────────────┐  │  (top 15 movers)   │  │
-  │         │          │  LiveFeed       │  │                    │  │
-  │         │          │  WebSocket ticks│  │  ORBStrategy       │  │
-  │         │          │  6 indices +    │  │  (Kronos-gated)    │  │
-  │         │          │  top 15 equities│  └────────────────────┘  │
-  │         │          └─────────────────┘                          │
-  │         │                                                        │
-  │  ┌──────▼─────────────────────────────────────────────────────┐ │
-  │  │  aiohttp web server :8765  (React dashboard + /api/*)      │ │
-  │  └────────────────────────────────────────────────────────────┘ │
-  │                                                                  │
-  │  hermes agent  ──  @farshoribot (Telegram)                      │
-  │  groq llama-3.3-70b-versatile via OpenRouter                    │
-  └──────────────────────────────────────────────────────────────────┘
-         │ private subnet (10.0.0.0/16)
-         ▼
-  ┌──────────────────────────────────┐
-  │  db EC2  t4g.medium  (private)   │
-  │  TimescaleDB 19 tables           │
-  │  5 hypertables  ~4.8M bars       │
-  └──────────────────────────────────┘
-         │
-         ▼
-  DhanHQ v2 REST  api.dhan.co/v2  →  NSE / BSE
+                      Dhan WebSocket feed          Dhan REST API
+                             │                          │
+  ┌──────────────────────────▼──────────────────────────▼─────────────┐
+  │  dhan-trader  (apps/trader.py — systemd)                          │
+  │                                                                   │
+  │  LiveFeed ──► BarBuilder ──► bars hypertable   (1-min bars → DB)  │
+  │      │                                                            │
+  │      └──► StrategyRunner ──► ORB (pure signal logic)              │
+  │                 │                                                 │
+  │                 ├── KronosGate (shadow) ──► signals table         │
+  │                 ├── RiskEngine (sizing, daily-loss halt,          │
+  │                 │               kill-switch — single owner)       │
+  │                 └── Paper | Live executor ──► Portfolio (DB)      │
+  │                                                                   │
+  │  exports run/trader_heartbeat.json every 5 s                      │
+  └───────────────────────────────────────────────────────────────────┘
+                             │ heartbeat + DB (read-only)
+  ┌──────────────────────────▼────────────────────────────────────────┐
+  │  dhan-api  (apps/api.py — systemd)                                │
+  │  React dashboard + ~30 REST endpoints on :8765                    │
+  └───────────────────────────────────────────────────────────────────┘
+
+  TimescaleDB (separate EC2, private subnet)
+  bars · ticks · orders · fills · trades · positions · equity_curve
+  signals · runs · instruments  (5 hypertables, compression policies)
 ```
 
----
+**Key design decisions**
 
-## Tech Stack
-
-| Layer | Technology | Notes |
-|---|---|---|
-| Language | Python 3.11 | Graviton ARM64 on EC2 |
-| Async runtime | asyncio + aiohttp | Single process, all concurrent |
-| Broker API | DhanHQ v2 REST | No sandbox — all calls hit production |
-| Database | TimescaleDB (PostgreSQL + Timescale) | Hypertables, compression, free scans |
-| DB migrations | Alembic | 3 versions, current head: `003_auth_tables` |
-| AI signal filter | Kronos-small (NeoQuasar/HuggingFace) | OHLCV foundation model, AAAI 2026 |
-| Orchestration LLM | Groq `llama-3.3-70b-versatile` via OpenRouter | NOT Anthropic — too expensive for always-on |
-| Hermes agent | NousResearch Hermes | Telegram gateway (@farshoribot) |
-| Frontend | React 18 + Vite | Polls `/api/*`, served from `dashboard/dist/` |
-| Secrets | AWS SSM Parameter Store | Pulled by `setup_agent.sh` on first boot |
-| Infra | Terraform, ap-south-1, t4g Graviton | ~$56/month |
+| Decision | Why |
+|---|---|
+| One engine, swappable executors (Paper / Live / Backtest) | Strategies are mode-blind; paper → live is a config flip, not a code path |
+| Portfolio persisted to DB, reconciled on boot | A process restart never orphans a position; in live mode the broker is cross-checked as source of truth |
+| Kronos gate in **shadow mode** | Every verdict is logged with features for calibration, but never blocks a trade until the data says it should |
+| Kronos is fail-open | A model error must never stop the rule-based strategy from managing risk |
+| Backtester replays the **same** strategy class | Next-bar-open fills (no lookahead), full Indian intraday cost stack, point-in-time universe |
+| TimescaleDB self-hosted | Backtests scan millions of bars for free; no per-query billing |
 
 ---
 
-## Milestone Status
+## What's inside
 
-| Milestone | Status | Description |
-|---|---|---|
-| M0 — Infrastructure | Done | Terraform applied, TimescaleDB running, schema at head |
-| M1 — Data backfill | Done | 22,646 NSE equities being backfilled; 4.8M 1-min bars loaded |
-| M2 — Live WebSocket feed | In progress | LiveFeed connects; not yet writing to `ticks` table |
-| M3 — Backtester wired | Not started | `core/backtest.py` reads mock data, not `bars` hypertable |
-| M4 — Paper trading loop | In progress | `main.py` orchestrates both scanners; DB writes not fully wired |
-| M5 — Hermes orchestration | In progress | Hermes gateway online at @farshoribot; Groq configured |
-| M6 — Auth layer | Not started | Schema exists in `003_auth_tables`, no FastAPI routes |
-| M7 — Shadow orders | Not started | Log real-intent orders without executing |
-| M8 — Tiny live | Not started | 1-share real orders, reconcile fills |
-| M9 — Scale | Not started | After M8 validated |
+```
+apps/
+  trader.py            Trading process — feed, strategies, risk, execution
+  api.py               Dashboard process — REST API + static React build
+engine/
+  execution.py         PaperExecutor (slippage-modelled) / LiveExecutor (fill-confirmed)
+  portfolio.py         DB-persisted positions, boot + broker reconciliation
+  risk.py              Position sizing, daily-loss halt, kill-switch
+  bar_builder.py       WebSocket ticks → 1-minute bars → DB
+  runner.py            Polling loop per security: gate → size → risk → execute
+strategies/
+  orb.py               Opening Range Breakout — pure, synchronous, IO-free
+ml/
+  kronos_gate.py       Shadow/enforcing AI gate; persists every verdict
+  calibration.py       Realized-outcome filling + gate-value report (the re-arm criterion)
+research/backtest/     Event-driven backtester: engine, costs, universe, report
+core/                  Dhan client, token manager, live feed, screener, Kronos engine,
+                       instrument master, Telegram alerts, trade journal
+dashboard/             React 18 + Vite — Signals / Portfolio / System tabs, mobile-friendly
+infra/                 Terraform (VPC, 2× EC2, S3, SSM, IAM) + systemd units
+alembic/               Schema migrations (001 → 005)
+backfill.py            Historical OHLCV backfill CLI (checkpointed, rate-limited)
+config.py              Single typed pydantic-settings object — no os.getenv anywhere else
+tests/                 71 tests, run in CI on every push
+```
 
 ---
 
-## Key Constraints
+## The strategy loop
 
-- **No Dhan sandbox.** Every API call hits `api.dhan.co/v2` production infrastructure.
-- **Static IP required for live orders.** The agent EC2 Elastic IP (13.206.66.237) must be whitelisted in Dhan DevPortal under API settings. Once set, it cannot change for 7 days. Data APIs (historical bars, live feed, quotes) have no IP restriction.
-- **PAPER_TRADING=true always.** Never flip to `false` until backtesting on 2+ years of real data passes with realistic slippage.
-- **5 req/s rate limit.** Enforced in `core/client.py` with a token bucket.
-- **Max 90 days per intraday API call.** `backfill.py` chunks automatically.
-- **Token expires ~24h.** `core/auth.py` auto-refreshes via PIN + TOTP when `DHAN_PIN` and `DHAN_TOTP_SECRET` are set.
-- **Kronos is fail-open.** Model errors never block trades — `_kronos_allows()` returns `True` on exception.
+```
+Market open → ATR% screener picks top-N volatile NSE equities
+  (₹50 min price · 50K min avg volume · validated against the scrip master)
+  → ORB locks the 9:15–9:30 opening range per security
+  → breakout/breakdown → Kronos gate scores a 30-bar forecast
+       shadow mode: verdict logged, trade proceeds regardless
+       enforcing mode: confidence < threshold blocks the entry
+  → RiskEngine sizes the position from stop distance (1% equity risk,
+    notional cap) and can halt the session on daily loss
+  → executor fills (paper: ref price ± slippage · live: broker fill confirmed)
+  → exits: target (2× range) · stop (range edge ± buffer) · 15:15 EOD square-off
+  → every order, fill, trade, equity snapshot and gate verdict lands in the DB
+```
 
 ---
 
-## Quick Start
+## Quick start
 
-### Local dev (docker-compose)
+### Local development
 
 ```bash
-# Clone
-git clone <repo-url> DhanAIBot && cd DhanAIBot
-
-# Configure
-cp .env.example .env
-# Edit .env: set DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN at minimum
-
-# Start TimescaleDB locally
-docker compose up -d
-
-# Apply schema
-source venv/bin/activate      # or: python3.11 -m venv venv && source venv/bin/activate
+git clone https://github.com/armaanfarshori/dhan_algo && cd dhan_algo
+python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+
+cp .env.example .env            # set DHAN_CLIENT_ID + DHAN_ACCESS_TOKEN
+docker compose up -d            # throwaway local TimescaleDB
 alembic upgrade head
 
-# Load instrument master (~224K scrips)
-python backfill.py --instruments
+python backfill.py --instruments        # scrip master (~224K instruments)
+python backfill.py                      # bars for a starter watchlist
 
-# Backfill watchlist (90 days, default .env watchlist)
-python backfill.py
-
-# Run platform in paper mode
-python main.py
-# Dashboard at http://localhost:8765
+python -m apps.trader                   # paper mode by default
+python -m apps.api                      # dashboard → http://localhost:8765
+pytest -q                               # 71 tests
 ```
 
-### AWS deploy (production path)
+### Backtesting
 
 ```bash
-# 1. Provision infrastructure (run once from Mac terminal)
-cd infra && terraform init && terraform apply
-# Note the outputs: agent_elastic_ip, db_private_ip
-
-# 2. Whitelist agent Elastic IP in Dhan DevPortal → API settings (order APIs only)
-
-# 3. SSH to agent EC2
-ssh -i ~/.ssh/dhan_trading_key ubuntu@<agent_elastic_ip>
-
-# 4. On agent EC2 — repo is already cloned by setup_agent.sh
-cd ~/dhan_algo && source .venv/bin/activate
-
-# 5. Pull latest code
-git pull origin main
-
-# 6. Verify schema
-alembic current   # expect: 003_auth_tables (head)
-
-# 7. Load all instruments (run once)
-python backfill.py --instruments
-
-# 8. Backfill Nifty 50 — 5 years of 1-min + daily bars (~3.5 min)
-python backfill.py --all --from 2021-06-01
-
-# 9. Expand to all NSE equities (~5 days, running in background)
-python backfill.py --nse-eq --all --from 2021-06-01
-
-# 10. Run the platform
-python main.py
-
-# Dashboard access via SSH tunnel from Mac:
-ssh -L 8765:localhost:8765 ubuntu@<agent_elastic_ip>
-# Then open: http://localhost:8765
+python -m research.backtest --from 2026-05-01 --to 2026-06-01 --n 5
+python -m research.backtest --from 2026-05-01 --to 2026-06-01 --gate kronos --json
 ```
+
+### Production (AWS)
+
+```bash
+cd infra && terraform init && terraform apply
+# outputs: agent Elastic IP (whitelist it in Dhan DevPortal — order APIs only),
+# DB private IP. systemd units in infra/systemd/ run dhan-trader + dhan-api.
+```
+
+See [docs/Setup-Guide.md](docs/Setup-Guide.md) for the full walkthrough and [docs/Operations-Runbook.md](docs/Operations-Runbook.md) for day-2 operations.
 
 ---
 
@@ -177,25 +145,22 @@ ssh -L 8765:localhost:8765 ubuntu@<agent_elastic_ip>
 
 | Page | Contents |
 |---|---|
-| [docs/Home.md](docs/Home.md) | System overview, feature highlights, tech stack |
-| [docs/Setup-Guide.md](docs/Setup-Guide.md) | Local dev, AWS deploy, Hermes setup |
-| [docs/Configuration.md](docs/Configuration.md) | All env vars, strategy config fields, DB config |
-| [docs/Strategies.md](docs/Strategies.md) | ORB, Options Scalper, SMA Crossover signal logic |
-| [docs/API-Reference.md](docs/API-Reference.md) | All 30+ REST endpoints with request/response examples |
+| [docs/Home.md](docs/Home.md) | Overview, current status, roadmap |
+| [docs/Architecture.md](docs/Architecture.md) | Process model, engine internals, data flow, design rationale |
+| [docs/Setup-Guide.md](docs/Setup-Guide.md) | Local dev and AWS deployment, step by step |
+| [docs/Configuration.md](docs/Configuration.md) | Every config field with defaults and safety notes |
+| [docs/Strategies.md](docs/Strategies.md) | ORB rules, Kronos gate, risk model, calibration loop |
+| [docs/Backtesting.md](docs/Backtesting.md) | Backtester design, cost model, CLI usage |
+| [docs/API-Reference.md](docs/API-Reference.md) | REST endpoints with response shapes |
+| [docs/Operations-Runbook.md](docs/Operations-Runbook.md) | Deploy, monitor, recover — the ops playbook |
 
 ---
 
-## Safety Rules
+## Safety model
 
-1. `PAPER_TRADING=true` is the default. Never flip without explicit intent and backtesting evidence.
-2. IP whitelist applies only to order placement. Data APIs work from any IP.
-3. `RiskManager` owns the kill-switch. All orders route through `core/risk.py`.
-4. No live trading until backtesting passes on 2+ years of real NSE data with realistic costs.
-5. Kronos failures must never block trades. `_kronos_allows()` returns `True` on any exception.
-6. Hermes may only propose changes to strategy/risk parameters. Human approval required for anything touching position sizing, kill-switch threshold, or live order flow.
-
----
-
-## Disclaimer
-
-This software is for educational and research purposes. Algorithmic trading involves substantial financial risk. Always start in paper mode. The authors are not responsible for trading losses.
+1. **`PAPER_TRADING=true` is the default.** Going live requires editing `.env` *and* `ALLOW_LIVE_TOGGLE=true` *and* a process restart — live is never one HTTP request away.
+2. **The RiskEngine owns the kill-switch.** All orders route through it; an external kill-switch file halts and flattens within seconds. Nothing bypasses it.
+3. **Kronos is fail-open.** Gate errors never block trades — the rule-based exits always run.
+4. **No live trading until the backtest passes** on 2+ years of real NSE data with realistic costs (brokerage, STT, exchange charges, GST, slippage).
+5. **Dhan has no sandbox.** Every non-paper API call hits production infrastructure. The IP whitelist applies to order placement only.
+6. **EOD square-off is unconditional** — it does not depend on strategy state, so a mid-session restart can never leave a position unmanaged overnight.

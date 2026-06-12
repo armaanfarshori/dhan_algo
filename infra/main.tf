@@ -11,7 +11,7 @@ terraform {
   # After first apply, migrate state to S3 with:
   #   uncomment the backend block, run: terraform init -migrate-state
   # backend "s3" {
-  #   bucket         = "dhan-trading-tfstate-155304839154"
+  #   bucket         = "dhan-trading-tfstate-<ACCOUNT_ID>"
   #   key            = "prod/terraform.tfstate"
   #   region         = "ap-south-1"
   #   dynamodb_table = "dhan-trading-tflock"

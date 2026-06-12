@@ -1,352 +1,116 @@
 # Setup Guide
 
-Two paths: local dev using docker-compose (Mac/Linux), and the production AWS deploy. All live execution happens on AWS — the Mac is an editor only.
+Two paths: **local development** (Mac/Linux, docker-compose, paper only) and the **production AWS deploy**. All live execution belongs on AWS — Dhan locks order placement to one whitelisted IP, and there is no sandbox.
 
 ---
 
-## Prerequisites
+## Local development
 
-| Requirement | Notes |
-|---|---|
-| DhanHQ account | API access enabled at https://developer.dhan.co/ |
-| Python 3.11 | ARM64 on EC2; any arch for local dev |
-| Docker + Docker Compose | Local dev only |
-| Terraform >= 1.5 | AWS deploy only |
-| AWS CLI configured | Profile `dhan-terraform` used by infra |
-| SSH key at `~/.ssh/dhan_trading_key` | EC2 access |
-
----
-
-## Path A — Local Dev (docker-compose)
-
-Use this to edit code and test backfill/API logic against a local TimescaleDB. Nothing is traded and no Dhan orders are placed (paper mode).
-
-### 1. Clone and configure
+Prerequisites: Python 3.11+, Docker, Node 18+ (for the dashboard).
 
 ```bash
-git clone <repo-url> DhanAIBot
-cd DhanAIBot
+git clone https://github.com/armaanfarshori/dhan_algo && cd dhan_algo
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 
 cp .env.example .env
-# Edit .env — minimum required:
-#   DHAN_CLIENT_ID=<from developer.dhan.co>
-#   DHAN_ACCESS_TOKEN=<JWT from developer.dhan.co>
-#   PAPER_TRADING=true        ← never change this locally
-#   DB_HOST=localhost
-#   DB_PORT=5432
-#   DB_NAME=dhan_trading
-#   DB_USER=trader
-#   DB_PASSWORD=trader123
+# Minimum: DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN (from web.dhan.co → DhanHQ APIs)
+# For token auto-refresh: DHAN_PIN + DHAN_TOTP_SECRET
+
+docker compose up -d          # throwaway local TimescaleDB on :5432
+alembic upgrade head          # expect head: 005
+
+python backfill.py --instruments     # scrip master, ~224K instruments
+python backfill.py                   # bars for a starter watchlist
+
+# Run (two terminals)
+python -m apps.trader                # paper mode by default
+python -m apps.api                   # http://localhost:8765
+
+# Dashboard dev with hot reload (optional)
+cd dashboard && npm install && npm run dev
+
+# Tests
+pytest -q                            # 71 passing
 ```
 
-### 2. Start TimescaleDB
+The local DB is for development only — the production database is the permanent landing zone for market data; don't try to mirror it onto a laptop. For research, pull curated Parquet extracts from S3 and query them with DuckDB.
+
+---
+
+## Production deploy (AWS)
+
+### 1. Provision
 
 ```bash
-docker compose up -d
-# Starts TimescaleDB on localhost:5432
-# Credentials match the defaults in .env.example
+cd infra && terraform init && terraform apply
+# Outputs: agent Elastic IP, DB private IP, S3 bucket name
 ```
 
-Verify it is running:
+This creates: a VPC with a public subnet (agent) and private subnet (DB), two ARM Graviton EC2 instances, an Elastic IP, an S3 bucket, SSM parameters for secrets, and IAM instance profiles. Estimated cost ≈ $56/month.
+
+### 2. Whitelist the Elastic IP at Dhan
+
+DevPortal → API settings → add the agent's Elastic IP. **This applies to order-placement APIs only** — data, historical, and WebSocket APIs work from any IP. Note: once set, Dhan locks IP changes for 7 days.
+
+### 3. Configure the agent
 
 ```bash
-docker compose ps
-# Should show trading-db as "running"
-
-docker exec -it trading-db psql -U trader -d dhan_trading -c "SELECT version();"
-```
-
-### 3. Create virtual environment and install dependencies
-
-```bash
-python3.11 -m venv venv
-source venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-### 4. Apply database schema
-
-```bash
+ssh -i <your-key> ubuntu@<agent-elastic-ip>
+cd /opt/dhan-trading                      # repo cloned by the bootstrap script
+cp .env.example .env                      # fill in:
+#   DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN / DHAN_PIN / DHAN_TOTP_SECRET
+#   DB_HOST=<db-private-ip>  DB_PASSWORD=<from SSM>
+#   TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID   (alerts)
+#   PAPER_TRADING=true                      (leave it)
 alembic upgrade head
-alembic current   # should show: 003_auth_tables (head)
 ```
 
-### 5. Load instrument master
-
-Downloads the Dhan scrip master CSV (~224K instruments) and upserts into the `instruments` table. Run once, then only again when instrument data is stale.
+### 4. Install the services
 
 ```bash
-python backfill.py --instruments
-# Output: Done — 204000 instruments loaded across N segments
+sudo cp infra/systemd/dhan-trader.service /etc/systemd/system/
+sudo cp infra/systemd/dhan-api.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now dhan-trader dhan-api
 ```
 
-### 6. Backfill market data
+Logs land in `/var/log/dhan/{trader,api}.log`.
 
-Default: 90 days of 1-min bars for the securities in `WATCHLIST_SECURITY_IDS` (RELIANCE, HDFCBANK, INFY, TCS).
+### 5. Backfill historical data
 
 ```bash
-# Watchlist only, last 90 days (fastest, ~30 seconds)
-python backfill.py
-
-# Specific securities, 5 years, both 1-min and daily
-python backfill.py --ids 2885,1333,1594,11536 --all --from 2021-06-01
-
-# Dry run — fetch only, no DB writes
-python backfill.py --all --from 2021-06-01 --dry-run
-```
-
-Verify data landed:
-
-```bash
-python -c "
-from db import init_db, get_session
-from config import get_config
-from sqlalchemy import text
-cfg = get_config()
-init_db(cfg.db_url)
-with get_session() as s:
-    for row in s.execute(text('SELECT timeframe, COUNT(*), MIN(time)::date, MAX(time)::date FROM bars GROUP BY timeframe')):
-        print(row)
-"
-```
-
-### 7. Run the platform
-
-```bash
-source venv/bin/activate
-python main.py
-```
-
-Expected startup output:
-
-```
-DhanHQ Algo Trading Platform  v1.0
-Mode:     PAPER TRADING
-Strategy: scalper
-Client:   <your_client_id>
-Dashboard: http://localhost:8765
-F&O Scanner: NIFTY · BANKNIFTY · SENSEX · FINNIFTY · NIFTYNXT50 · MIDCPNIFTY
-Equity Scanner: top 15 NSE movers · SMA crossover
-```
-
-Open `http://localhost:8765` in your browser.
-
-### 8. Build the React dashboard (optional)
-
-The platform serves a fallback HTML page from `static/index.html` by default. For the full React dashboard:
-
-```bash
-cd dashboard
-npm install
-npm run build
-cd ..
-python main.py   # now serves the compiled React build
-```
-
-For frontend dev with hot reload:
-
-```bash
-# Terminal 1
-cd dashboard && npm run dev   # Vite dev server on :5173 (proxies /api/* to :8765)
-
-# Terminal 2
-python main.py                # API backend
-```
-
-### Stopping
-
-`Ctrl+C` — the platform handles SIGINT and SIGTERM gracefully. All asyncio tasks are cancelled cleanly.
-
----
-
-## Path B — AWS Deploy (production)
-
-All steps except the `terraform apply` and initial git push run on the agent EC2 via SSH.
-
-### 1. Deploy infrastructure (Mac, once)
-
-```bash
-cd infra
-terraform init
-terraform apply
-# Review the plan, type "yes"
-# Takes ~3 minutes
-```
-
-Save the outputs:
-
-```
-agent_elastic_ip = "13.206.66.237"   ← whitelist this in Dhan DevPortal
-db_private_ip    = "10.0.1.155"
-```
-
-### 2. Whitelist agent IP in Dhan DevPortal
-
-Go to https://developer.dhan.co/ → API settings → whitelist `13.206.66.237` (order APIs only). Data APIs need no whitelist. Once whitelisted, the IP cannot be changed for 7 days.
-
-### 3. Verify DB server is running
-
-```bash
-# SSH to DB via agent jump
-ssh -J ubuntu@13.206.66.237 -i ~/.ssh/dhan_trading_key ubuntu@10.0.1.155
-sudo docker ps
-# Should show trading-db container running
-```
-
-### 4. SSH to agent and verify schema
-
-```bash
-ssh -i ~/.ssh/dhan_trading_key ubuntu@13.206.66.237
-cd ~/dhan_algo && source .venv/bin/activate
-alembic current   # expect: 003_auth_tables (head)
-```
-
-The `setup_agent.sh` first-boot script has already cloned the repo, created the venv, pulled SSM secrets into `.env`, and applied migrations.
-
-### 5. Pull latest code
-
-After any Mac edits pushed to GitHub:
-
-```bash
-git pull origin main
-```
-
-### 6. Load instruments
-
-```bash
-python backfill.py --instruments
-# ~204,000 NSE/BSE scrips loaded into instruments table
-```
-
-### 7. Backfill Nifty 50 — 5 years
-
-```bash
-# Nifty 50 — 1-min + daily, 5 years back (~3.5 min at 5 req/s)
-python backfill.py --all --from 2021-06-01
-
-# Expand to all NSE equities (runs for ~5 days — start in screen/tmux)
+python backfill.py --instruments                       # once
 screen -S backfill
-python backfill.py --nse-eq --all --from 2021-06-01
-# Ctrl+A, D to detach; screen -r backfill to reattach
+python backfill.py --nse-eq --all --from 2021-06-01    # ~days; checkpointed,
+                                                       # safe to kill + resume
 ```
 
-Backfill is resumable — re-running skips already-loaded date chunks. Safe to Ctrl+C and restart.
+The backfill respects Dhan's 100K calls/day quota and writes a checkpoint file; a cron watchdog can restart it if the screen dies.
 
-### 8. Run the platform
+### 6. Dashboard access
+
+The dashboard binds to localhost on the agent. Reach it through an SSH tunnel:
 
 ```bash
-python main.py
+ssh -i <your-key> -N -L 8765:localhost:8765 ubuntu@<agent-elastic-ip>
+# open http://localhost:8765
 ```
 
-Check backfill status from the dashboard or:
+### 7. Deploying updates
 
 ```bash
-curl -s http://localhost:8765/api/backfill/status | python3 -m json.tool
+# on the agent
+cd /opt/dhan-trading && sudo git pull --ff-only
+sudo systemctl restart dhan-trader            # if engine code changed
+cd dashboard && npm run build                 # if frontend changed
+sudo systemctl restart dhan-api
 ```
 
-### Dashboard access from Mac
-
-```bash
-ssh -L 8765:localhost:8765 ubuntu@13.206.66.237
-# Then open http://localhost:8765 on Mac browser
-```
+See the [Operations-Runbook](Operations-Runbook.md) for monitoring, recovery, and the kill switch.
 
 ---
 
-## Hermes Setup
+## Going live (eventually)
 
-Hermes is already installed and running on the agent EC2 with the @farshoribot Telegram gateway. This section covers what was done and how to reconnect if the gateway drops.
-
-### What is already configured
-
-- Hermes installed at `~/.local/bin/hermes`
-- Model: `meta-llama/llama-3.3-70b-instruct` via OpenRouter (key in SSM)
-- Skills in `~/dhan_algo/hermes_skills/dhan/`: `backfill_check`, `daily_premarket`, `execution_loop`, `health_report`, `kill_switch`, `kronos_forecast`, `trade_reflection`
-- Telegram bot: @farshoribot, connected to Hermes gateway
-
-### Check gateway status
-
-```bash
-# From agent EC2
-curl -s http://localhost:8765/api/hermes/status | python3 -m json.tool
-
-# Or directly
-export PATH=$HOME/.local/bin:$PATH
-hermes gateway status
-```
-
-### Reconnect Telegram gateway (if dropped)
-
-```bash
-export PATH=$HOME/.local/bin:$PATH
-hermes gateway setup   # follow the prompts to reconnect
-```
-
-### Run a Hermes skill manually
-
-```bash
-hermes run ~/dhan_algo/hermes_skills/dhan/health_report
-hermes run ~/dhan_algo/hermes_skills/dhan/backfill_check
-```
-
----
-
-## Systemd Service (agent EC2)
-
-The platform runs as a systemd service set up by `setup_agent.sh`. To manage it:
-
-```bash
-sudo systemctl status dhan-algo
-sudo systemctl restart dhan-algo
-sudo journalctl -u dhan-algo -f    # follow logs
-```
-
----
-
-## SSM Parameter Names
-
-The following SSM SecureStrings are pulled by `setup_agent.sh` into `.env` on first boot:
-
-| Parameter | Maps to |
-|---|---|
-| `/dhan/client_id` | `DHAN_CLIENT_ID` |
-| `/dhan/access_token` | `DHAN_ACCESS_TOKEN` |
-| `/dhan/pin` | `DHAN_PIN` |
-| `/dhan/totp_secret` | `DHAN_TOTP_SECRET` |
-| `/dhan/db_password` | `DB_PASSWORD` |
-
-To update a secret:
-
-```bash
-aws ssm put-parameter \
-  --name "/dhan/access_token" \
-  --value "<new_token>" \
-  --type SecureString \
-  --overwrite \
-  --region ap-south-1
-```
-
-Then on agent EC2:
-
-```bash
-# Re-pull SSM secrets into .env
-source ~/dhan_algo/infra/scripts/setup_agent.sh --update-env
-sudo systemctl restart dhan-algo
-```
-
----
-
-## Troubleshooting
-
-| Symptom | Likely Cause | Fix |
-|---|---|---|
-| `ModuleNotFoundError` | venv not active | `source venv/bin/activate` |
-| `401 Unauthorized` from Dhan | Expired token | Regenerate at developer.dhan.co; update SSM + .env |
-| `alembic current` shows nothing | DB not reachable | Check `DB_HOST` in `.env`; verify TimescaleDB container |
-| Dashboard blank / 404 | React build not present | `npm run build` in `dashboard/` or use fallback `static/index.html` |
-| `backfill.py --nse-eq` — no instruments | instruments table empty | Run `python backfill.py --instruments` first |
-| Port 8765 already in use | Stale process | `fuser -k 8765/tcp` or `WEBHOOK_PORT=8766 python main.py` |
-| Kronos model download hangs | First run, ~300MB | Wait; check HuggingFace connectivity from EC2 |
-| Rate limit errors from Dhan | Too many requests | `core/client.py` enforces 5 req/s — check for parallel backfill processes |
-| Hermes gateway offline | Process died | `hermes gateway start` on agent EC2 |
+Do **not** simply flip the flag. The intended sequence: 2-year backtest passes with realistic costs → shadow validation period → `PAPER_TRADING=false` + `ALLOW_LIVE_TOGGLE=true` in `.env` → restart `dhan-trader` → tiny capital. The live executor confirms every fill against the broker and reconciles positions on boot, but the discipline is procedural, not technical: live is a decision, never a default.

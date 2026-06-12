@@ -4,7 +4,7 @@ build_clean_db.py — M2.5: Raw → Clean data pipeline
 
 Reads from: dhan_trading.bars  (raw TimescaleDB on DB EC2)
 Writes to:  dhan_clean.bars    (clean TimescaleDB, same instance)
-Exports to: s3://dhan-trading-data-155304839154/kronos/training-data/
+Exports to: s3://$S3_BUCKET/kronos/training-data/
 
 Cleaning filters:
   1. NSE_EQ only
@@ -53,7 +53,7 @@ log = logging.getLogger("clean_db")
 # ── Config ────────────────────────────────────────────────────────────────────
 
 RAW_DB = dict(
-    host=os.getenv("DB_HOST", "10.0.1.155"),
+    host=os.getenv("DB_HOST", "localhost"),
     port=int(os.getenv("DB_PORT", 5432)),
     dbname="dhan_trading",
     user=os.getenv("DB_USER", "trader"),
@@ -61,14 +61,14 @@ RAW_DB = dict(
 )
 
 CLEAN_DB = dict(
-    host=os.getenv("DB_HOST", "10.0.1.155"),
+    host=os.getenv("DB_HOST", "localhost"),
     port=int(os.getenv("DB_PORT", 5432)),
     dbname="dhan_clean",
     user=os.getenv("DB_USER", "trader"),
     password=os.getenv("DB_PASSWORD", ""),
 )
 
-S3_BUCKET  = "dhan-trading-data-155304839154"
+S3_BUCKET  = os.environ.get("S3_BUCKET", "")  # set in .env on the agent
 S3_PREFIX  = "kronos/training-data"
 
 MIN_AVG_DAILY_VOLUME  = 50_000

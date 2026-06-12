@@ -2,7 +2,7 @@
 Telegram alerts — plain bot API, zero LLM, zero cost.
 
 Replaces the Hermes gateway for the only job it actually did well: putting
-platform events in your pocket. The bot token is the same @farshoribot one;
+platform events in your pocket. The bot token is read from the environment;
 sending a message via api.telegram.org is free.
 
 Library use:

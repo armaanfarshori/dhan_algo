@@ -16,7 +16,7 @@ Key data format (from kronos/kronos.py KronosPredictor):
     neural VQ network, not a statistical quantizer
 
 Run on the GPU spot instance after syncing Parquet from S3:
-  aws s3 sync s3://dhan-trading-data-155304839154/kronos/training-data/ ~/nse_data/
+  aws s3 sync s3://$S3_BUCKET/kronos/training-data/ ~/nse_data/
   python prepare_kronos_dataset.py --data ~/nse_data/ --out ~/nse_dataset/
 
 Or pull directly from S3:
@@ -52,7 +52,7 @@ log = logging.getLogger("prepare")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-S3_BUCKET = "dhan-trading-data-155304839154"
+S3_BUCKET = os.environ.get("S3_BUCKET", "")  # set in .env on the agent
 S3_PREFIX  = "kronos/training-data"
 
 # Strict date-based splits — never change these

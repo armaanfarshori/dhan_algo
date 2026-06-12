@@ -1,7 +1,7 @@
-# LOCAL DEVELOPMENT ONLY — NOT used in production (AWS EC2 at 10.0.1.155)
+# LOCAL DEVELOPMENT ONLY — NOT used in production (AWS EC2, private subnet)
 # Use for: running alembic migrations locally, testing backfill, local dev
 #   docker compose up -d && alembic upgrade head
-# Production DB is on EC2: DB_HOST=10.0.1.155 (set in .env on agent)
+# Production DB is on EC2: DB_HOST=<private DB IP> (set in .env on agent)
 services:
   timescaledb:
     image: timescale/timescaledb:latest-pg16

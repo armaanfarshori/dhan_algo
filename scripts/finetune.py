@@ -12,9 +12,9 @@ Run on g4dn.xlarge spot GPU instance after prepare_kronos_dataset.py:
     --output_dir ~/kronos-nse-v1/
 
 After training:
-  aws s3 sync ~/kronos-nse-v1/ s3://dhan-trading-data-155304839154/kronos/checkpoints/nse-v1/
+  aws s3 sync ~/kronos-nse-v1/ s3://$S3_BUCKET/kronos/checkpoints/nse-v1/
   # Then on agent EC2:
-  # KRONOS_CHECKPOINT=s3://dhan-trading-data-155304839154/kronos/checkpoints/nse-v1/
+  # KRONOS_CHECKPOINT=s3://$S3_BUCKET/kronos/checkpoints/nse-v1/
   # Restart platform — KronosSignalEngine lazy-loads the new checkpoint on first signal
 """
 
@@ -274,10 +274,10 @@ def train(args):
     log.info("Checkpoint saved to: %s/best/", output_dir)
     log.info("")
     log.info("Upload to S3:")
-    log.info("  aws s3 sync %s/best/ s3://dhan-trading-data-155304839154/kronos/checkpoints/nse-v1/", output_dir)
+    log.info("  aws s3 sync %s/best/ s3://$S3_BUCKET/kronos/checkpoints/nse-v1/", output_dir)
     log.info("")
     log.info("Then on agent EC2 — update .env and restart platform:")
-    log.info("  KRONOS_CHECKPOINT=s3://dhan-trading-data-155304839154/kronos/checkpoints/nse-v1/")
+    log.info("  KRONOS_CHECKPOINT=s3://$S3_BUCKET/kronos/checkpoints/nse-v1/")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

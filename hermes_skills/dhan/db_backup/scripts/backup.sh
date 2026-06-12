@@ -8,7 +8,8 @@ DATE=$(date +%Y%m%d_%H%M%S)
 LABEL="${1:-manual}"
 S3_BUCKET=$(aws ssm get-parameter --region ap-south-1 \
   --name /dhan-trading/s3_bucket --with-decryption \
-  --query Parameter.Value --output text 2>/dev/null || echo "dhan-trading-data-155304839154")
+  --query Parameter.Value --output text 2>/dev/null \
+  || echo "dhan-trading-data-$(aws sts get-caller-identity --query Account --output text)")
 DB_PASS=$(aws ssm get-parameter --region ap-south-1 \
   --name /dhan-trading/db_password --with-decryption \
   --query Parameter.Value --output text)
@@ -16,7 +17,8 @@ DB_PASS=$(aws ssm get-parameter --region ap-south-1 \
 DEST="s3://$S3_BUCKET/db-backups/dhan_trading_${LABEL}_${DATE}.dump"
 echo "Starting backup → $DEST"
 
-PGPASSWORD="$DB_PASS" pg_dump -h 10.0.1.155 -U trader -d dhan_trading -Fc \
+DB_HOST="${DB_HOST:-$(grep -m1 '^DB_HOST=' /opt/dhan-trading/.env | cut -d= -f2)}"
+PGPASSWORD="$DB_PASS" pg_dump -h "$DB_HOST" -U trader -d dhan_trading -Fc \
   | aws s3 cp - "$DEST"
 
 SIZE=$(aws s3 ls "$DEST" | awk '{print $3}')
