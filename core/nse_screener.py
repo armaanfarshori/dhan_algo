@@ -45,10 +45,13 @@ def get_top_volatile(
     lookback_days: int = _DEFAULT_LOOKBACK,
     segment: str = "NSE_EQ",
     min_avg_volume: int = 50_000,
+    min_price: float = 50.0,
 ) -> list[dict[str, Any]]:
     """
     Rank NSE equity securities by average daily ATR % over the last lookback_days.
-    Filters out illiquid stocks (avg volume < min_avg_volume shares/day).
+    Filters out illiquid stocks (avg volume < min_avg_volume shares/day) and
+    penny stocks (avg close < min_price — paper fills are fantasy when one
+    tick is several bps, and ATR% naturally over-ranks low-priced names).
 
     Returns top-n sorted by volatility descending.
     """
@@ -74,6 +77,7 @@ def get_top_volatile(
         GROUP BY b.security_id
         HAVING COUNT(*) >= :min_days
            AND AVG(b.volume) >= :min_vol
+           AND AVG(b.close)  >= :min_price
         ORDER BY atr_pct DESC
         LIMIT :n
     """)
@@ -86,6 +90,7 @@ def get_top_volatile(
                 "seg":       segment,
                 "min_days":  _MIN_TRADING_DAYS,
                 "min_vol":   min_avg_volume,
+                "min_price": min_price,
                 "n":         n,
             }).fetchall()
     except Exception as exc:

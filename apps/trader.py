@@ -192,11 +192,38 @@ async def main():
         from core.watchlist import WatchlistManager
         watchlist = await WatchlistManager.build()
         screener_results = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: get_top_volatile(n=cfg.watchlist_n, min_avg_volume=10_000))
+            None, lambda: get_top_volatile(
+                n=cfg.watchlist_n,
+                min_avg_volume=cfg.screener_min_avg_volume,
+                min_price=cfg.screener_min_price))
         watchlist_ids = [r["security_id"] for r in screener_results]
         if not watchlist_ids:
             watchlist_ids = [s.security_id for s in watchlist.get()[:cfg.watchlist_n]]
             logger.warning("Screener empty — cached watchlist fallback: %s", watchlist_ids)
+
+        # Validate the candidate list against the scrip master — a cached
+        # watchlist once smuggled in a non-tradeable INDEX (sid 40, NIFTY
+        # Consumption) that cost ₹6.5K of paper P&L on day 1. Only tradeable
+        # equities in our segment pass; open positions are exempt below
+        # (whatever we hold must keep being managed so it can exit).
+        def _validate_watchlist(ids):
+            from sqlalchemy import text as _text
+            from db import get_session
+            with get_session() as s:
+                rows = s.execute(_text(
+                    "SELECT security_id FROM instruments "
+                    "WHERE security_id = ANY(:ids) "
+                    "AND exchange_segment = :seg AND instrument_type = 'EQUITY'"),
+                    {"ids": ids, "seg": cfg.watchlist_exchange_segment}).fetchall()
+            return {r[0] for r in rows}
+
+        valid = await asyncio.get_event_loop().run_in_executor(
+            None, _validate_watchlist, list(watchlist_ids))
+        for sid in [s for s in watchlist_ids if s not in valid]:
+            watchlist_ids.remove(sid)
+            logger.warning("Watchlist -= %s — not a tradeable %s equity, dropped",
+                           sid, cfg.watchlist_exchange_segment)
+
         # Reconciled positions must keep streaming + trading even if today's
         # screener dropped them (orphan protection).
         for p in portfolio.open_positions():

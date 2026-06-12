@@ -51,6 +51,11 @@ class Config(BaseSettings):
     # ── Watchlist — dynamic from screener; only segment is fixed ────────────
     watchlist_exchange_segment: str = "NSE_EQ"
     watchlist_n: int = 5
+    # Day-1 lesson (2026-06-12): the unfloored ATR% screener picks ₹13 penny
+    # stocks where 2bps paper slippage is fantasy (tick = 7bps), and a cached
+    # watchlist once smuggled in a non-tradeable index.
+    screener_min_price: float = 50.0      # ₹ — average close floor
+    screener_min_avg_volume: int = 50_000 # shares/day floor
 
     # ── Kronos ──────────────────────────────────────────────────────────────
     kronos_tokenizer: str = "NeoQuasar/Kronos-Tokenizer-base"
