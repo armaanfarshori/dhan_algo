@@ -32,7 +32,7 @@ from typing import Optional
 
 logger = logging.getLogger("dhan.ml.calibration")
 
-HORIZON_MIN_DEFAULT = 30      # matches kronos_pred_len (30 × 1m bars)
+HORIZON_MIN_DEFAULT = 30      # matches the gate's forecast horizon (6 × 5m bars)
 ENTRY_BAR_GRACE_MIN = 5       # decision price = last bar within this window
 RECOMMEND_MIN_N = 30          # don't recommend a threshold on fewer samples
 RECOMMEND_MIN_ACC = 0.55      # ...or below this directional accuracy
@@ -216,12 +216,28 @@ def load_calibration_rows(days: int = 30) -> list[dict]:
             "verdict": f.get("verdict"),
             "requested_direction": f.get("requested_direction"),
             "stale": bool(f.get("stale", True)),   # rows without the flag = old/stale era
+            "scorer_version": f.get("scorer_version") or "v1-legacy",
         })
     return out
 
 
-def build_report(days: int = 30) -> dict:
+def build_report(days: int = 30, scorer: Optional[str] = None) -> dict:
+    """
+    The arm/don't-arm artifact. Outcomes are only comparable within one
+    scoring configuration, so all decision statistics (accuracy, sweep,
+    gate value) are computed on rows matching the CURRENT scorer version;
+    other versions appear only as counts.
+    """
+    if scorer is None:
+        from core.kronos_signal import scorer_version
+        scorer = scorer_version()
     rows = load_calibration_rows(days)
+
+    by_version: dict[str, int] = {}
+    for r in rows:
+        by_version[r["scorer_version"]] = by_version.get(r["scorer_version"], 0) + 1
+    rows = [r for r in rows if r["scorer_version"] == scorer]
+
     directional = [r for r in rows if r["hit"] is not None]
     fresh = [r for r in directional if not r["stale"]]
     stale = [r for r in directional if r["stale"]]
@@ -239,6 +255,8 @@ def build_report(days: int = 30) -> dict:
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "window_days": days,
+        "scorer_version": scorer,
+        "rows_by_scorer_version": by_version,
         "rows_with_outcomes": len(rows),
         "model_accuracy": {
             "fresh": {"n": len(fresh), "accuracy": acc(fresh)},

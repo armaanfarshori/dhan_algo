@@ -61,9 +61,16 @@ class Config(BaseSettings):
     kronos_tokenizer: str = "NeoQuasar/Kronos-Tokenizer-base"
     kronos_model: str = "NeoQuasar/Kronos-small"
     kronos_checkpoint: str = ""           # S3 path after fine-tuning; empty = HF zero-shot
-    kronos_lookback: int = 400
-    kronos_pred_len: int = 30
-    kronos_samples: int = 5
+    # Scoring frequency/params follow the Kronos paper (arXiv:2508.02739):
+    # NSE is in the pre-training corpus at 5-min+ ONLY (no 1-min), and the
+    # paper's price/return-forecasting protocol is lookback 480 @ 5T with
+    # T=0.6, top_p=0.90, N=10. 6×5min keeps the 30-min gate horizon.
+    kronos_timeframe: str = "5min"        # "1min" = legacy (OOD for NSE)
+    kronos_lookback: int = 480            # bars at kronos_timeframe
+    kronos_pred_len: int = 6              # forecast bars (6×5min = 30 min)
+    kronos_samples: int = 10              # Monte-Carlo rollouts averaged
+    kronos_temperature: float = 0.6
+    kronos_top_p: float = 0.9
     kronos_thresh: float = 0.001
     kronos_min_confidence: float = 0.4
     kronos_scanner_enabled: bool = True

@@ -81,6 +81,9 @@ class KronosGate:
                     "stale": stale,
                     "min_confidence": self.min_confidence,
                     "caller_strategy": strategy,
+                    # Calibration groups by this — outcomes from different
+                    # scoring configs (timeframe/T/N) must never be pooled.
+                    "scorer_version": result.get("scorer_version"),
                 },
             )
         except Exception as exc:

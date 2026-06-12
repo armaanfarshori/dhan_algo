@@ -36,10 +36,44 @@ logger = logging.getLogger("dhan.kronos_signal")
 # Defaults — overridden by Config at class init time
 _TOKENIZER_ID  = "NeoQuasar/Kronos-Tokenizer-base"
 _MODEL_ID      = "NeoQuasar/Kronos-small"
-_LOOKBACK      = 400
-_PRED_LEN      = 30
-_SAMPLE_COUNT  = 5
+_LOOKBACK      = 480
+_PRED_LEN      = 6
+_SAMPLE_COUNT  = 10
 _SIGNAL_THRESH = 0.001
+
+
+def scorer_version() -> str:
+    """
+    Identifies the scoring configuration on every persisted gate verdict.
+    Calibration must never pool outcomes across configs — a threshold tuned
+    on one scorer says nothing about another.
+    """
+    from config import get_config
+    c = get_config()
+    return (f"v2-{c.kronos_timeframe}-T{c.kronos_temperature}"
+            f"-N{c.kronos_samples}-L{c.kronos_lookback}-P{c.kronos_pred_len}")
+
+
+def _aggregate_bars(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """
+    Aggregate 1-min OHLCV (datetime index) into `timeframe` buckets.
+    Uses groupby-on-floor rather than resample so overnight/holiday gaps
+    don't produce empty buckets. Drops the trailing in-progress bucket —
+    Kronos was pre-trained on complete K-lines only.
+    """
+    if timeframe in ("1min", "1m", "T"):
+        return df
+    floor = df.index.floor(timeframe)
+    agg = df.groupby(floor).agg(
+        open=("open", "first"), high=("high", "max"),
+        low=("low", "min"), close=("close", "last"),
+        volume=("volume", "sum"))
+    if len(agg) > 1:
+        bucket = pd.Timedelta(timeframe)
+        # complete iff the raw data reaches the bucket's final minute
+        if df.index[-1] < agg.index[-1] + bucket - pd.Timedelta(minutes=1):
+            agg = agg.iloc[:-1]
+    return agg
 
 
 class KronosSignalEngine:
@@ -55,10 +89,14 @@ class KronosSignalEngine:
         cfg = get_config()
         self._tokenizer_id  = cfg.kronos_tokenizer
         self._model_id      = cfg.kronos_model
+        self._timeframe     = cfg.kronos_timeframe
         self._lookback      = cfg.kronos_lookback
         self._pred_len      = cfg.kronos_pred_len
         self._sample_count  = cfg.kronos_samples
+        self._temperature   = cfg.kronos_temperature
+        self._top_p         = cfg.kronos_top_p
         self._signal_thresh = cfg.kronos_thresh
+        self._bucket_min    = max(1, int(pd.Timedelta(self._timeframe).total_seconds() // 60))
 
     async def load(self, device: str = "cpu"):
         """Download and cache the model. Safe to call multiple times."""
@@ -83,29 +121,34 @@ class KronosSignalEngine:
     async def score(
         self,
         ohlcv_df: pd.DataFrame,
-        pred_len: int = _PRED_LEN,
-        sample_count: int = _SAMPLE_COUNT,
+        pred_len: Optional[int] = None,
+        sample_count: Optional[int] = None,
     ) -> dict:
         """
-        Generate a directional signal from an OHLCV DataFrame.
+        Generate a directional signal from a 1-min OHLCV DataFrame.
 
-        ohlcv_df must have columns: open, high, low, close, volume
-        Index should be datetime (or a 'ts' column).
+        Input is aggregated to the configured scoring timeframe (default
+        5-min — Kronos's NSE pre-training granularity; it never saw 1-min
+        NSE bars). ohlcv_df must have columns open/high/low/close/volume
+        and a datetime index (or a 'ts' column).
         """
+        pred_len = pred_len or self._pred_len
+        sample_count = sample_count or self._sample_count
         if self._predictor is None:
             await self.load()
 
         df = _prepare_df(ohlcv_df)
+        df = _aggregate_bars(df, self._timeframe)
         if len(df) < 10:
             return _hold("Not enough history")
 
-        lookback = min(_LOOKBACK, len(df))
+        lookback = min(self._lookback, len(df))
         x_df = df.iloc[-lookback:][["open", "high", "low", "close", "volume"]].copy()
         x_df["amount"] = x_df["volume"] * x_df["close"]  # synthetic amount
 
         last_ts = x_df.index[-1]
-        # Build future timestamps (1-min bars)
-        y_ts = pd.date_range(start=last_ts + timedelta(minutes=1), periods=pred_len, freq="1min")
+        step = pd.Timedelta(self._timeframe)
+        y_ts = pd.date_range(start=last_ts + step, periods=pred_len, freq=self._timeframe)
 
         loop = asyncio.get_event_loop()
         pred_df = await loop.run_in_executor(
@@ -118,16 +161,20 @@ class KronosSignalEngine:
             sample_count,
         )
 
-        return _compute_signal(x_df, pred_df, pred_len)
+        result = _compute_signal(x_df, pred_df, pred_len)
+        result["scorer_version"] = scorer_version()
+        return result
 
     def _predict_sync(self, x_df, x_ts, y_ts, pred_len, sample_count):
+        # T/top_p follow the paper's price/return-forecasting protocol
+        # (T=0.6, top_p=0.90) — see docs/Kronos-Model-Notes.md.
         return self._predictor.predict(
             df=x_df,
             x_timestamp=x_ts,
             y_timestamp=y_ts,
             pred_len=pred_len,
-            T=1.0,
-            top_p=0.9,
+            T=self._temperature,
+            top_p=self._top_p,
             sample_count=sample_count,
             verbose=False,
         )
@@ -140,13 +187,16 @@ class KronosSignalEngine:
         self,
         security_id: str,
         exchange_segment: str = "NSE_EQ",
-        lookback: int = _LOOKBACK,
-        pred_len: int = _PRED_LEN,
+        lookback: Optional[int] = None,
+        pred_len: Optional[int] = None,
     ) -> dict:
-        """Fetch OHLCV from TimescaleDB and score with Kronos."""
+        """Fetch 1-min OHLCV from TimescaleDB and score with Kronos."""
+        # lookback is in scoring-timeframe bars; fetch enough raw 1-min rows
+        # to fill those buckets (+1 for the dropped in-progress bucket).
+        raw_rows = ((lookback or self._lookback) + 1) * self._bucket_min
         try:
             df = await asyncio.get_event_loop().run_in_executor(
-                None, _fetch_ohlcv_sync, security_id, exchange_segment, lookback
+                None, _fetch_ohlcv_sync, security_id, exchange_segment, raw_rows
             )
         except Exception as exc:
             logger.warning("DB fetch failed for %s: %s", security_id, exc)
