@@ -121,7 +121,9 @@ class LiveFeed:
                 logger.warning(f"LiveFeed: unknown segment {seg}, skipping")
                 continue
             for sid in sids:
-                self._subscriptions.append((ex, int(sid), MarketFeed.Quote))
+                # Dhan v2 feed requires SecurityId as a STRING in the subscribe
+                # JSON — an int is accepted silently and never streams a packet.
+                self._subscriptions.append((ex, str(int(sid)), MarketFeed.Quote))
         logger.info(f"LiveFeed: {len(self._subscriptions)} instruments subscribed")
 
     def get_tick(self, security_id: str) -> Optional[dict]:
