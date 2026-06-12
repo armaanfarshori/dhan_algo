@@ -67,10 +67,20 @@ async def seed_opening_ranges(runners, dhan, segment: str, orb_minutes: int):
         if orb.or_locked:
             continue
         try:
-            data = await dhan.get_intraday_historical(
-                security_id=orb.security_id, exchange_segment=segment,
-                instrument="EQUITY", interval="1",
-                from_date=day, to_date=day)
+            data = None
+            for attempt in range(3):
+                # charts/intraday tolerates ~1 req/s — back-to-back calls
+                # get DH-904'd, so space them out and retry
+                await asyncio.sleep(1.2 if attempt == 0 else 3.0)
+                try:
+                    data = await dhan.get_intraday_historical(
+                        security_id=orb.security_id, exchange_segment=segment,
+                        instrument="EQUITY", interval="1",
+                        from_date=day, to_date=day)
+                    break
+                except Exception:
+                    if attempt == 2:
+                        raise
             or_h, or_l = 0.0, float("inf")
             post_h, post_l = 0.0, float("inf")
             for ts, h, l in zip(data.get("timestamp") or [],
