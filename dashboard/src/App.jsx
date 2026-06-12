@@ -47,6 +47,28 @@ function ClockIST() {
   )
 }
 
+// Single breakpoint: below this the fixed two-column grids collapse to one
+// column (inline styles can't carry @media queries).
+function useIsMobile(bp = 760) {
+  const [m, setM] = useState(() => window.matchMedia(`(max-width:${bp}px)`).matches)
+  useEffect(() => {
+    const mq = window.matchMedia(`(max-width:${bp}px)`)
+    const fn = e => setM(e.matches)
+    mq.addEventListener('change', fn)
+    return () => mq.removeEventListener('change', fn)
+  }, [bp])
+  return m
+}
+
+// Minutes since midnight IST — for "is the OR window still open?" checks.
+function istMinutes() {
+  const s = new Date().toLocaleTimeString('en-GB',
+    { timeZone: 'Asia/Kolkata', hour12: false, hour: '2-digit', minute: '2-digit' })
+  const [h, m] = s.split(':').map(Number)
+  return h * 60 + m
+}
+const OR_WINDOW_END = 9 * 60 + 30   // 09:30 IST (ORB_RANGE_MINUTES=15)
+
 // ─────────────────────────────────────────────────────────────────
 // Header
 // ─────────────────────────────────────────────────────────────────
@@ -75,6 +97,7 @@ function Badge({ label, tone, pulse }) {
 // mode · gate · engine · feed · balance · day P&L · halt — all from the
 // 2s snapshot (trader heartbeat), so a dead engine shows up within seconds.
 function StatusSpine({ data }) {
+  const mobile  = useIsMobile()
   const t       = data.trader
   const alive   = data.alive
   const mode    = t?.mode ?? 'PAPER'
@@ -89,8 +112,9 @@ function StatusSpine({ data }) {
       position: 'sticky', top: 0, zIndex: 100,
       background: T.bg0,
       borderBottom: `1px solid ${T.line}`,
-      display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap',
-      padding: '0 24px', minHeight: 44,
+      display: 'flex', alignItems: 'center', flexWrap: 'wrap',
+      gap: mobile ? 8 : 14,
+      padding: mobile ? '6px 12px' : '0 24px', minHeight: 44,
     }}>
       <span style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 700, color: T.ink0, letterSpacing: '0.1em', marginRight: 4 }}>
         DHAN<span style={{ color: T.cyan }}>AI</span>
@@ -464,10 +488,13 @@ const VERDICT_TONE = { ALLOW: T.green, BLOCK: T.red }
 function RangeLadder({ s }) {
   const lo = s.or_low, hi = s.or_high, px = s.last_price
   if (!lo || !hi || hi <= lo) {
+    const windowOver = istMinutes() > OR_WINDOW_END
     return (
       <div style={{ height: 34, display: 'flex', alignItems: 'center' }}>
         <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>
-          {s.or_locked ? 'zero-width range — no trade' : 'building opening range…'}
+          {s.or_locked ? 'zero-width range — no trade'
+            : windowOver ? 'no opening range today — sitting out'
+            : 'building opening range…'}
         </span>
       </div>
     )
@@ -508,8 +535,13 @@ function RangeLadder({ s }) {
 function ORBCard({ s, gateDec, maxEntries }) {
   const inPos = s.position !== 0
   const side  = s.position > 0 ? 'LONG' : 'SHORT'
-  const state = !s.or_locked ? 'BUILDING' : inPos ? side : 'WATCHING'
-  const stateColor = !s.or_locked ? T.amber : inPos ? (s.position > 0 ? T.green : T.red) : T.ink2
+  // A runner that never got an OR (mid-session boot, no 9:15–9:30 trades)
+  // isn't "building" — it sits out the day. Don't show amber forever.
+  const noRange = !s.or_locked && istMinutes() > OR_WINDOW_END
+  const state = !s.or_locked ? (noRange ? 'NO RANGE' : 'BUILDING')
+    : inPos ? side : 'WATCHING'
+  const stateColor = !s.or_locked ? (noRange ? T.ink3 : T.amber)
+    : inPos ? (s.position > 0 ? T.green : T.red) : T.ink2
 
   return (
     <div style={{ background: T.bg1, border: `1px solid ${T.line}`,
@@ -572,7 +604,7 @@ function ORBCockpit({ data }) {
           {data.alive ? 'No runners — screener returned 0 securities' : 'Engine offline — no live strategy state'}
         </div>
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(290px, 1fr))', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(290px, 100%), 1fr))', gap: 12 }}>
           {strategies.map(s => (
             <ORBCard key={s.security_id} s={s} gateDec={gateBySid[s.security_id]} maxEntries={maxEntries} />
           ))}
@@ -725,14 +757,15 @@ function ExecutionsFeed({ signals }) {
 }
 
 function SignalsTab({ data }) {
+  const mobile = useIsMobile()
   return (
-    <div style={{ padding: '20px 24px 60px' }}>
+    <div style={{ padding: mobile ? '14px 12px 60px' : '20px 24px 60px' }}>
       <SessionBar status={data.status} />
       <ORBCockpit data={data} />
 
       {/* Left: what happened today (gate verdicts + executions — same clock).
-          Right: P&L + screener context. */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16, marginBottom: 16 }}>
+          Right: P&L + screener context. Stacks on phones. */}
+      <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '1fr 340px', gap: 16, marginBottom: 16 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <GatePanel gate={data.gate} />
           <ExecutionsFeed signals={data.signals} />
@@ -900,41 +933,51 @@ function OpenPositionsCard({ data }) {
   )
 }
 
+const TRADE_STATUS_TONE = { OPEN: T.amber, CLOSED: T.ink2, ABANDONED: T.ink3 }
+
 function TradeTable({ tradelog }) {
-  const trades = (tradelog?.data?.trades ?? [])
-    .filter(t => t.status === 'CLOSED')
-    .slice(0, 30)
+  // All trades, open ones first — a table showing only CLOSED rows looked
+  // empty all day while four positions were live.
+  const trades = (tradelog?.data?.trades ?? []).slice(0, 30)
 
   return (
     <div style={{ background: T.bg1, border: `1px solid ${T.line}` }}>
       <div style={{ padding: '10px 16px', borderBottom: `1px solid ${T.line}`, fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em' }}>
-        TRADE HISTORY
+        TRADES
       </div>
       {trades.length === 0 ? (
-        <div style={{ padding: '20px 14px', fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>No closed trades yet</div>
+        <div style={{ padding: '20px 14px', fontFamily: T.mono, fontSize: 10, color: T.ink3 }}>No trades yet</div>
       ) : (
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               <tr>
-                {['TIME','SYMBOL','ACTION','PRICE','P&L','STRATEGY'].map(h => (
+                {['TIME','SYMBOL','SIDE','QTY','PRICE','P&L','STATUS'].map(h => (
                   <th key={h} style={{ textAlign: 'left', fontFamily: T.mono, fontSize: 8, color: T.ink3, padding: '6px 10px', borderBottom: `1px solid ${T.line}`, letterSpacing: '0.15em', whiteSpace: 'nowrap' }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {trades.map((t, i) => (
-                <tr key={i} style={{ borderBottom: `1px solid ${T.line}` }}>
-                  <td style={{ padding: '7px 10px', fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>{fmtTime(t.exit_ts)}</td>
-                  <td style={{ padding: '7px 10px', fontFamily: T.mono, fontSize: 10, color: T.ink0, fontWeight: 700 }}>{t.symbol}</td>
-                  <td style={{ padding: '7px 10px', fontFamily: T.mono, fontSize: 9, color: t.action === 'EXIT' ? T.amber : T.ink1 }}>{t.action}</td>
-                  <td style={{ padding: '7px 10px', fontFamily: T.dot, fontSize: 15, color: T.ink0 }}>₹{t.entry_price} → ₹{t.exit_price}</td>
-                  <td style={{ padding: '7px 10px', fontFamily: T.dot, fontSize: 15, color: colorPnl(t.pnl ?? 0) }}>
-                    {(t.pnl ?? 0) >= 0 ? '+' : ''}{INR0(t.pnl ?? 0)}
-                  </td>
-                  <td style={{ padding: '7px 10px', fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>{t.strategy ?? 'ORB'}</td>
-                </tr>
-              ))}
+              {trades.map((t, i) => {
+                const open = t.status === 'OPEN'
+                return (
+                  <tr key={i} style={{ borderBottom: `1px solid ${T.line}` }}>
+                    <td style={{ padding: '7px 10px', fontFamily: T.mono, fontSize: 9, color: T.ink3, whiteSpace: 'nowrap' }}>
+                      {fmtTime(open ? t.entry_ts : (t.exit_ts ?? t.entry_ts))}
+                    </td>
+                    <td style={{ padding: '7px 10px', fontFamily: T.mono, fontSize: 10, color: T.ink0, fontWeight: 700 }}>{t.symbol}</td>
+                    <td style={{ padding: '7px 10px', fontFamily: T.mono, fontSize: 9, color: t.action === 'SELL' ? T.red : T.green }}>{t.action}</td>
+                    <td style={{ padding: '7px 10px', fontFamily: T.mono, fontSize: 9, color: T.ink2 }}>{t.qty}</td>
+                    <td style={{ padding: '7px 10px', fontFamily: T.dot, fontSize: 15, color: T.ink0, whiteSpace: 'nowrap' }}>
+                      ₹{t.entry_price}{t.exit_price != null ? ` → ₹${t.exit_price}` : ''}
+                    </td>
+                    <td style={{ padding: '7px 10px', fontFamily: T.dot, fontSize: 15, color: t.pnl != null ? colorPnl(t.pnl) : T.ink3 }}>
+                      {t.pnl != null ? `${t.pnl >= 0 ? '+' : ''}${INR0(t.pnl)}` : '—'}
+                    </td>
+                    <td style={{ padding: '7px 10px', fontFamily: T.mono, fontSize: 9, color: TRADE_STATUS_TONE[t.status] ?? T.ink3 }}>{t.status}</td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>
@@ -973,7 +1016,7 @@ function PortfolioMetrics({ tradelog, risk }) {
   ]
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 8, marginBottom: 16 }}>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 8, marginBottom: 16 }}>
       {metrics.map(([label, val, color]) => (
         <div key={label} style={{ background: T.bg1, border: `1px solid ${T.line}`, padding: '12px 14px' }}>
           <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 6 }}>{label}</div>
@@ -988,38 +1031,64 @@ function CalendarPnL({ tradelog }) {
   const trades = tradelog?.data?.trades ?? []
   const exits  = trades.filter(t => t.status === 'CLOSED' && t.pnl != null && t.exit_ts)
 
-  // Group by date
+  // Realized P&L by close date
   const byDate = {}
   exits.forEach(t => {
     const d = t.exit_ts?.slice(0, 10)
     if (d) byDate[d] = (byDate[d] ?? 0) + (t.pnl ?? 0)
   })
-
-  const dates = Object.keys(byDate).sort()
-  if (dates.length === 0) return null
-
   const maxAbs = Math.max(...Object.values(byDate).map(Math.abs), 1)
 
+  // Fixed 4-week grid ending this week (Mon-aligned) — renders the same
+  // shape whether there's one trading day of history or thirty.
+  const today = new Date()
+  const todayKey = today.toISOString().slice(0, 10)
+  const end = new Date(today)
+  end.setDate(end.getDate() + ((7 - ((end.getDay() + 6) % 7)) - 1))   // this week's Sunday
+  const days = []
+  for (let i = 27; i >= 0; i--) {
+    const d = new Date(end)
+    d.setDate(end.getDate() - i)
+    days.push(d)
+  }
+
   return (
-    <div style={{ background: T.bg1, border: `1px solid ${T.line}`, padding: 16, marginBottom: 16 }}>
-      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em', textTransform: 'uppercase', marginBottom: 12 }}>
-        DAILY P&L CALENDAR
+    <div style={{ background: T.bg1, border: `1px solid ${T.line}`, padding: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
+        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, letterSpacing: '0.18em', textTransform: 'uppercase' }}>
+          DAILY P&L · 4 WEEKS
+        </span>
+        <span style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3 }}>
+          {Object.keys(byDate).length} trading day{Object.keys(byDate).length === 1 ? '' : 's'}
+        </span>
       </div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-        {dates.map(d => {
-          const pnl  = byDate[d]
-          const intensity = Math.abs(pnl) / maxAbs
-          const bg   = pnl > 0
-            ? `oklch(${0.3 + intensity * 0.3} 0.19 145)`
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4, marginBottom: 6 }}>
+        {['M','T','W','T','F','S','S'].map((d, i) => (
+          <div key={i} style={{ textAlign: 'center', fontFamily: T.mono, fontSize: 8, color: T.ink3 }}>{d}</div>
+        ))}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4 }}>
+        {days.map(d => {
+          const key = d.toISOString().slice(0, 10)
+          const pnl = byDate[key]
+          const weekend = d.getDay() === 0 || d.getDay() === 6
+          const future = d > today
+          const intensity = pnl != null ? Math.abs(pnl) / maxAbs : 0
+          const bg = pnl == null ? (weekend ? 'transparent' : T.bg3)
+            : pnl > 0 ? `oklch(${0.3 + intensity * 0.3} 0.19 145)`
             : `oklch(${0.3 + intensity * 0.2} 0.22 25)`
           return (
-            <div key={d} title={`${d}: ₹${Math.round(pnl)}`} style={{
-              width: 28, height: 28, background: bg,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontFamily: T.mono, fontSize: 7, color: 'rgba(255,255,255,0.7)',
-              cursor: 'default',
-            }}>
-              {new Date(d + 'T00:00').getDate()}
+            <div key={key}
+              title={pnl != null ? `${key}: ${pnl >= 0 ? '+' : ''}₹${Math.round(pnl).toLocaleString('en-IN')}` : key}
+              style={{
+                aspectRatio: '1.4', background: bg,
+                border: key === todayKey ? `1px solid ${T.cyan}` : `1px solid transparent`,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontFamily: T.mono, fontSize: 8,
+                color: pnl != null ? 'rgba(255,255,255,0.8)' : future ? 'transparent' : T.ink3,
+                cursor: 'default',
+              }}>
+              {d.getDate()}
             </div>
           )
         })}
@@ -1029,11 +1098,12 @@ function CalendarPnL({ tradelog }) {
 }
 
 function PortfolioTab({ data }) {
+  const mobile = useIsMobile()
   return (
-    <div style={{ padding: '20px 24px 60px' }}>
+    <div style={{ padding: mobile ? '14px 12px 60px' : '20px 24px 60px' }}>
       <PortfolioHero data={data} />
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1.5fr 1fr', gap: 16, marginBottom: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '1.5fr 1fr', gap: 16, marginBottom: 16 }}>
         <PnlCurve equity={data.equity} />
         <CalendarPnL tradelog={data.tradelog} />
       </div>
@@ -1277,10 +1347,11 @@ function FullLogPanel({ logs }) {
 }
 
 function SystemTab({ data }) {
+  const mobile = useIsMobile()
   return (
-    <div style={{ padding: '20px 24px 40px' }}>
+    <div style={{ padding: mobile ? '14px 12px 40px' : '20px 24px 40px' }}>
       <ServicesRow data={data} />
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16, marginBottom: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(320px, 100%), 1fr))', gap: 16, marginBottom: 16 }}>
         <DBPanel       dbStats={data.dbStats} />
         <BackfillPanel backfill={data.backfill} />
         <AutomationPanel systemHealth={data.systemHealth} />
