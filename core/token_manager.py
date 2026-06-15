@@ -6,10 +6,13 @@ Runs as a background task in main.py; backfill.py reads
 the cached token file and never calls generate_token() itself.
 
 Token lifecycle:
-  - Cached in dhan_token.json (already used by DhanAuthManager)
-  - This module adds a LOCK FILE so only one process refreshes at a time
-  - backfill.py reads the token from .env (written here on every refresh)
-  - main.py owns the refresh loop exclusively
+  - The rotating access token is a RUNTIME CACHE, not a provisioned secret.
+    It lives only in dhan_token.json (written atomically). It is NOT written
+    back into .env — that churn was non-atomic (corruption risk on a crash
+    mid-write) and pointless: every reader uses read_current_token().
+  - dhan-trader owns the refresh loop; backfill.py + dhan-api read the cache.
+  - Durable secrets (client_id, TOTP secret, PIN, DB password) stay in .env
+    (or SSM) and are never rewritten by this module.
 
 Usage (main.py):
     from core.token_manager import MasterTokenManager
@@ -26,7 +29,7 @@ Usage (backfill.py):
 import asyncio
 import json
 import logging
-import re
+import os
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, Callable
@@ -74,23 +77,23 @@ def _parse_expiry(exp_str: str) -> Optional[datetime]:
         return None
 
 
+def _atomic_write(path: Path, text: str):
+    """Write via a temp file + os.replace so a crash mid-write can never leave
+    a half-written (corrupt) file at `path`. os.replace is atomic on POSIX."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
 def _write_token(token: str, exp_str: str, client_id: str):
-    """Persist token to dhan_token.json and update .env."""
-    _TOKEN_FILE.write_text(json.dumps({
+    """Persist the rotating token to dhan_token.json — atomically, and ONLY
+    there. We intentionally do not touch .env (see module docstring)."""
+    _atomic_write(_TOKEN_FILE, json.dumps({
         "accessToken":  token,
         "expiryTime":   exp_str,
         "dhanClientId": client_id,
         "generatedAt":  datetime.now(timezone.utc).isoformat(),
     }, indent=2))
-
-    if _ENV_FILE.exists():
-        content = _ENV_FILE.read_text()
-        updated = re.sub(
-            r"^DHAN_ACCESS_TOKEN=.*$",
-            f"DHAN_ACCESS_TOKEN={token}",
-            content, flags=re.MULTILINE,
-        )
-        _ENV_FILE.write_text(updated)
 
 
 class MasterTokenManager:

@@ -97,7 +97,7 @@ Mode POST correctly refuses with 409 (`:280-290`) — good. `killswitch_handler`
 | C1 | **Critical** | `core/client.py:142-183`, `place_order:224`, `execution.py:79-86` | POST `orders` retried on network error/429/5xx with empty `correlation_id` (no idempotency) | Duplicate live order → double position & double risk |
 | C2 | **Critical** *(FIXED)* | `core/journal.py:232-236` | `log_trade_exit` closed every OPEN row for a security when the exit had no order_id (paper path); order-id-scoped exits left multi-entry siblings OPEN | P&L double-count → corrupts trades table that feeds the risk daily-loss halt. **Fixed:** exit now closes exactly one (latest matching) open row |
 | H1 | High | `core/client.py:35-45` | Only `per_sec` enforced; per_min/hour/day defined but ignored | 100k/day data & 7k/day order caps can be blown; contradicts documented guarantee |
-| H2 | High | `core/token_manager.py:77-93,40,209` | Non-atomic `.env` rewrite; unimplemented lock; concurrent refresh race | Corrupted `.env` → boot fails (no DB creds); duplicate token gen |
+| H2 | High *(FIXED)* | `core/token_manager.py:77-93` | Non-atomic `.env` rewrite on every token refresh | Corrupted `.env` → boot fails (no DB creds). **Fixed:** the rotating token is now written only to dhan_token.json, atomically (temp + os.replace); `.env` is never rewritten. (M1 concurrent-refresh race still open.) |
 | H3 | High *(FIXED)* | `engine/portfolio.py:95-109` | Flip recorded only the closing exit, not the new opposite entry | Untracked position in trades table; mis-stated history/P&L. **Fixed:** flip now journals exit + new entry |
 | H4 | High | `engine/execution.py:148-152` | Unconfirmed order booked at ref price; reconcile only on boot | Phantom position until next restart if order later rejects |
 | M1 | Med | `core/client.py:157-161` + token mgr | Concurrent DH-901 handling races token generation & `.env` writes | Wasted token gen, transient auth instability |
@@ -149,7 +149,7 @@ Every finding now has a regression/characterization test under `tests/` (7 new f
 | H3 | ✅ Fixed | `test_journal_lifecycle.py` | flip now journals exit + a new entry for the opposite position |
 | C1 | ⏳ xfail | `test_client_idempotency.py` | live-only; needs `correlation_id` + non-retriable orders |
 | H1 | ⏳ xfail | `test_client_idempotency.py` | windowed rate limits unenforced |
-| H2 | ⏳ xfail | `test_token_safety.py` | non-atomic `.env` write |
+| H2 | ✅ Fixed | `test_token_safety.py` | token cached atomically (os.replace); `.env` never rewritten by the app |
 | H4 | ✅ pinned | `test_execution_robustness.py` | documented behavior covered by passing tests; design unchanged (live-only) |
 | M1 | ⏳ xfail | `test_client_idempotency.py` | unserialized auth refresh |
 | M2 | ✅ pinned | `test_bar_builder_robustness.py` | `on_tick` honors explicit ts; gap is the LiveFeed caller (forward LTT) |
@@ -159,7 +159,7 @@ Every finding now has a regression/characterization test under `tests/` (7 new f
 
 **Residual trade-model limitations** (surfaced while fixing C2/H3, tracked, not yet addressed): a *partial* reduce still marks a trade row CLOSED even though quantity remains, and multi-entry positions are not P&L-apportioned across rows. Neither occurs with the current ORB strategy (one entry, one full exit per position), but a future adding/scaling strategy would need the trades table to model position lifecycle rather than individual fills.
 
-Suite after remediation: **101 passed, 7 xfailed**.
+Suite after remediation: **102 passed, 6 xfailed**.
 
 ---
 
