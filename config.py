@@ -83,6 +83,13 @@ class Config(BaseSettings):
     kronos_temperature: float = 0.6
     kronos_top_p: float = 0.9
     kronos_thresh: float = 0.001
+    # Load from the local HF cache only — no network call on every start, and
+    # the model can't silently change under a running calibration (a model
+    # swap would invalidate verdicts, like a scorer_version change). A fresh
+    # box with no cache downloads once, then runs offline. Updating the model
+    # is a deliberate act (clear cache / bump revision), never automatic.
+    kronos_offline: bool = True
+    kronos_revision: str = ""             # pin a HF commit/tag; empty = whatever's cached
     kronos_min_confidence: float = 0.4
     kronos_scanner_enabled: bool = True
     # Shadow mode: the gate scores and PERSISTS every decision but never

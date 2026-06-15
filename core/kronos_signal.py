@@ -96,22 +96,45 @@ class KronosSignalEngine:
         self._temperature   = cfg.kronos_temperature
         self._top_p         = cfg.kronos_top_p
         self._signal_thresh = cfg.kronos_thresh
+        self._offline       = cfg.kronos_offline
+        self._revision      = cfg.kronos_revision or None
+        self._loaded_from   = ""
         self._bucket_min    = max(1, int(pd.Timedelta(self._timeframe).total_seconds() // 60))
 
     async def load(self, device: str = "cpu"):
-        """Download and cache the model. Safe to call multiple times."""
+        """Load the model (from local cache by default). Safe to call repeatedly."""
         async with self._lock:
             if self._predictor is not None:
                 return
             loop = asyncio.get_event_loop()
-            logger.info("Loading Kronos from HuggingFace (%s / %s)…", self._tokenizer_id, self._model_id)
+            logger.info("Loading Kronos (%s / %s, offline=%s)…",
+                        self._tokenizer_id, self._model_id, self._offline)
             self._predictor = await loop.run_in_executor(None, self._load_sync, device)
-            logger.info("Kronos loaded.")
+            logger.info("Kronos loaded from %s.", self._loaded_from)
 
     def _load_sync(self, device: str):
         from kronos import KronosTokenizer, Kronos, KronosPredictor
-        tokenizer = KronosTokenizer.from_pretrained(self._tokenizer_id)
-        model     = Kronos.from_pretrained(self._model_id)
+
+        def _fetch(offline: bool):
+            tok = KronosTokenizer.from_pretrained(
+                self._tokenizer_id, revision=self._revision, local_files_only=offline)
+            mdl = Kronos.from_pretrained(
+                self._model_id, revision=self._revision, local_files_only=offline)
+            return tok, mdl
+
+        if self._offline:
+            try:
+                tokenizer, model = _fetch(offline=True)
+                self._loaded_from = "local cache"
+            except Exception as exc:
+                # Fresh box / cache cleared — pull once, then offline next start.
+                logger.warning("Kronos not in local cache (%s) — downloading once "
+                               "from HuggingFace", exc)
+                tokenizer, model = _fetch(offline=False)
+                self._loaded_from = "HuggingFace (first download — cached for next start)"
+        else:
+            tokenizer, model = _fetch(offline=False)
+            self._loaded_from = "HuggingFace"
         return KronosPredictor(model, tokenizer, max_context=512)
 
     # ------------------------------------------------------------------
