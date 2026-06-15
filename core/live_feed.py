@@ -94,6 +94,10 @@ class LiveFeed:
     Thread-safe within a single asyncio event loop.
     """
 
+    _RECONNECT_MIN     = 5      # normal reconnect backoff floor (s)
+    _RECONNECT_MAX     = 60     # backoff ceiling (s)
+    _RECONNECT_429_MIN = 30     # on HTTP 429, never retry faster than this
+
     def __init__(self, client_id: str, access_token: str, on_tick=None):
         self._client_id    = client_id
         self._access_token = access_token
@@ -161,19 +165,55 @@ class LiveFeed:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     async def run(self):
-        """Main async loop — reconnects on disconnect."""
+        """Main async loop — reconnects on disconnect with exponential backoff.
+
+        Flat fast reconnects on an HTTP 429 are self-defeating: the server is
+        explicitly saying "too many requests", so retrying every 5s only keeps
+        the limit tripped. We back off exponentially (longer on a 429), and
+        always close the previous socket before retrying so we don't leak
+        connections into Dhan's per-client cap.
+        """
         self._running = True
         logger.info("LiveFeed: starting WebSocket connection…")
 
-        while self._running:
-            try:
-                await self._connect_and_listen()
-            except Exception as e:
-                logger.warning(f"LiveFeed: connection error ({e}), reconnecting in 5s…")
-                self._connected.clear()
-                await asyncio.sleep(5)
+        delay = self._RECONNECT_MIN
+        try:
+            while self._running:
+                try:
+                    await self._connect_and_listen()
+                    delay = self._RECONNECT_MIN          # clean exit → reset
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    await self._close_feed()
+                    self._connected.clear()
+                    is_429 = "429" in str(e)
+                    if is_429:
+                        delay = max(delay, self._RECONNECT_429_MIN)
+                    logger.warning("LiveFeed: connection error (%s), reconnecting in %ds…",
+                                   e, delay)
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, self._RECONNECT_MAX)
+        finally:
+            await self._close_feed()
+
+    async def _close_feed(self):
+        """Best-effort close of the current MarketFeed socket. Releases the
+        connection on Dhan's side instead of leaving it for a server-side TTL."""
+        feed = self._feed
+        self._feed = None
+        if feed is None:
+            return
+        try:
+            ws = getattr(feed, "ws", None)
+            if ws is not None:
+                await ws.close()
+        except Exception as exc:
+            logger.debug("LiveFeed: error closing socket (%s)", exc)
 
     async def _connect_and_listen(self):
+        # Drop any prior socket before opening a new one.
+        await self._close_feed()
         ctx  = DhanContext(self._client_id, self._access_token)
         feed = MarketFeed(
             dhan_context = ctx,
