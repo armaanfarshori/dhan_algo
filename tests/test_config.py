@@ -10,7 +10,7 @@ def test_defaults_are_safe():
     assert cfg.allow_live_toggle is False, "live toggle must default off"
     assert cfg.kronos_shadow_mode is True, "gate must default to shadow until calibrated"
     assert cfg.webhook_port == 8765
-    assert cfg.watchlist_n == 5
+    assert cfg.watchlist_n == 20
 
 
 def test_env_overrides(monkeypatch):
