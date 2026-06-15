@@ -516,11 +516,17 @@ async def kronos_signals_handler(request: web.Request) -> web.Response:
         from db import get_engine
         from sqlalchemy import text
         with get_engine().connect() as conn:
+            # TODAY only. Without this the panel showed days-old signals
+            # (Jun-5 scanner rows, Jun-12 gate verdicts) as if current —
+            # a "strong buy" that was really 3-10 days stale. The dashboard
+            # reflects live state; an empty panel when nothing fired today
+            # is correct, not a bug.
             return conn.execute(text("""
                 SELECT s.security_id, s.side, s.score, s.confidence, s.strategy, s.ts,
                        s.features_snapshot, i.ticker, i.name
                 FROM signals s
                 LEFT JOIN instruments i ON i.security_id = s.security_id
+                WHERE s.ts::date = CURRENT_DATE
                 ORDER BY s.ts DESC LIMIT :lim
             """), {"lim": limit}).fetchall()
 
