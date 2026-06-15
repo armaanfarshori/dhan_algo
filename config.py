@@ -56,7 +56,12 @@ class Config(BaseSettings):
 
     # ── Watchlist — dynamic from screener; only segment is fixed ────────────
     watchlist_exchange_segment: str = "NSE_EQ"
-    watchlist_n: int = 5
+    # 20 candidates to watch for breakouts. This is NOT exposure — the risk
+    # engine caps actual holdings (~4 full-risk positions via the daily
+    # budget, max_open_positions=10). More candidates = more shots + faster
+    # gate calibration, not more simultaneous risk. (Was 5 — a t4g.micro-era
+    # default; raised on t4g.small with the live feed working.)
+    watchlist_n: int = 20
     # Day-1 lesson (2026-06-12): the unfloored ATR% screener picks ₹13 penny
     # stocks where 2bps paper slippage is fantasy (tick = 7bps), and a cached
     # watchlist once smuggled in a non-tradeable index.
