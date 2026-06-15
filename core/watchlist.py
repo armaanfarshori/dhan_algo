@@ -1,36 +1,32 @@
 """
-NSE Top Movers Watchlist
-========================
-Fetches the top 15 most-active / gainers from NSE daily and maps
-each symbol to a Dhan security_id using the cached instrument master CSV.
+Static fallback watchlist (liquid NIFTY-50 names).
+==================================================
+This is ONLY the emergency fallback. The live watchlist is chosen by the
+ATR% screener (core/nse_screener.get_top_volatile) over our own bars
+hypertable — that is the source of truth.
 
-NSE requires a session cookie obtained from a prior GET to nseindia.com.
-We handle that transparently with a short-lived aiohttp session.
-
-Refresh strategy:
-  - On startup if no cache or cache is stale (>6h)
-  - Manually via POST /api/watchlist/refresh
-  - Auto at 09:05 IST on trading days via background task
+History: this module used to scrape NSE's unofficial website endpoints
+(live-analysis-volume-spurts etc.) for "most active" / gainers. Dhan has
+no most-traded/movers API, and those scraped endpoints are undocumented
+and change without notice (most_active started 404-ing 2026-06-15). Since
+the DB screener supplanted this entirely, the scraping was removed: there
+is nothing to scrape for, and any "most traded today" signal we want we
+compute from our own volume data (reproducible + backtestable).
 
 Usage:
     wl = await WatchlistManager.build()
-    stocks = wl.get()          # list[WatchlistStock]
-    await wl.refresh()         # force refresh from NSE
+    stocks = wl.get()          # list[WatchlistStock] — liquid fallback names
 """
 
-import asyncio
 import csv
-import io
 import json
 import logging
 import time
-from dataclasses import dataclass, field
-from datetime import datetime, date
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 from zoneinfo import ZoneInfo
-
-import aiohttp
 
 logger = logging.getLogger("dhan.watchlist")
 
@@ -39,22 +35,6 @@ CACHE_DIR   = Path(__file__).parent.parent / ".cache"
 CACHE_FILE  = CACHE_DIR / "watchlist.json"
 MASTER_CSV  = CACHE_DIR / "scrip_master.csv"
 CACHE_TTL_H = 6
-
-NSE_HEADERS = {
-    "User-Agent":      "Mozilla/5.0 (X11; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0",
-    "Accept":          "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.5",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Referer":         "https://www.nseindia.com/",
-    "Connection":      "keep-alive",
-}
-
-# NSE unofficial JSON endpoints (stable, widely used)
-NSE_ENDPOINTS = {
-    "volume_gainers": "https://www.nseindia.com/api/live-analysis-volume-gainers",
-    "gainers":        "https://www.nseindia.com/api/live-analysis-variations?index=gainers",
-    "most_active":    "https://www.nseindia.com/api/live-analysis-volume-spurts",
-}
 
 
 @dataclass
@@ -65,7 +45,7 @@ class WatchlistStock:
     ltp:         float     = 0.0
     change_pct:  float     = 0.0
     volume:      int       = 0
-    source:      str       = ""   # "volume_gainers" | "gainers" | "most_active"
+    source:      str       = ""   # "nifty50_static" (fallback origin)
     lot_size:    int       = 1
     signal:      str       = ""   # filled by scanner: "BUY" | "SELL" | ""
     signal_reason: str     = ""
@@ -128,81 +108,29 @@ class WatchlistManager:
 
         logger.info(f"Symbol index built: {len(self._sym_to_sid)} NSE EQ instruments")
 
-    # ── NSE fetch ─────────────────────────────────────────────────────────────
+    # ── Build the static fallback list ─────────────────────────────────────────
 
     async def refresh(self, top_n: int = 30):
-        logger.info("Refreshing watchlist from NSE…")
+        """Populate the fallback watchlist from the static liquid-names list,
+        mapped to Dhan security_ids. No external calls — this list only ever
+        feeds the genuine 'screener returned empty' fallback path."""
         CACHE_DIR.mkdir(exist_ok=True)
-
-        stocks_raw: List[dict] = []
-
-        try:
-            async with aiohttp.ClientSession(headers=NSE_HEADERS,
-                                              timeout=aiohttp.ClientTimeout(total=15)) as session:
-                # Warm up the session with a cookie
-                try:
-                    await session.get("https://www.nseindia.com", ssl=False)
-                    await asyncio.sleep(0.5)
-                except Exception:
-                    pass
-
-                for source, url in NSE_ENDPOINTS.items():
-                    try:
-                        async with session.get(url, ssl=False) as resp:
-                            if resp.status != 200:
-                                logger.warning(f"NSE {source} returned {resp.status}")
-                                continue
-                            data = await resp.json(content_type=None)
-                            items = data.get("data", data) if isinstance(data, dict) else data
-                            if isinstance(items, list):
-                                for item in items[:top_n]:
-                                    stocks_raw.append({**item, "source": source})
-                    except Exception as e:
-                        logger.warning(f"NSE {source} fetch error: {e}")
-                    await asyncio.sleep(0.3)
-
-        except Exception as e:
-            logger.error(f"NSE session error: {e}")
-
-        if not stocks_raw:
-            logger.warning("NSE returned no data — using fallback NIFTY 50 heavy-weights")
-            stocks_raw = self._fallback_stocks()
-
-        # Deduplicate, map to security_id, rank by volume/change
-        seen: set = set()
         result: List[WatchlistStock] = []
-
-        for item in stocks_raw:
-            # NSE field names vary by endpoint
-            sym = (item.get("symbol") or item.get("Symbol") or "").strip().upper()
-            if not sym or sym in seen:
-                continue
+        for item in self._fallback_stocks():
+            sym = item["symbol"].strip().upper()
             sid = self._sym_to_sid.get(sym)
             if not sid:
                 continue
-            seen.add(sym)
             meta = self._sym_to_meta.get(sym, {})
             result.append(WatchlistStock(
-                symbol      = sym,
-                security_id = sid,
-                name        = meta.get("name", sym),
-                ltp         = float(item.get("ltp") or item.get("LTP") or item.get("lastPrice") or 0),
-                change_pct  = float(item.get("perChange") or item.get("changePct") or item.get("pChange") or 0),
-                volume      = int(float(item.get("totalTradedVolume") or item.get("tradedVolume") or item.get("volume") or 0)),
-                source      = item.get("source", ""),
-                lot_size    = meta.get("lot_size", 1),
-            ))
+                symbol=sym, security_id=sid, name=meta.get("name", sym),
+                source="nifty50_static", lot_size=meta.get("lot_size", 1)))
 
-        # Sort: volume DESC, take top_n
-        result.sort(key=lambda s: s.volume, reverse=True)
         self._stocks = result[:top_n]
         self._last_refresh = time.time()
-
-        # Persist cache
-        CACHE_FILE.write_text(json.dumps(
-            [s.__dict__ for s in self._stocks], indent=2
-        ))
-        logger.info(f"Watchlist refreshed: {len(self._stocks)} stocks")
+        CACHE_FILE.write_text(json.dumps([s.__dict__ for s in self._stocks], indent=2))
+        logger.info("Fallback watchlist built: %d liquid names (screener is the "
+                    "live source of truth)", len(self._stocks))
 
     # ── Fallback: guaranteed liquid names ─────────────────────────────────────
 
@@ -246,40 +174,3 @@ class WatchlistManager:
             if s.security_id in signals:
                 s.signal        = signals[s.security_id].get("action", "")
                 s.signal_reason = signals[s.security_id].get("reason", "")
-
-    # ── Background refresh task ───────────────────────────────────────────────
-
-    async def run(self):
-        """
-        Pre-market refresh only (08:30–09:10 IST), then LOCK for the session.
-        The list is stable all day so strategies warm up on consistent data.
-        Next refresh happens the following morning — never mid-session.
-        """
-        logger.info("Watchlist manager started — pre-market lock strategy")
-        refreshed_today = False
-
-        while True:
-            await asyncio.sleep(60)
-            now = datetime.now(IST)
-            wd  = now.weekday()
-            from datetime import time as dtime
-
-            if wd >= 5:   # Weekend — skip
-                refreshed_today = False
-                continue
-
-            t = now.time()
-
-            # Reset flag after market close so next morning can refresh
-            if t >= dtime(15, 30):
-                refreshed_today = False
-
-            # Pre-market window: refresh once between 08:30 and 09:10
-            if dtime(8, 30) <= t < dtime(9, 10) and not refreshed_today:
-                logger.info("Pre-market watchlist refresh (will lock at 09:10)…")
-                try:
-                    await self.refresh()
-                    refreshed_today = True
-                    logger.info(f"Watchlist locked for session: {[s.symbol for s in self._stocks]}")
-                except Exception as e:
-                    logger.warning(f"Pre-market refresh failed: {e}")
