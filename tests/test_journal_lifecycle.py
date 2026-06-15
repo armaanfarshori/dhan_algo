@@ -1,21 +1,21 @@
-"""QA findings C2, H3 — trade-record lifecycle integrity.
+"""QA findings C2, H3 — trade-record lifecycle integrity. BOTH FIXED 2026-06-15.
 
-C2 (Critical): log_trade_exit closes rows by (security_id, status='OPEN') with
-               only a conditional order-id guard. When the exit carries no
-               order_id (the PAPER case), it closes EVERY open row for the
-               security with one P&L — and a multi-entry position in LIVE leaves
-               sibling rows OPEN forever. The trades table feeds the risk
-               daily-loss halt, so corruption here mis-states risk.
-H3 (High):     Portfolio.apply_fill records a flip's closing leg via
-               log_trade_exit but never records the new opposite position via
-               log_trade_entry → the flipped position is untracked in trades.
+C2 (Critical, fixed): log_trade_exit now closes exactly ONE (latest matching)
+               open row. Previously a null-order (paper) exit closed EVERY open
+               row for the security with the same P&L, double-counting into
+               daily_pnl and the risk halt.
+H3 (High, fixed): Portfolio.apply_fill now journals a flip as exit + a new
+               entry for the opposite position (was: exit only → untracked).
 
 C2 uses a real (SQLite) AsyncDBBackend to exercise the actual UPDATE SQL.
 H3 uses a fake recorder backend (no DB) to assert the call pattern.
+
+Residual (tracked, not yet fixed): a partial reduce still marks a trade CLOSED
+even though qty remains; multi-entry positions are not P&L-apportioned. ORB
+opens once and closes once, so neither occurs in the current strategy.
 """
 import asyncio
 
-import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
@@ -51,9 +51,9 @@ def _open_count(eng, sid):
                               "AND status='OPEN'"), {"s": sid}).scalar()
 
 
-def test_paper_exit_closes_all_open_rows_for_security(tmp_path):
-    """Characterization of C2: with two OPEN rows (multi-entry) and a paper exit
-    (order_id=None), BOTH rows close with the same P&L — double-counting."""
+def test_paper_exit_closes_one_open_row_no_double_count(tmp_path):
+    """C2 fixed: with two OPEN rows (multi-entry) and a paper exit (order_id=None),
+    exactly ONE row closes with the P&L — no duplication into daily_pnl/risk."""
     be, eng = _sqlite_backend(tmp_path)
 
     async def go():
@@ -65,8 +65,9 @@ def test_paper_exit_closes_all_open_rows_for_security(tmp_path):
     with eng.connect() as c:
         closed = c.execute(text("SELECT COUNT(*) FROM trades WHERE status='CLOSED'")).scalar()
         pnls = [r[0] for r in c.execute(text("SELECT pnl FROM trades WHERE status='CLOSED'"))]
-    assert closed == 2                 # both rows closed (the risk)
-    assert pnls == [160.0, 160.0]      # same pnl written twice → double-count
+    assert closed == 1                 # exactly one row closed — no blanket close
+    assert pnls == [160.0]             # P&L recorded once, not duplicated
+    assert _open_count(eng, "111") == 1  # sibling row remains OPEN (not nuked)
 
 
 def test_live_exit_by_order_id_leaves_sibling_open(tmp_path):
@@ -108,10 +109,7 @@ def test_reduce_close_records_one_entry_one_exit(monkeypatch):
     assert pf.get("111").is_flat
 
 
-@pytest.mark.xfail(strict=True,
-                   reason="H3: a flip records the closing exit but not a new entry "
-                          "for the opposite position")
-def test_flip_records_new_entry(monkeypatch):
+def test_flip_records_new_entry(monkeypatch):  # H3 fixed
     pf, rec = _portfolio_with_recorder(monkeypatch)
     asyncio.run(pf.apply_fill(Fill("111", "BUY", 10, 100.0), strategy="ORB"))   # long 10
     asyncio.run(pf.apply_fill(Fill("111", "SELL", 15, 105.0), strategy="ORB"))  # flip to short 5

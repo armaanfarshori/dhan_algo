@@ -231,10 +231,19 @@ class AsyncDBBackend:
 
     async def log_trade_exit(self, security_id: str, exit_price: float, pnl: float,
                              dhan_order_id: Optional[str] = None) -> None:
+        # Close exactly ONE open row (the most recent matching) — never a
+        # blanket close. A null order_id (paper) used to close EVERY open row
+        # for the security with the same pnl, double-counting into daily_pnl
+        # and the risk halt. Scoping to a single row eliminates that.
         await self._run("""
             UPDATE trades SET exit_ts=:exit_ts, exit_price=:exit_price, pnl=:pnl, status='CLOSED'
-            WHERE security_id=:security_id AND status='OPEN'
-              AND (:order_id IS NULL OR dhan_order_id=:order_id)
+            WHERE id = (
+                SELECT id FROM trades
+                WHERE security_id=:security_id AND status='OPEN'
+                  AND (:order_id IS NULL OR dhan_order_id=:order_id)
+                ORDER BY entry_ts DESC, id DESC
+                LIMIT 1
+            )
         """, {
             "exit_ts": datetime.now(timezone.utc), "exit_price": exit_price,
             "pnl": pnl, "security_id": security_id, "order_id": dhan_order_id,

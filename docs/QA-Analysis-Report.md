@@ -6,6 +6,18 @@
 
 > Severity note: several findings (C1, H3, H4, M6) bite only in **live mode**, which the platform is deliberately not in yet — treat them as "fix before M8 (tiny live)," not "fix tonight." C2, H1, and H2 can affect paper/backfill today.
 
+> **Amendment (2026-06-15, post-test):** Two corrections after writing the test suite.
+> 1. **C2 was overstated.** `log_trade_exit` *does* carry an order-id guard
+>    (`AND (:order_id IS NULL OR dhan_order_id=:order_id)`), so the close-all only
+>    fires when the exit has **no order_id** — i.e. the PAPER path. In LIVE, an
+>    order-id-scoped exit instead closes only its own row, leaving sibling rows
+>    from a multi-entry position **OPEN forever**. Both behaviors are real; the
+>    earlier "no order-id match" wording was wrong.
+> 2. **C2 and H3 are now FIXED** (commit on 2026-06-15) — see "Remediation status"
+>    at the end of this report. Their xfail tests were flipped to passing.
+>    Residual trade-model limitations (partial-reduce marks a trade CLOSED early;
+>    multi-entry P&L apportionment) are documented there and tracked.
+
 ---
 
 ## 1. Executive Summary
@@ -83,10 +95,10 @@ Mode POST correctly refuses with 409 (`:280-290`) — good. `killswitch_handler`
 | ID | Sev | Location | Risk | Impact |
 |----|-----|----------|------|--------|
 | C1 | **Critical** | `core/client.py:142-183`, `place_order:224`, `execution.py:79-86` | POST `orders` retried on network error/429/5xx with empty `correlation_id` (no idempotency) | Duplicate live order → double position & double risk |
-| C2 | **Critical** | `core/journal.py:232-236` | `log_trade_exit` closes ALL open rows for a security with one pnl, no order-id/LIMIT | P&L double-count → corrupts trades table that feeds the risk daily-loss halt |
+| C2 | **Critical** *(FIXED)* | `core/journal.py:232-236` | `log_trade_exit` closed every OPEN row for a security when the exit had no order_id (paper path); order-id-scoped exits left multi-entry siblings OPEN | P&L double-count → corrupts trades table that feeds the risk daily-loss halt. **Fixed:** exit now closes exactly one (latest matching) open row |
 | H1 | High | `core/client.py:35-45` | Only `per_sec` enforced; per_min/hour/day defined but ignored | 100k/day data & 7k/day order caps can be blown; contradicts documented guarantee |
 | H2 | High | `core/token_manager.py:77-93,40,209` | Non-atomic `.env` rewrite; unimplemented lock; concurrent refresh race | Corrupted `.env` → boot fails (no DB creds); duplicate token gen |
-| H3 | High | `engine/portfolio.py:95-109` | Flip records only exit, not the new entry | Untracked position in trades table; mis-stated history/P&L |
+| H3 | High *(FIXED)* | `engine/portfolio.py:95-109` | Flip recorded only the closing exit, not the new opposite entry | Untracked position in trades table; mis-stated history/P&L. **Fixed:** flip now journals exit + new entry |
 | H4 | High | `engine/execution.py:148-152` | Unconfirmed order booked at ref price; reconcile only on boot | Phantom position until next restart if order later rejects |
 | M1 | Med | `core/client.py:157-161` + token mgr | Concurrent DH-901 handling races token generation & `.env` writes | Wasted token gen, transient auth instability |
 | M2 | Med | `engine/bar_builder.py:66` | Bars stamped with server clock, not exchange LTT | Mis-bucketed bars corrupt Kronos input & backtest |
@@ -124,6 +136,30 @@ Testability is limited by direct `get_session()`/`get_engine()` calls inside fun
 - **Wire or remove the postback**: either reconcile fills from it (with signature verification) or drop the endpoint so it isn't mistaken for a safety net.
 - **Stamp bars with exchange LTT** when present; bound `_pending`.
 - **Unify the heartbeat P&L number** so the dashboard shows one consistent realized figure.
+
+---
+
+## 8. Remediation status
+
+Every finding now has a regression/characterization test under `tests/` (7 new files, 23 cases). Confirmed-but-unfixed bugs are `xfail(strict=True)` — they keep CI green and auto-flip to a hard failure the moment they're fixed.
+
+| ID | Status | Test | Notes |
+|----|--------|------|-------|
+| C2 | ✅ Fixed | `test_journal_lifecycle.py` | `log_trade_exit` closes exactly one (latest matching) open row — no blanket close, no P&L double-count |
+| H3 | ✅ Fixed | `test_journal_lifecycle.py` | flip now journals exit + a new entry for the opposite position |
+| C1 | ⏳ xfail | `test_client_idempotency.py` | live-only; needs `correlation_id` + non-retriable orders |
+| H1 | ⏳ xfail | `test_client_idempotency.py` | windowed rate limits unenforced |
+| H2 | ⏳ xfail | `test_token_safety.py` | non-atomic `.env` write |
+| H4 | ✅ pinned | `test_execution_robustness.py` | documented behavior covered by passing tests; design unchanged (live-only) |
+| M1 | ⏳ xfail | `test_client_idempotency.py` | unserialized auth refresh |
+| M2 | ✅ pinned | `test_bar_builder_robustness.py` | `on_tick` honors explicit ts; gap is the LiveFeed caller (forward LTT) |
+| M3 | ⏳ xfail | `test_reconcile_partial_avg.py` | `float(None)` on partial broker avg (live-only) |
+| M4 | ⏳ xfail | `test_bar_builder_robustness.py` | unbounded `_pending` |
+| M6 | ⏳ xfail | `test_api_handlers.py` | postback no-op / unauthenticated |
+
+**Residual trade-model limitations** (surfaced while fixing C2/H3, tracked, not yet addressed): a *partial* reduce still marks a trade row CLOSED even though quantity remains, and multi-entry positions are not P&L-apportioned across rows. Neither occurs with the current ORB strategy (one entry, one full exit per position), but a future adding/scaling strategy would need the trades table to model position lifecycle rather than individual fills.
+
+Suite after remediation: **101 passed, 7 xfailed**.
 
 ---
 

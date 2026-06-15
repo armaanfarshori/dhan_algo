@@ -99,14 +99,23 @@ class Portfolio:
             realized = (fill.price - pos.avg_price) * closing * direction
             self.realized_pnl += realized
             pos.qty += signed
+            flipped = pos.qty != 0 and (pos.qty > 0) != (direction > 0)
             if pos.qty == 0:
                 pos.avg_price = 0.0
-            elif (pos.qty > 0) != (direction > 0):
-                pos.avg_price = fill.price   # flipped — remainder at fill price
+            elif flipped:
+                pos.avg_price = fill.price   # remainder is a NEW position at fill price
             if self._db:
+                # Close the old position…
                 await self._db.log_trade_exit(
                     security_id=fill.security_id, exit_price=fill.price,
                     pnl=realized, dhan_order_id=fill.order_id)
+                # …and on a flip, the remainder is a fresh opposite position —
+                # journal it as an entry so it isn't lost from the trades table.
+                if flipped:
+                    await self._db.log_trade_entry(
+                        security_id=fill.security_id, side=fill.side,
+                        qty=abs(pos.qty), entry_price=fill.price,
+                        strategy=strategy or pos.strategy, dhan_order_id=fill.order_id)
 
         await self._persist(pos)
         logger.info("Portfolio[%s]: %s now qty=%+d avg=%.2f (session realized ₹%+.2f)",
