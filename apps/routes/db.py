@@ -30,7 +30,7 @@ async def equity_handler(_r: web.Request) -> web.Response:
                        last(unrealized_pnl, time) AS upnl,
                        last(total_equity, time)   AS equity
                 FROM equity_curve
-                WHERE time >= CURRENT_DATE
+                WHERE time >= timezone('Asia/Kolkata', date_trunc('day', timezone('Asia/Kolkata', now())))  -- IST trading day (not UTC CURRENT_DATE)
                 GROUP BY 1 ORDER BY 1
             """)).fetchall()
         return {"ok": True, "intraday": [
@@ -62,8 +62,8 @@ async def signals_handler(_r: web.Request) -> web.Response:
                        COALESCE(NULLIF(i.ticker, ''), t.security_id) AS ticker
                 FROM trades t
                 LEFT JOIN instruments i ON i.security_id = t.security_id
-                WHERE t.entry_ts::date = CURRENT_DATE
-                   OR t.exit_ts::date  = CURRENT_DATE
+                WHERE (t.entry_ts AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date  -- IST trading day (not UTC CURRENT_DATE)
+                   OR (t.exit_ts  AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date  -- IST trading day (not UTC CURRENT_DATE)
                 ORDER BY t.entry_ts DESC LIMIT 100
             """)).fetchall()
 
@@ -105,7 +105,7 @@ async def trades_handler(request: web.Request) -> web.Response:
                 SELECT COUNT(*) FILTER (WHERE status='CLOSED'),
                        COALESCE(SUM(pnl) FILTER (WHERE status='CLOSED'), 0),
                        COUNT(*) FILTER (WHERE status='CLOSED' AND pnl > 0)
-                FROM trades WHERE entry_ts::date = CURRENT_DATE
+                FROM trades WHERE (entry_ts AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date  -- IST trading day (not UTC CURRENT_DATE)
             """)).fetchone()
         return rows, summary
 
@@ -217,7 +217,7 @@ async def kronos_gate_handler(_r: web.Request) -> web.Response:
                        s.features_snapshot, i.ticker
                 FROM signals s
                 LEFT JOIN instruments i ON i.security_id = s.security_id
-                WHERE s.strategy = 'orb_gate' AND s.ts::date = CURRENT_DATE
+                WHERE s.strategy = 'orb_gate' AND (s.ts AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date  -- IST trading day (not UTC CURRENT_DATE)
                 ORDER BY s.ts DESC LIMIT 50
             """)).fetchall()
         out = []
@@ -283,7 +283,7 @@ async def kronos_signals_handler(request: web.Request) -> web.Response:
                        s.features_snapshot, i.ticker, i.name
                 FROM signals s
                 LEFT JOIN instruments i ON i.security_id = s.security_id
-                WHERE s.ts::date = CURRENT_DATE
+                WHERE (s.ts AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date  -- IST trading day (not UTC CURRENT_DATE)
                 ORDER BY s.ts DESC LIMIT :lim
             """), {"lim": limit}).fetchall()
 

@@ -116,9 +116,9 @@ class RiskEngine:
             with get_session() as s:
                 return s.execute(text("""
                     SELECT COALESCE(SUM(pnl), 0),
-                           COALESCE(SUM(pnl) FILTER (WHERE exit_ts >= CURRENT_DATE), 0),
+                           COALESCE(SUM(pnl) FILTER (WHERE exit_ts >= timezone('Asia/Kolkata', date_trunc('day', timezone('Asia/Kolkata', now())))), 0),  -- IST trading day (not UTC CURRENT_DATE)
                            COALESCE(SUM(pnl) FILTER (
-                               WHERE exit_ts >= date_trunc('week', CURRENT_DATE)), 0)
+                               WHERE exit_ts >= timezone('Asia/Kolkata', date_trunc('week', timezone('Asia/Kolkata', now())))), 0)  -- IST trading week (not UTC CURRENT_DATE)
                     FROM trades WHERE status = 'CLOSED'
                 """)).fetchone()
         try:
