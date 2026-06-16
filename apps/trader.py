@@ -106,7 +106,12 @@ async def seed_opening_ranges(runners, dhan, segment: str, orb_minutes: int):
 async def write_heartbeat(*, runners, portfolio, risk, feed, bar_builder,
                           kronos_scanner, start_time, client=None, names=None):
     """Atomically export trader state for the api process."""
+    from core.api_usage import ApiUsageFlusher
     names = names or {}
+    flusher = ApiUsageFlusher(process="trader")
+    _flush_ticks = 0
+    _FLUSH_EVERY = max(1, round(60.0 / HEARTBEAT_INTERVAL))  # ~every 60s
+
     while True:
         try:
             pf = portfolio.summary(feed.get_ltp)
@@ -137,6 +142,14 @@ async def write_heartbeat(*, runners, portfolio, risk, feed, bar_builder,
             tmp.replace(HEARTBEAT_FILE)
         except Exception as exc:
             logger.warning("Heartbeat write failed: %s", exc)
+
+        # Flush API usage deltas to DB roughly every 60s (not every heartbeat)
+        if client:
+            _flush_ticks += 1
+            if _flush_ticks >= _FLUSH_EVERY:
+                _flush_ticks = 0
+                await flusher.flush(client)
+
         await asyncio.sleep(HEARTBEAT_INTERVAL)
 
 
@@ -410,6 +423,10 @@ async def main():
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        # Final API usage flush so the last ~60s of calls are recorded
+        from core.api_usage import ApiUsageFlusher
+        _shutdown_flusher = ApiUsageFlusher(process="trader")
+        await _shutdown_flusher.flush(dhan)
         await db.log_run_stop(run_id, outcome="stopped")
         logger.info("✅ dhan-trader shut down cleanly")
 

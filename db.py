@@ -7,7 +7,12 @@ _SessionLocal = None
 
 
 def init_db(db_url: str):
+    """Initialise the shared engine/pool.  Safe to call multiple times — a
+    second call with the same URL is a no-op so that AsyncDBBackend.connect()
+    can call it without destroying the pool created by apps/trader.py."""
     global _engine, _SessionLocal
+    if _engine is not None:
+        return  # already initialised — reuse existing pool
     _engine = create_engine(db_url, pool_pre_ping=True, pool_size=5, max_overflow=10)
     _SessionLocal = sessionmaker(bind=_engine, autocommit=False, autoflush=False)
 
