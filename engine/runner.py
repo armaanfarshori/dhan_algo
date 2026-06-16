@@ -103,13 +103,33 @@ class StrategyRunner:
             await self._handle_exit(decision, price)
 
     async def _get_price(self) -> tuple[float, Optional[float], Optional[float]]:
-        # WebSocket first
+        # WebSocket first — only use cached tick if it is fresh enough.
+        # _FEED_FRESH_S guards against pre-disconnect prices surviving a
+        # reconnect: after _invalidate_tick_cache() the age comes back as None
+        # (no data) and must be treated as stale → fall through to REST.
+        # Feeds that do not expose get_tick_age_s() (legacy / test stubs) are
+        # treated as always-fresh to preserve backward compatibility.
         if self._feed is not None:
-            tick = self._feed.get_ohlc_tick(self.sid)
-            ltp = float(tick.get("last_price") or 0)
-            if ltp > 0:
-                ohlc = tick.get("ohlc", {})
-                return ltp, float(ohlc.get("high") or ltp), float(ohlc.get("low") or ltp)
+            tick_is_fresh = True   # default: trust the feed (legacy path)
+            if hasattr(self._feed, "get_tick_age_s"):
+                age = self._feed.get_tick_age_s(self.sid)
+                if age is None:
+                    # Cache cleared on disconnect — do not use stale price
+                    tick_is_fresh = False
+                    logger.debug("Runner %s: feed cache cold, falling back to REST", self.sid)
+                elif age >= _FEED_FRESH_S:
+                    # Price is too old — fall back to REST
+                    tick_is_fresh = False
+                    logger.debug(
+                        "Runner %s: feed tick stale (%.0fs >= %ds), falling back to REST",
+                        self.sid, age, _FEED_FRESH_S,
+                    )
+            if tick_is_fresh:
+                tick = self._feed.get_ohlc_tick(self.sid)
+                ltp = float(tick.get("last_price") or 0)
+                if ltp > 0:
+                    ohlc = tick.get("ohlc", {})
+                    return ltp, float(ohlc.get("high") or ltp), float(ohlc.get("low") or ltp)
         # REST fallback
         try:
             data = await self._client.get_ohlc({self._segment: [int(self.sid)]})

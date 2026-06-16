@@ -128,9 +128,14 @@ class RiskEngine:
             self._realized_week = float(row[2])
         except Exception as exc:
             logger.warning("Risk: DB P&L refresh failed (%s) — using process-local "
-                           "realized (restart-unsafe)", exc)
+                           "realized for today; weekly value preserved from last DB read "
+                           "(restart-unsafe)", exc)
             self._realized_today = self._portfolio.realized_pnl
-            self._realized_week = self._portfolio.realized_pnl
+            # Do NOT overwrite _realized_week with session-only P&L: the weekly meter
+            # could be orders of magnitude larger (losses from Mon–Thu wouldn't show on
+            # a Fri restart). Keep the last DB-derived value; it may be stale but it is
+            # never an understatement compared to replacing it with ≤1-day session P&L.
+            # _realized_week intentionally left unchanged.
 
     # ── Persistent loss halts ─────────────────────────────────────────────────
 
@@ -362,10 +367,49 @@ class RiskEngine:
                 logger.error("Halt callback error: %s", exc)
 
     def activate_kill_switch(self, reason: str = "operator"):
-        self.state.kill_switch = True
-        self.state.halted = True
-        self.state.halt_reason = f"Kill switch: {reason}"
-        logger.critical("⛔ KILL SWITCH: %s", reason)
+        """Activate the kill switch and fire on_halt callbacks (flatten positions).
+
+        If called from within a running asyncio event loop (normal production path in
+        trader.py), `_halt` is scheduled as a coroutine task so all async on_halt
+        callbacks (e.g. executor flatten) fire correctly.
+
+        If called from a synchronous context with no running loop (tests, CLI), the
+        halt state is set immediately and synchronous on_halt callbacks are called
+        directly; async callbacks are scheduled via asyncio.run() in a best-effort
+        fashion (logs a warning if any are present).
+        """
+        full_reason = f"Kill switch: {reason}"
+        try:
+            loop = asyncio.get_running_loop()
+            # We are inside an async context — schedule _halt as a task so all
+            # async on_halt callbacks (position flattening) are awaited properly.
+            loop.create_task(self._halt(full_reason, scope=""))
+        except RuntimeError:
+            # No running event loop — synchronous caller (tests, CLI tools).
+            # Set state immediately so check_intent blocks right away, then fire
+            # sync callbacks inline and async ones via asyncio.run().
+            self.state.kill_switch = True
+            self.state.halted = True
+            self.state.halt_reason = full_reason
+            self.state.halt_scope = ""
+            logger.critical("⛔ KILL SWITCH: %s", reason)
+            async_cbs = []
+            for cb in self._on_halt:
+                try:
+                    if asyncio.iscoroutinefunction(cb):
+                        async_cbs.append(cb)
+                    else:
+                        cb(full_reason)
+                except Exception as exc:
+                    logger.error("Halt callback error: %s", exc)
+            if async_cbs:
+                async def _run_async_cbs():
+                    for cb in async_cbs:
+                        try:
+                            await cb(full_reason)
+                        except Exception as exc:
+                            logger.error("Halt callback error: %s", exc)
+                asyncio.run(_run_async_cbs())
 
     def resume(self):
         self.state.halted = False

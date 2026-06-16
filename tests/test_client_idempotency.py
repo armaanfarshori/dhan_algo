@@ -104,14 +104,17 @@ def test_rate_limiter_enforces_daily_cap():
 # ── C1: order placement must not blindly retry without idempotency ─────────────
 
 def test_order_payload_has_no_idempotency_key():
-    """LiveExecutor.submit does not set correlation_id — the idempotency key is
-    now auto-generated client-side inside place_order, so callers remain clean.
-    This test verifies that LiveExecutor still does not set the key (it's the
-    client's responsibility, not the executor's)."""
+    """LiveExecutor.submit does not *generate* a correlation_id — the key is
+    auto-generated client-side inside place_order, then surfaced back in the
+    result dict so the executor can store it as client_order_id in the audit
+    trail. The executor only *reads* the key from the result; it never sets one.
+    Verify the submit call does not pass correlation_id to place_order."""
     import inspect
     from engine.execution import LiveExecutor
     src = inspect.getsource(LiveExecutor.submit)
-    assert "correlation_id" not in src   # key is generated inside place_order
+    # The executor reads correlation_id from the result (for audit logging) but
+    # must never pass it as an argument to place_order.
+    assert "correlation_id=" not in src   # never passed as kwarg to place_order
 
 
 def test_order_not_retried_without_idempotency(monkeypatch):
@@ -131,7 +134,9 @@ def test_order_not_retried_without_idempotency(monkeypatch):
     result = asyncio.run(go())
     # Only one POST to /orders; the 200 was consumed by the reconcile GET.
     assert c._session.post_count("orders") == 1
-    assert result == {"orderId": "X1"}
+    # place_order injects correlationId into the result for the caller's audit trail
+    assert result.get("orderId") == "X1"
+    assert "correlationId" in result
 
 
 # ── M1: concurrent auth-error handling is unserialized ─────────────────────────

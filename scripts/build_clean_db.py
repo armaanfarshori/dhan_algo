@@ -187,21 +187,41 @@ summary AS (
     GROUP BY security_id
 ),
 corp_action_flags AS (
-    -- Detect overnight gaps > 15% using daily bars (open vs prev close)
-    SELECT DISTINCT d.security_id
-    FROM bars d
-    JOIN LATERAL (
-        SELECT close AS prev_close
-        FROM bars p
-        WHERE p.security_id = d.security_id
-          AND p.timeframe   = '1d'
-          AND p.time < d.time
-        ORDER BY p.time DESC
-        LIMIT 1
-    ) prev ON TRUE
-    WHERE d.timeframe = '1d'
-      AND prev.prev_close > 0
-      AND ABS(d.open - prev.prev_close) / prev.prev_close > %(corp_thresh)s
+    -- Detect overnight gaps > 15% (open vs prev-day close).
+    --
+    -- Safe on a 300M-row hypertable: we first materialize one row per
+    -- (security_id, day) using TimescaleDB's chunk-aware last() aggregate
+    -- bounded by the date range already found in `summary` (no full-table
+    -- ORDER BY time).  The outer LAG() then walks only that small daily
+    -- summary — O(trading_days × N_securities), not O(all bars).
+    SELECT DISTINCT security_id
+    FROM (
+        SELECT
+            security_id,
+            day,
+            day_open,
+            LAG(day_close) OVER (
+                PARTITION BY security_id ORDER BY day
+            ) AS prev_close
+        FROM (
+            -- One row per (security_id, calendar-day): first open, last close.
+            -- Bounded to the date range discovered in `summary` so the planner
+            -- can prune chunks; last()/first() never sort the entire hypertable.
+            SELECT
+                b.security_id,
+                DATE(b.time AT TIME ZONE 'Asia/Kolkata') AS day,
+                first(b.open,  b.time)                   AS day_open,
+                last(b.close,  b.time)                   AS day_close
+            FROM bars b
+            JOIN summary s USING (security_id)
+            WHERE b.timeframe = '1d'
+              AND b.time >= s.first_day::timestamptz
+              AND b.time <  s.last_day::timestamptz + INTERVAL '2 days'
+            GROUP BY b.security_id, DATE(b.time AT TIME ZONE 'Asia/Kolkata')
+        ) daily
+    ) windowed
+    WHERE prev_close > 0
+      AND ABS(day_open - prev_close) / prev_close > %(corp_thresh)s
 )
 SELECT
     s.security_id,
@@ -224,6 +244,13 @@ def identify_universe(dry_run=True):
     log.info("Stage 1: identifying liquid universe from raw DB…")
     conn = raw_conn()
     cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    # Guard against long-running queries holding locks or OOM-ing the DB while
+    # the backfill is active.  10 min is generous for the aggregation but will
+    # abort any accidental full-table scan before it destabilises the instance.
+    # lock_timeout prevents the session from queuing behind a long exclusive
+    # lock (e.g. autovacuum on a chunk) indefinitely.
+    cur.execute("SET statement_timeout = '600000'")   # 10 minutes
+    cur.execute("SET lock_timeout      = '5000'")     # 5 seconds
     cur.execute(IDENTIFY_SQL, {
         "corp_thresh": CORP_ACTION_THRESHOLD,
         "min_days":    MIN_TRADING_DAYS,
@@ -340,9 +367,17 @@ def transform(universe: list[str], batch_size: int = 50):
     done = 0
     for sid in universe:
         # Read from raw
-        raw_cur.execute(COPY_SQL.replace("FROM bars", "FROM dhan_trading.bars")
-                        if False else COPY_SQL,
-                        {"sid": sid, "circuit_vol": CIRCUIT_BREAKER_VOL})
+        # COPY_SQL is defined above but intentionally NEVER executed here.
+        # It was a cross-DB INSERT sketch written against the source schema
+        # (dhan_trading.bars) and would need a dblink or FDW to run across
+        # connections — neither is configured.  The actual read path is the
+        # raw_cur2 query immediately below.  Dead code; kept for reference only.
+        # DO NOT remove the `if False` guard: executing COPY_SQL here would
+        # attempt to INSERT into the raw dhan_trading.bars (wrong target) via
+        # raw_cur, which writes to the same connection — potential corruption.
+        _ = COPY_SQL  # suppress "unused variable" linters; guard is intentional
+        if False:     # noqa: SIM210  — guard must stay; see comment above
+            raw_cur.execute(COPY_SQL, {"sid": sid, "circuit_vol": CIRCUIT_BREAKER_VOL})
 
         # Actually: read from raw then insert into clean (cross-DB via python)
         raw_cur2 = raw.cursor()

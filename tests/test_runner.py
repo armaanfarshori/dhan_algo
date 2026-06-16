@@ -9,8 +9,7 @@ from datetime import datetime, date
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-
-from engine.runner import StrategyRunner
+from engine.runner import StrategyRunner, _FEED_FRESH_S
 from engine.types import Fill, OrderIntent, Position
 from strategies.orb import Decision
 
@@ -457,3 +456,132 @@ def test_runner_uses_ltp_as_fallback_when_ohlc_missing():
     assert price == 90.0
     assert high  == 90.0   # fell back to ltp
     assert low   == 90.0   # fell back to ltp
+
+
+# ─── 12. QR-C3: stale tick cache → REST fallback ─────────────────────────────
+
+class FakeFeedWithAge:
+    """LiveFeed stand-in that exposes get_tick_age_s() so the runner's
+    freshness guard is exercised.  age_s=None simulates a cold/cleared cache
+    (post-reconnect invalidation); age_s > _FEED_FRESH_S simulates a stale
+    cached price that survived a reconnect.
+    """
+
+    def __init__(self, ltp: float = 105.0, high: float = 106.0,
+                 low: float = 104.0, age_s: Optional[float] = None):
+        self.ltp   = ltp
+        self.high  = high
+        self.low   = low
+        self._age  = age_s
+        self.ohlc_tick_calls: int = 0
+
+    def get_ohlc_tick(self, sid: str) -> dict:
+        self.ohlc_tick_calls += 1
+        return {
+            "last_price": self.ltp,
+            "ohlc": {"high": self.high, "low": self.low},
+        }
+
+    def get_tick_age_s(self, sid: str) -> Optional[float]:
+        return self._age
+
+
+class FakeClient:
+    """Async REST client stub used to verify that the runner falls back to REST."""
+
+    def __init__(self, ltp: float = 200.0):
+        self._ltp = ltp
+        self.calls: list = []
+
+    async def get_ohlc(self, instruments: dict) -> dict:
+        self.calls.append(instruments)
+        # Mirror the shape the runner expects: data → segment → sid → tick
+        return {
+            "data": {
+                "NSE_EQ": {
+                    "42": {
+                        "last_price": self._ltp,
+                        "ohlc": {"high": self._ltp + 1, "low": self._ltp - 1},
+                    }
+                }
+            }
+        }
+
+
+def test_runner_falls_back_to_rest_when_tick_cache_cold():
+    """QR-C3 — after a reconnect the tick cache is cleared (age=None).
+
+    The runner must skip the WS price entirely and call REST instead.
+    This asserts the fix: _get_price() checks get_tick_age_s() before trusting
+    the cache.  A None age (cold cache) must be treated as stale → REST path.
+    """
+    # Feed has a cached ltp=105 but age=None (cleared on reconnect)
+    stale_feed = FakeFeedWithAge(ltp=105.0, age_s=None)
+    rest_client = FakeClient(ltp=200.0)
+
+    runner, strategy, *_ = make_runner()
+    runner._feed    = stale_feed
+    runner._client  = rest_client
+
+    asyncio.run(runner._poll_once(ist(10, 0)))
+
+    # REST was called — the runner did NOT trust the cold cache
+    assert len(rest_client.calls) == 1, (
+        "REST must be called when tick cache is cold (post-reconnect)"
+    )
+    # The price the strategy received is the REST price, not the cached 105
+    assert len(strategy.ticks_received) == 1
+    price, _, _ = strategy.ticks_received[0]
+    assert price == 200.0, (
+        f"strategy must see REST price (200.0), not stale cached price — got {price}"
+    )
+    # The feed's get_ohlc_tick was never called (skipped entirely)
+    assert stale_feed.ohlc_tick_calls == 0, (
+        "feed.get_ohlc_tick() must not be called when cache is cold"
+    )
+
+
+def test_runner_falls_back_to_rest_when_tick_is_stale():
+    """QR-C3 — tick older than _FEED_FRESH_S must be rejected and REST used.
+
+    Simulates a cached price that survived a WebSocket reconnect and is now
+    older than the freshness window.  The runner must not hand this to ORB.
+    """
+    stale_age = _FEED_FRESH_S + 1   # one second past the window
+    stale_feed = FakeFeedWithAge(ltp=105.0, age_s=stale_age)
+    rest_client = FakeClient(ltp=200.0)
+
+    runner, strategy, *_ = make_runner()
+    runner._feed    = stale_feed
+    runner._client  = rest_client
+
+    asyncio.run(runner._poll_once(ist(10, 0)))
+
+    assert len(rest_client.calls) == 1, "REST must be called when tick is stale"
+    price, _, _ = strategy.ticks_received[0]
+    assert price == 200.0, (
+        f"strategy must see REST price (200.0) not stale WS price — got {price}"
+    )
+    assert stale_feed.ohlc_tick_calls == 0, (
+        "feed.get_ohlc_tick() must not be called when tick is stale"
+    )
+
+
+def test_runner_uses_ws_tick_when_fresh():
+    """QR-C3 control case — a fresh tick (age < _FEED_FRESH_S) must still take
+    the WS path and never hit REST.
+    """
+    fresh_age = _FEED_FRESH_S - 1   # one second inside the freshness window
+    fresh_feed = FakeFeedWithAge(ltp=105.0, age_s=fresh_age)
+    rest_client = FakeClient(ltp=200.0)
+
+    runner, strategy, *_ = make_runner()
+    runner._feed    = fresh_feed
+    runner._client  = rest_client
+
+    asyncio.run(runner._poll_once(ist(10, 0)))
+
+    assert len(rest_client.calls) == 0, "REST must NOT be called when WS tick is fresh"
+    assert fresh_feed.ohlc_tick_calls == 1, "feed.get_ohlc_tick() must be called for fresh tick"
+    price, _, _ = strategy.ticks_received[0]
+    assert price == 105.0, f"strategy must see WS price (105.0) — got {price}"
