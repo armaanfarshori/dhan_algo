@@ -330,7 +330,9 @@ function RateLimitPanel({ rateLimitsData }) {
                 <div
                   className="h-full rounded-full transition-[width] duration-500"
                   style={{
-                    width: usagePct != null ? `${Math.max(usagePct, 3)}%` : '0%',
+                    // Only floor the width when there is actual spend — a 0-usage
+                    // endpoint must render an empty track, not a 3% sliver.
+                    width: usagePct ? `${Math.max(usagePct, 3)}%` : '0%',
                     background: barColor,
                   }}
                 />
