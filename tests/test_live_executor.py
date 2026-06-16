@@ -1,6 +1,5 @@
 """LiveExecutor fill confirmation + LIVE broker reconcile — the paper→live path."""
 import asyncio
-from typing import Optional
 
 import pytest
 

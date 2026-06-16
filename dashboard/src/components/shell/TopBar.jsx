@@ -42,32 +42,37 @@ export function TopBar({ data }) {
       className="sticky top-0 z-30 border-b border-border backdrop-blur-md"
       style={{ background: 'hsl(var(--top-bg) / var(--top-alpha))' }}
     >
-      <div className="mx-auto flex h-[58px] max-w-[1320px] items-center gap-[18px] px-[22px]">
-        {/* brand */}
-        <div className="flex items-center gap-2.5 text-[15px] font-bold tracking-[-.02em]">
-          <span
-            className="h-[9px] w-[9px] rounded-full"
-            style={{
-              background: alive ? 'hsl(var(--profit))' : 'hsl(var(--loss))',
-              boxShadow: `0 0 0 3px hsl(var(--${alive ? 'profit' : 'loss'}) / .15)`,
-            }}
-          />
-          Tessera
+      <div className="mx-auto flex h-[58px] max-w-[1320px] items-center gap-2.5 px-3 sm:gap-[18px] sm:px-[22px]">
+        {/* LEFT — brand + badges + stats; shrinks/clips before the right cluster */}
+        <div className="flex min-w-0 flex-1 items-center gap-2.5 overflow-hidden sm:gap-[18px]">
+          {/* brand */}
+          <div className="flex shrink-0 items-center gap-2.5 text-[15px] font-bold tracking-[-.02em]">
+            <span
+              className="h-[9px] w-[9px] rounded-full"
+              style={{
+                background: alive ? 'hsl(var(--profit))' : 'hsl(var(--loss))',
+                boxShadow: `0 0 0 3px hsl(var(--${alive ? 'profit' : 'loss'}) / .15)`,
+              }}
+            />
+            Tessera
+          </div>
+
+          {/* PAPER hidden on phones to make room for the kill switch; LIVE always shown (safety) */}
+          <Badge variant={mode === 'LIVE' ? 'loss' : 'amber'} className={mode === 'LIVE' ? 'shrink-0' : 'hidden shrink-0 sm:inline-flex'}>{mode}</Badge>
+          <Badge variant={gate === 'SHADOW' ? 'default' : 'sky'} className="hidden shrink-0 sm:inline-flex">GATE · {gate}</Badge>
+          {halted && <Badge variant="loss" className="shrink-0">⛔ HALTED</Badge>}
+
+          <Separator orientation="vertical" className="hidden sm:block" />
+
+          <div className="hidden items-center gap-[18px] md:flex">
+            <Stat k={`Feed · ${subs} WS`} v="●" vClass={feedOk ? 'text-profit' : 'text-faint'} />
+            <Stat k="Uptime" v={alive ? fmtUptime(t?.uptime_seconds ?? 0) : '—'} />
+            {backfillPct != null && <Stat k="Backfill" v={`${backfillPct}%`} />}
+          </div>
         </div>
 
-        <Badge variant={mode === 'LIVE' ? 'loss' : 'amber'}>{mode}</Badge>
-        <Badge variant={gate === 'SHADOW' ? 'default' : 'sky'}>GATE · {gate}</Badge>
-        {halted && <Badge variant="loss">⛔ HALTED</Badge>}
-
-        <Separator orientation="vertical" className="hidden sm:block" />
-
-        <div className="hidden items-center gap-[18px] md:flex">
-          <Stat k={`Feed · ${subs} WS`} v="●" vClass={feedOk ? 'text-profit' : 'text-faint'} />
-          <Stat k="Uptime" v={alive ? fmtUptime(t?.uptime_seconds ?? 0) : '—'} />
-          {backfillPct != null && <Stat k="Backfill" v={`${backfillPct}%`} />}
-        </div>
-
-        <div className="ml-auto flex items-center gap-4">
+        {/* RIGHT — always fully visible */}
+        <div className="flex shrink-0 items-center gap-2.5 sm:gap-4">
           <div className="hidden lg:block"><ClockIST /></div>
           <div className="hidden text-right sm:block">
             <div className="text-[9.5px] font-semibold uppercase tracking-[.07em] text-faint">Today P&L</div>
