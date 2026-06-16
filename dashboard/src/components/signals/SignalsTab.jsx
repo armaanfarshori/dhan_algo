@@ -108,7 +108,10 @@ function KpiWinRate({ tradelog }) {
       value={<span className="text-foreground mono">{winRate != null ? `${winRate}%` : '—'}</span>}
       sub={
         <span className="text-[11.5px] text-muted-foreground">
-          profit factor <span className="mono">{pf != null ? pf.toFixed(2) : '—'}</span>
+          profit factor{' '}
+          {(pf != null && !Number.isNaN(pf))
+            ? <span className="mono">{pf.toFixed(2)}</span>
+            : <span className="text-faint">n/a</span>}
         </span>
       }
     />
@@ -302,12 +305,12 @@ function ORBSecCard({ s, gateDec, maxEntries }) {
   }
 
   return (
-    <div className="flex flex-col gap-[9px] bg-card p-[12px_13px] transition-colors hover:bg-panel">
-      <div className="flex items-center justify-between">
-        <span className="text-[12.5px] font-semibold tracking-[-0.01em] text-foreground">
+    <div className="flex min-w-0 flex-col gap-[9px] bg-card p-[12px_13px] transition-colors hover:bg-panel">
+      <div className="flex min-w-0 items-center justify-between gap-2">
+        <span className="min-w-0 truncate text-[12.5px] font-semibold tracking-[-0.01em] text-foreground">
           {s.ticker ?? s.security_id}
         </span>
-        <span className={`mono text-[13px] font-semibold ${lpColor}`}>
+        <span className={`mono flex-shrink-0 text-[13px] font-semibold ${lpColor}`}>
           {px > 0 ? px.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'}
         </span>
       </div>
@@ -352,10 +355,11 @@ function ORBCockpit({ data }) {
             : 'Engine offline — no live strategy state'}
         </div>
       ) : (
-        /* 3-column grid separated by 1px border gaps (bg-border + gap-[1px]) */
+        /* 3-column grid: row gaps rendered as 1px border lines (bg-border bleed),
+           column gap widened to gap-x-2 (8 px) so adjacent price numbers never touch */
         <div
-          className="grid gap-[1px] bg-border"
-          style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}
+          className="grid gap-x-2 gap-y-[1px] bg-border"
+          style={{ gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' }}
         >
           {strategies.map(s => (
             <ORBSecCard
@@ -414,7 +418,9 @@ function ExecutionsFeed({ signals }) {
                 {/* ticker + time */}
                 <div>
                   <div className="text-[12px] font-medium text-foreground">
-                    {s.ticker ?? s.security_id ?? '—'}
+                    {(s.ticker || s.security_id)
+                      ? (s.ticker ?? s.security_id)
+                      : <span className="text-faint">Unknown</span>}
                   </div>
                   <div className="mono text-[10px] text-faint">
                     {fmtTime(s.timestamp)} IST

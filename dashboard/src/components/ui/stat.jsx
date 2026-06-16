@@ -5,12 +5,13 @@ import { Progress } from './progress'
 /** KPI stat card: label + optional right chip, big mono value, sub line, optional bar. */
 export function StatCard({ label, value, valueClassName, right, sub, bar, className }) {
   return (
-    <Card className={cn('relative flex flex-col gap-[9px] px-[17px] py-4', className)}>
-      <div className="flex items-center justify-between">
-        <Label>{label}</Label>
-        {right}
+    <Card className={cn('relative flex flex-col gap-[9px] px-4 py-3', className)}>
+      <div className="flex items-center justify-between gap-2">
+        <Label className="truncate">{label}</Label>
+        {right && <div className="shrink-0">{right}</div>}
       </div>
-      <div className={cn('mono text-[27px] font-semibold tracking-[-.03em] leading-none', valueClassName)}>
+      {/* Proportional (sans) font with tabular-nums — readable metric display, no code font */}
+      <div className={cn('text-[27px] font-semibold leading-none tracking-[-.02em] tabular-nums', valueClassName)}>
         {value}
       </div>
       {sub != null && <div className="text-[11.5px] text-muted-foreground">{sub}</div>}

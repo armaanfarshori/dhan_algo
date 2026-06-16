@@ -90,12 +90,12 @@ function KpiRow({ data }) {
     <div className="grid grid-cols-2 gap-3.5 sm:grid-cols-4 mb-3.5">
       <StatCard
         label="Backfill"
-        value={pct > 0 ? `${pct}%` : '—'}
+        value={pct > 0 ? `${Number(pct).toFixed(1)}%` : '—'}
         valueClassName="text-foreground"
         right={<Pill tone="neu">NSE_EQ</Pill>}
         sub={
           ck.index != null
-            ? `${ck.index}/${ck.total} · ~${100 - pct}% left`
+            ? `${ck.index}/${ck.total} · ~${Number(100 - pct).toFixed(1)}% left`
             : 'no checkpoint'
         }
         bar={{ value: pct, color: 'hsl(var(--sky))' }}
@@ -313,11 +313,11 @@ function RateLimitPanel({ rateLimitsData }) {
             <span className="mono w-[84px] shrink-0 text-[11px] text-muted-foreground">{label}</span>
             {/* Bar */}
             <div className="flex-1">
-              <div className="h-1 overflow-hidden rounded-[3px] bg-border">
+              <div className="h-1.5 overflow-hidden rounded-full bg-border">
                 <div
-                  className="h-full rounded-[3px] transition-[width] duration-500"
+                  className="h-full rounded-full transition-[width] duration-500"
                   style={{
-                    width: usagePct != null ? `${Math.max(usagePct, 0)}%` : '0%',
+                    width: usagePct != null ? `${Math.max(usagePct, 3)}%` : '0%',
                     background: barColor,
                   }}
                 />
@@ -371,11 +371,13 @@ function LogsPanel({ logs }) {
                 : lvl === 'WARNING' || lvl === 'WARN'
                 ? { background: 'hsl(var(--amber) / .05)' }
                 : {}
+            const fullText = `${fmtTime(l.ts)} ${lvl} ${l.name} ${l.msg}`
             return (
               <div
                 key={i}
-                className="flex gap-1.5 overflow-hidden px-0 py-0"
+                className="flex gap-1.5 min-w-0 overflow-hidden px-0 py-0"
                 style={bgStyle}
+                title={fullText}
               >
                 <span className="text-faint shrink-0 w-[58px]">{fmtTime(l.ts)}</span>
                 <span className={`shrink-0 w-[38px] ${colorClass}`}>{lvl}</span>
@@ -383,7 +385,7 @@ function LogsPanel({ logs }) {
                   {l.name}
                 </span>
                 <span
-                  className={`overflow-hidden text-ellipsis whitespace-nowrap ${colorClass}`}
+                  className={`min-w-0 overflow-hidden text-ellipsis whitespace-nowrap ${colorClass}`}
                 >
                   {l.msg}
                 </span>

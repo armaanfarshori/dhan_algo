@@ -111,9 +111,9 @@ function KpiRow({ tradelog }) {
         sub={
           <span className="text-muted-foreground">
             profit factor{' '}
-            <span className="mono">
-              {profitFactor != null ? profitFactor.toFixed(2) : '—'}
-            </span>
+            {(profitFactor != null && !Number.isNaN(profitFactor))
+              ? <span className="mono">{profitFactor.toFixed(2)}</span>
+              : <span className="text-faint">n/a</span>}
           </span>
         }
       />
