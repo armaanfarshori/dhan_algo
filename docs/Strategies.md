@@ -22,7 +22,7 @@ The only active strategy. It is a **pure, synchronous class** — no IO, no clie
 
 ### Exit rules
 
-- **Target:** entry ± 2× the opening range (`target_multiplier`)
+- **Target:** entry ± 1.5× the opening range (`target_multiplier`)
 - **Stop:** opposite OR edge padded by `sl_buffer_pct`
 - **EOD square-off:** 15 minutes before close, always
 

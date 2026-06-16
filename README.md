@@ -95,7 +95,7 @@ Market open → ATR% screener picks top-N volatile NSE equities
   → RiskEngine sizes the position from stop distance (1% equity risk,
     notional cap) and can halt the session on daily loss
   → executor fills (paper: ref price ± slippage · live: broker fill confirmed)
-  → exits: target (2× range) · stop (range edge ± buffer) · 15:15 EOD square-off
+  → exits: target (1.5× range) · stop (range edge ± buffer) · 15:15 EOD square-off
   → every order, fill, trade, equity snapshot and gate verdict lands in the DB
 ```
 
