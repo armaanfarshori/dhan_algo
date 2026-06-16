@@ -75,7 +75,7 @@ resource "aws_iam_role_policy_attachment" "dlm_managed" {
 }
 
 resource "aws_dlm_lifecycle_policy" "db_data_snapshots" {
-  description        = "Daily EBS snapshots of TimescaleDB data volume — 7-day retention"
+  description        = "Daily EBS snapshots of TimescaleDB data volume - 7 day retention"
   execution_role_arn = aws_iam_role.dlm.arn
   state              = "ENABLED"
 

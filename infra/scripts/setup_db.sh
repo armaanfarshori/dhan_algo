@@ -5,7 +5,7 @@
 set -euxo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
-# ── Terraform-substituted values (these are the ONLY ${} expansions) ─────────
+# ── Terraform-substituted values (the only single-brace expansions below) ────
 PROJECT="${project}"
 AWS_REGION="${aws_region}"
 S3_BUCKET="${s3_bucket}"
