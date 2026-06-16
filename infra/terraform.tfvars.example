@@ -16,9 +16,10 @@ agent_instance_type = "t4g.micro"      # t4g.small during free trial
 # Storage
 db_disk_gb          = 200
 
-# Credentials — also stored in SSM
+# Credentials — also stored in SSM. NEVER put real values here; this file is
+# committed. Fill the real values only in terraform.tfvars (gitignored).
 db_password         = "change-me-strong-password"
 dhan_client_id      = "YOUR_DHAN_CLIENT_ID"
-dhan_access_token   = "YOUR_DHAN_ACCESS_TOKEN..."
-dhan_totp_secret    = "YOUR_BASE32_TOTP_SECRET..."
+dhan_access_token   = "YOUR_DHAN_ACCESS_TOKEN"
+dhan_totp_secret    = "YOUR_BASE32_TOTP_SECRET"
 dhan_pin            = "YOUR_DHAN_PIN"
