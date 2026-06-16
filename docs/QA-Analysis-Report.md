@@ -174,6 +174,12 @@ Suite: **195 passed, 0 xfailed** (CI on Py3.11 × x86+ARM, ruff, coverage gate; 
 
 ## Time Rendering & Timestamp Analysis
 
+> ✅ **ALL findings resolved & deployed (2026-06-16).** T1 (IST trading-day queries),
+> T2 (`fmtTime` IST), T3 (PnL chart x-axis + CalendarPnL IST; dead `utils.js` removed),
+> T4 (UTC log timestamps via `time.gmtime`), T5 (tz-aware risk datetimes), T6 (out-of-order
+> bar-tick guard + test). T7/T8 (Low) were subsumed by T2/T3/T4. The findings below are the
+> original analysis, kept as the record of what was found.
+
 **Scope:** All time-handling and rendering code.
 **Date audited:** 2026-06-16.
 **Evidence:** every claim grounded in `file:line` below.
