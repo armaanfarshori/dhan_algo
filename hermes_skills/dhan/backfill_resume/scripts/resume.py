@@ -43,7 +43,7 @@ cmd = (
     "sudo git pull -q && "   # always run with latest fixes before restart
     "set -a && source .env && set +a && "
     "echo \"Watchdog restart $(TZ=Asia/Kolkata date)\" >> /tmp/backfill.log && "
-    ".venv/bin/python3 backfill.py --nse-eq --all --from 2021-06-01 "
+    ".venv/bin/python3 backfill.py --nse-eq --all --from 2021-06-01 --concurrency 4 "
     ">> /tmp/backfill.log 2>&1"
 )
 subprocess.Popen(["screen", "-dmS", SCREEN, "bash", "-c", cmd])
