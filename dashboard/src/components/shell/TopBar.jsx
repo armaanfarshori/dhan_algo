@@ -30,7 +30,9 @@ export function TopBar({ data }) {
   const gate = (t?.kronos_gate ?? 'shadow').toUpperCase()
   const feedOk = !!t?.feed?.connected
   const subs = t?.feed?.subscribed ?? 0
-  const pnl = t?.portfolio?.total_pnl ?? 0
+  // Use the RiskEngine total (realised+unrealised) — same source as the
+  // Signals "Today P&L" KPI. trader.portfolio.total_pnl can read 0 after EOD.
+  const pnl = t?.risk?.total_pnl ?? t?.portfolio?.total_pnl ?? 0
   const halted = !!t?.risk?.halted
   const backfillPct = data.backfill?.data?.checkpoint?.pct
   const { theme, toggle } = useTheme()

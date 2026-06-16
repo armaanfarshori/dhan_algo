@@ -10,8 +10,8 @@ export function StatCard({ label, value, valueClassName, right, sub, bar, classN
         <Label className="truncate">{label}</Label>
         {right && <div className="shrink-0">{right}</div>}
       </div>
-      {/* Proportional (sans) font with tabular-nums — readable metric display, no code font */}
-      <div className={cn('text-[27px] font-semibold leading-none tracking-[-.02em] tabular-nums', valueClassName)}>
+      {/* Geist Mono (tabular) — matches the approved mockup's big numbers */}
+      <div className={cn('mono text-[27px] font-semibold leading-none tracking-[-.03em]', valueClassName)}>
         {value}
       </div>
       {sub != null && <div className="text-[11.5px] text-muted-foreground">{sub}</div>}
