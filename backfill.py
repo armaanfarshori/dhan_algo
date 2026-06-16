@@ -29,7 +29,6 @@ from typing import Any
 
 import pandas as pd
 from dotenv import load_dotenv
-from sqlalchemy import text
 
 load_dotenv()
 
@@ -106,39 +105,38 @@ def _upsert_bars(df: pd.DataFrame, timeframe: str) -> int:
     if df.empty:
         return 0
 
-    rows = [
-        {
-            "time":        r["ts"],
-            "security_id": r["security_id"],
-            "timeframe":   timeframe,
-            "open":   r["open"],
-            "high":   r["high"],
-            "low":    r["low"],
-            "close":  r["close"],
-            "volume": r["volume"],
-        }
-        for r in df.to_dict(orient="records")
-    ]
+    # Build tuples deduped on the conflict key (keep last). A single multi-row
+    # INSERT ... ON CONFLICT cannot touch the same row twice, so whole-frame
+    # dedup guarantees no intra-batch duplicate keys.
+    from psycopg2.extras import execute_values
 
-    bars_sql = text("""
-        INSERT INTO bars (time, security_id, timeframe, open, high, low, close, volume)
-        VALUES (:time, :security_id, :timeframe, :open, :high, :low, :close, :volume)
-        ON CONFLICT (security_id, timeframe, time) DO UPDATE SET
-            open   = EXCLUDED.open,
-            high   = EXCLUDED.high,
-            low    = EXCLUDED.low,
-            close  = EXCLUDED.close,
-            volume = EXCLUDED.volume
-    """)
+    dedup: dict = {}
+    for r in df.to_dict(orient="records"):
+        dedup[(r["security_id"], timeframe, r["ts"])] = (
+            r["ts"], r["security_id"], timeframe,
+            r["open"], r["high"], r["low"], r["close"], r["volume"],
+        )
+    tuples = list(dedup.values())
+
+    insert_sql = (
+        "INSERT INTO bars (time, security_id, timeframe, open, high, low, close, volume) "
+        "VALUES %s "
+        "ON CONFLICT (security_id, timeframe, time) DO UPDATE SET "
+        "open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low, "
+        "close=EXCLUDED.close, volume=EXCLUDED.volume"
+    )
 
     # Batch upserts to avoid exhausting max_locks_per_transaction.
     # TimescaleDB acquires a lock per chunk touched; 263 chunks × 5 yrs of daily
     # bars in one shot exceeds the lock limit. 500 rows ≈ ~14 months ≈ ~14 chunks.
+    # Each batch is ONE multi-row INSERT via execute_values (not per-row
+    # executemany) — the per-row round-trips were the real backfill bottleneck
+    # (the DB sat ~90% idle waiting on them, not on actual insert work).
     # Retry waits: 5, 15, 30, 60s — enough for Postgres WAL recovery after a crash
     _BATCH      = 500
     _RETRY_WAIT = [5, 15, 30, 60]
-    for i in range(0, len(rows), _BATCH):
-        batch = rows[i : i + _BATCH]
+    for i in range(0, len(tuples), _BATCH):
+        batch = tuples[i : i + _BATCH]
         for attempt, wait in enumerate([0] + _RETRY_WAIT):
             try:
                 if wait:
@@ -146,15 +144,17 @@ def _upsert_bars(df: pd.DataFrame, timeframe: str) -> int:
                                    wait, attempt, len(_RETRY_WAIT) + 1)
                     _time.sleep(wait)
                 with get_session() as session:
-                    session.execute(bars_sql, batch)
-                break  # success
+                    cur = session.connection().connection.cursor()
+                    execute_values(cur, insert_sql, batch, page_size=len(batch))
+                    cur.close()
+                break  # success (get_session commits on context exit)
             except Exception as exc:
                 if attempt < len(_RETRY_WAIT):
                     logger.warning("  Batch error: %s", exc)
                 else:
                     raise
 
-    return len(rows)
+    return len(tuples)
 
 
 # ── Intraday backfill (1m) ─────────────────────────────────────────────────────
