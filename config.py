@@ -99,6 +99,12 @@ class Config(BaseSettings):
 
     # ── Web / dashboard ─────────────────────────────────────────────────────
     webhook_port: int = 8765
+    # Bind address for the aiohttp TCPSite.  Default 0.0.0.0 preserves
+    # Tailscale-direct access (dashboard is reached on the Tailscale interface
+    # IP, e.g. 100.x.x.x:8765 — binding to 127.0.0.1 would break that).
+    # Set to a specific interface address or 127.0.0.1 to harden if the
+    # dashboard is only ever accessed through an SSH tunnel or localhost.
+    api_bind_host: str = "0.0.0.0"
     # Shared secret for mutating POST endpoints (/api/killswitch,
     # /api/watchlist/refresh).  Empty = unprotected (fail-open so a
     # misconfigured secret never locks the operator out of the kill-switch).

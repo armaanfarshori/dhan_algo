@@ -257,7 +257,8 @@ async def equity_handler(_r: web.Request) -> web.Response:
         _cache_set("equity_curve", result)
         return web.json_response(result)
     except Exception as exc:
-        return web.json_response({"ok": False, "error": str(exc), "intraday": []})
+        logger.exception("equity_handler failed")
+        return web.json_response({"ok": False, "error": "internal error", "intraday": []})
 
 
 async def status_handler(request: web.Request) -> web.Response:
@@ -266,7 +267,7 @@ async def status_handler(request: web.Request) -> web.Response:
     first = strategies[0] if strategies else {}
     return web.json_response({
         "mode": hb.get("mode", "PAPER" if cfg.paper_trading else "LIVE"),
-        "client_id": cfg.dhan_client_id,
+        "client_id": "****" + str(cfg.dhan_client_id)[-4:],
         "uptime_seconds": hb.get("uptime_seconds", 0),
         "trader_alive": alive,
         "strategy_name": f"ORB_{first.get('security_id')}" if first else "none",
@@ -365,6 +366,7 @@ async def kronos_live_handler(_r: web.Request) -> web.Response:
 
 async def logs_handler(request: web.Request) -> web.Response:
     limit = int(request.rel_url.query.get("limit", 50))
+    limit = max(1, min(limit, 500))
 
     def _tail():
         import re
@@ -439,6 +441,7 @@ async def signals_handler(_r: web.Request) -> web.Response:
 
 async def trades_handler(request: web.Request) -> web.Response:
     limit = int(request.rel_url.query.get("limit", 200))
+    limit = max(1, min(limit, 500))
 
     def _query():
         from db import get_engine
@@ -463,7 +466,8 @@ async def trades_handler(request: web.Request) -> web.Response:
     try:
         rows, summary = await asyncio.get_running_loop().run_in_executor(None, _query)
     except Exception as exc:
-        return web.json_response({"ok": False, "error": str(exc), "trades": []})
+        logger.exception("trades_handler failed")
+        return web.json_response({"ok": False, "error": "internal error", "trades": []})
 
     closed, pnl_sum, wins = summary or (0, 0, 0)
     return web.json_response({
@@ -560,11 +564,13 @@ async def db_stats_handler(_r: web.Request) -> web.Response:
         _cache_set("db_stats", result)
         return web.json_response(result)
     except Exception as exc:
-        return web.json_response({"ok": False, "up": False, "error": str(exc)})
+        logger.exception("db_stats_handler failed")
+        return web.json_response({"ok": False, "up": False, "error": "internal error"})
 
 
 async def kronos_signals_handler(request: web.Request) -> web.Response:
     limit = int(request.rel_url.query.get("limit", 50))
+    limit = max(1, min(limit, 500))
 
     def _query():
         from db import get_engine
@@ -592,11 +598,13 @@ async def kronos_signals_handler(request: web.Request) -> web.Response:
              "features": r[6], "ticker": r[7] or r[0], "name": r[8] or ""}
             for r in rows]})
     except Exception as exc:
-        return web.json_response({"ok": False, "error": str(exc), "signals": []})
+        logger.exception("kronos_signals_handler failed")
+        return web.json_response({"ok": False, "error": "internal error", "signals": []})
 
 
 async def kronos_screener_handler(request: web.Request) -> web.Response:
     n = int(request.rel_url.query.get("n", 20))
+    n = max(1, min(n, 100))
     cached = _cache_get(f"screener_{n}", 300)   # ATR ranking barely moves intraday
     if cached:
         return web.json_response(cached)
@@ -627,7 +635,8 @@ async def kronos_screener_handler(request: web.Request) -> web.Response:
             _cache_set(f"screener_{n}", result)
         return web.json_response(result)
     except Exception as exc:
-        return web.json_response({"ok": False, "error": str(exc), "candidates": []})
+        logger.exception("kronos_screener_handler failed")
+        return web.json_response({"ok": False, "error": "internal error", "candidates": []})
 
 
 # ── Dhan read-only client (funds / positions / LTP) ───────────────────────────
@@ -670,7 +679,8 @@ async def funds_handler(_r: web.Request) -> web.Response:
         data = await _dhan_ro.call("get_funds")
         return web.json_response({"ok": True, "data": data})
     except Exception as e:
-        return web.json_response({"ok": False, "error": str(e)}, status=503)
+        logger.exception("funds_handler failed")
+        return web.json_response({"ok": False, "error": "internal error"}, status=503)
 
 
 async def positions_handler(_r: web.Request) -> web.Response:
@@ -678,7 +688,8 @@ async def positions_handler(_r: web.Request) -> web.Response:
         data = await _dhan_ro.call("get_positions")
         return web.json_response({"ok": True, "data": data})
     except Exception as e:
-        return web.json_response({"ok": False, "error": str(e)}, status=503)
+        logger.exception("positions_handler failed")
+        return web.json_response({"ok": False, "error": "internal error"}, status=503)
 
 
 async def instrument_price_handler(request: web.Request) -> web.Response:
@@ -694,7 +705,8 @@ async def instrument_price_handler(request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "security_id": sid, "price": price,
                                   "segment": segment})
     except Exception as e:
-        return web.json_response({"ok": False, "error": str(e)}, status=503)
+        logger.exception("instrument_price_handler failed")
+        return web.json_response({"ok": False, "error": "internal error"}, status=503)
 
 
 async def instrument_search_handler(request: web.Request) -> web.Response:
@@ -750,7 +762,8 @@ async def watchlist_refresh_handler(request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "count": len(wl.get()),
                                   "stocks": [s.symbol for s in wl.get()]})
     except Exception as e:
-        return web.json_response({"ok": False, "error": str(e)}, status=500)
+        logger.exception("watchlist_refresh_handler failed")
+        return web.json_response({"ok": False, "error": "internal error"}, status=500)
 
 
 async def backfill_status_handler(_r: web.Request) -> web.Response:
@@ -836,7 +849,8 @@ async def postback_handler(request: web.Request) -> web.Response:
                     payload.get("orderStatus"))
         return web.json_response({"ack": "ok"})
     except Exception as e:
-        return web.json_response({"error": str(e)}, status=400)
+        logger.exception("postback_handler failed")
+        return web.json_response({"ok": False, "error": "internal error"}, status=400)
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -900,7 +914,7 @@ async def main():
     # access lines would bury real log content (~500KB per 5 min observed)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", cfg.webhook_port)
+    site = web.TCPSite(runner, cfg.api_bind_host, cfg.webhook_port)
     await site.start()
     logger.info("🌐 Dashboard: http://localhost:%d", cfg.webhook_port)
 
