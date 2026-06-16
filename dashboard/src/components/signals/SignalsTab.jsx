@@ -92,7 +92,14 @@ function KpiWinRate({ tradelog }) {
   const closed    = summary.closed_today ?? 0
   const wins      = summary.wins_today   ?? 0
   const winRate   = closed > 0 ? Math.round((wins / closed) * 100) : null
-  const pf        = summary.profit_factor ?? null
+  // /api/trades never emits profit_factor — compute it client-side (same
+  // avgWin/avgLoss formula the Portfolio tab uses, so the two tabs agree).
+  const exits   = (tradelog?.data?.trades ?? []).filter(t => t.status === 'CLOSED' && t.pnl != null)
+  const winsArr = exits.filter(t => t.pnl > 0)
+  const lossArr = exits.filter(t => t.pnl < 0)
+  const avgWin  = winsArr.length ? winsArr.reduce((s, t) => s + t.pnl, 0) / winsArr.length : 0
+  const avgLoss = lossArr.length ? lossArr.reduce((s, t) => s + t.pnl, 0) / lossArr.length : 0
+  const pf      = avgLoss !== 0 ? Math.abs(avgWin / avgLoss) : (summary.profit_factor ?? null)
   return (
     <StatCard
       label="Win Rate"
@@ -113,10 +120,10 @@ function KpiWinRate({ tradelog }) {
 // ─── KPI: Kronos Gate ─────────────────────────────────────────────────────────
 
 function KpiKronosGate({ trader, gate }) {
-  const gateMode = trader?.kronos_gate ?? 'SHADOW'
+  // heartbeat emits lowercase 'shadow'/'enforcing'
+  const isShadow = (trader?.kronos_gate ?? 'shadow').toLowerCase() === 'shadow'
   const cal      = gate?.data?.calibration
   const freshN   = cal?.fresh_n ?? 0
-  const isShadow = gateMode === 'SHADOW'
   return (
     <StatCard
       label="Kronos Gate"

@@ -55,6 +55,14 @@ function rlBarColor(pct) {
   return 'hsl(var(--sky))'
 }
 
+// Seconds since the trader's last heartbeat (derived from its ts; the payload
+// has no heartbeat_age_s field). Returns null if no timestamp.
+function heartbeatAgeS(t) {
+  if (!t?.ts) return null
+  const ms = Date.now() - new Date(t.ts).getTime()
+  return Number.isFinite(ms) ? Math.max(0, Math.round(ms / 1000)) : null
+}
+
 // ─── KPI Row ─────────────────────────────────────────────────────────────────
 
 function KpiRow({ data }) {
@@ -83,7 +91,8 @@ function KpiRow({ data }) {
 
   // Uptime
   const uptime  = data.alive ? fmtUptime(t?.uptime_seconds ?? 0) : 'DOWN'
-  const hbAge   = t?.heartbeat_age_s != null ? `heartbeat ${t.heartbeat_age_s}s ago` : 'heartbeat stale'
+  const ageS    = heartbeatAgeS(t)
+  const hbAge   = ageS != null ? `heartbeat ${ageS}s ago` : 'heartbeat stale'
   const uptimeSub = data.alive ? `trader · ${hbAge}` : 'heartbeat stale'
 
   return (
@@ -421,14 +430,15 @@ function HeartbeatPanel({ data }) {
   const mode         = t?.mode ?? '—'
   const kronosGate   = t?.kronos_gate ?? '—'
   const openPos      = t?.portfolio?.open_positions?.length ?? 0
-  const maxPos       = limits.max_positions ?? '—'
+  const maxPos       = limits.max_open_positions ?? '—'
   const feedSubs     = t?.feed?.subscribed ?? 0
   const feedConn     = t?.feed?.connected
   const barsPending  = t?.bars?.pending ?? 0
-  const ksArmed      = !t?.kill_switch_active
+  // kill-switch state = RiskEngine.halted (the heartbeat has no kill_switch_active)
+  const ksArmed      = !t?.risk?.halted
 
-  // How stale is heartbeat (if the trader exposes heartbeat_age_s)
-  const hbAge  = t?.heartbeat_age_s
+  // Heartbeat staleness — derive from the heartbeat timestamp (no heartbeat_age_s field)
+  const hbAge  = heartbeatAgeS(t)
   const metaTxt = alive
     ? hbAge != null ? `● ${hbAge}s ago` : '● live'
     : '● stale'

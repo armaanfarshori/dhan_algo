@@ -39,19 +39,21 @@ function KpiRow({ tradelog }) {
 
   const totalPnl = exits.reduce((s, t) => s + (t.pnl ?? 0), 0)
 
-  // Peak-to-trough drawdown (same algorithm as original PortfolioMetrics)
-  let peak = 0, eq = 0, maxDDPct = 0, maxDDVal = 0
-  exits.forEach(t => {
+  // Peak-to-trough drawdown in ₹, walked over trades in CHRONOLOGICAL order
+  // (the API returns newest-first; the old code never sorted → wrong peak).
+  // We report the rupee amount + the high-water mark, not a %: the % of a
+  // P&L-only curve is meaningless when the early peak is near zero (it produced
+  // absurd values like 1123%).
+  const chron = [...exits].sort((a, b) => new Date(a.exit_ts) - new Date(b.exit_ts))
+  let peak = 0, eq = 0, maxDDVal = 0
+  chron.forEach(t => {
     eq += t.pnl ?? 0
     if (eq > peak) peak = eq
-    if (peak > 0) {
-      const dd = (peak - eq) / peak * 100
-      const ddv = peak - eq
-      if (dd > maxDDPct) { maxDDPct = dd; maxDDVal = ddv }
-    }
+    const ddv = peak - eq
+    if (ddv > maxDDVal) maxDDVal = ddv
   })
 
-  // Intraday Sharpe: daily returns from byDate used in CalendarPnL
+  // Daily P&L (for the calendar) + an honest intraday Sharpe.
   const byDate = {}
   exits.forEach(t => {
     if (t.exit_ts) {
@@ -60,10 +62,13 @@ function KpiRow({ tradelog }) {
     }
   })
   const dailyReturns = Object.values(byDate)
+  // Annualising 2–3 daily returns is noise — require a real sample, use sample
+  // variance (÷ n−1). Below the floor we show "—" rather than a misleading number.
+  const SHARPE_MIN_DAYS = 20
   let sharpe = null
-  if (dailyReturns.length >= 2) {
+  if (dailyReturns.length >= SHARPE_MIN_DAYS) {
     const mean = dailyReturns.reduce((a, b) => a + b, 0) / dailyReturns.length
-    const variance = dailyReturns.reduce((s, r) => s + (r - mean) ** 2, 0) / dailyReturns.length
+    const variance = dailyReturns.reduce((s, r) => s + (r - mean) ** 2, 0) / (dailyReturns.length - 1)
     const std = Math.sqrt(variance)
     if (std > 0) sharpe = ((mean / std) * Math.sqrt(252)).toFixed(2)
   }
@@ -82,7 +87,7 @@ function KpiRow({ tradelog }) {
         label="Net P&L"
         value={
           <span className={totalPnl >= 0 ? 'text-profit' : 'text-loss'}>
-            {totalPnl >= 0 ? '+' : ''}{INR0(totalPnl)}
+            {totalPnl >= 0 ? '+' : '−'}{INR0(Math.abs(totalPnl))}
           </span>
         }
         right={
@@ -123,24 +128,23 @@ function KpiRow({ tradelog }) {
           </span>
         }
         right={
-          maxDDPct > 0 ? (
-            <Pill tone="down">{maxDDPct.toFixed(1)}%</Pill>
-          ) : (
-            <Pill tone="neu">—</Pill>
-          )
+          peak > 0
+            ? <Pill tone="neu">HWM +{INR0(peak)}</Pill>
+            : <Pill tone="neu">—</Pill>
         }
-        sub={<span className="text-muted-foreground">peak-to-trough</span>}
+        sub={<span className="text-muted-foreground">peak-to-trough (₹)</span>}
       />
 
       {/* Sharpe */}
       <StatCard
         label="Sharpe (intraday)"
         value={<span>{sharpe ?? '—'}</span>}
-        right={<Pill tone="neu">annualised</Pill>}
+        right={<Pill tone="neu">{dailyReturns.length} / {SHARPE_MIN_DAYS} d</Pill>}
         sub={
           <span className="text-muted-foreground">
-            avg R{' '}
-            <span className="mono">{avgR ?? '—'}</span>
+            {sharpe != null
+              ? <>annualised · avg R <span className="mono">{avgR ?? '—'}</span></>
+              : <>needs ≥{SHARPE_MIN_DAYS} sessions · avg R <span className="mono">{avgR ?? '—'}</span></>}
           </span>
         }
       />

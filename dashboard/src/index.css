@@ -12,8 +12,8 @@
   --panel:      240 6% 95%;
   --card:       0 0% 100%;
   --foreground: 240 10% 9%;
-  --muted-fg:   240 4% 44%;
-  --faint:      240 4% 60%;
+  --muted-fg:   240 4% 40%;
+  --faint:      240 4% 48%;
   --border:     240 6% 90%;
   --border2:    240 5% 83%;
 
@@ -36,8 +36,8 @@
   --panel:      240 8% 5.5%;
   --card:       240 6% 7.5%;
   --foreground: 0 0% 98%;
-  --muted-fg:   240 5% 58%;
-  --faint:      240 5% 40%;
+  --muted-fg:   240 5% 62%;
+  --faint:      240 5% 50%;
   --border:     240 5% 14%;
   --border2:    240 5% 18%;
 
@@ -129,7 +129,7 @@ html, body {
 .dhan-cal .rdp-dropdown:hover { border-color: hsl(var(--faint)); }
 .dhan-cal .rdp-button_previous, .dhan-cal .rdp-button_next {
   width: 28px; height: 28px; border-radius: 7px; border: 1px solid hsl(var(--border2));
-  color: hsl(var(--muted-foreground)); background: hsl(var(--card));
+  color: hsl(var(--muted-fg)); background: hsl(var(--card));
 }
 .dhan-cal .rdp-button_previous:hover, .dhan-cal .rdp-button_next:hover {
   background: hsl(var(--panel)); color: hsl(var(--foreground));
