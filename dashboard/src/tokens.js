@@ -22,5 +22,5 @@ export function fmtUptime(s) {
 }
 export function fmtTime(iso) {
   if (!iso) return '—'
-  return new Date(iso).toLocaleTimeString('en-IN', {hour12:false})
+  return new Date(iso).toLocaleTimeString('en-IN', {hour12:false, timeZone:'Asia/Kolkata'})
 }
