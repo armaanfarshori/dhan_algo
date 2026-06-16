@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# Least-privilege GITHUB_TOKEN for all jobs (CodeQL: actions/missing-workflow-permissions).
+# CI only reads the repo; it needs no write scopes.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: test-${{ matrix.arch }}
