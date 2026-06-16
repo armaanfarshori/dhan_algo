@@ -1305,6 +1305,64 @@ function AutomationPanel({ systemHealth }) {
   )
 }
 
+// Caps from core/client.py RateLimiter.LIMITS — update here if LIMITS changes.
+const DHAN_RATE_CAPS = [
+  { category: 'Orders',          perDay: '7,000',    perSec: '10',   perMin: '250'  },
+  { category: 'Data (charts)',   perDay: '100,000',  perSec: '5',    perMin: '—'    },
+  { category: 'Quote',           perDay: '(no cap)', perSec: '1',    perMin: '—'    },
+  { category: 'Non-trading',     perDay: '(no cap)', perSec: '20',   perMin: '—'    },
+]
+
+function ApiRateLimitPanel() {
+  const thStyle = {
+    fontFamily: T.mono, fontSize: 8, color: T.ink3,
+    letterSpacing: '0.12em', textTransform: 'uppercase',
+    padding: '4px 8px 6px', textAlign: 'left', borderBottom: `1px solid ${T.line}`,
+  }
+  const tdStyle = (highlight) => ({
+    fontFamily: T.mono, fontSize: 10, color: highlight ? T.ink0 : T.ink2,
+    padding: '5px 8px', borderBottom: `1px solid ${T.line}`,
+  })
+  return (
+    <SysPanel
+      title="API Rate-Limit Spend (per day)"
+      right="dhan caps — live counts coming soon"
+      accent={T.amber}
+    >
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.amber,
+        letterSpacing: '0.12em', marginBottom: 12, lineHeight: 1.6 }}>
+        Coming soon — feature in development
+      </div>
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, marginBottom: 10, lineHeight: 1.6 }}>
+        Spent-today counts will be wired from the trader's RateLimiter in a future release.
+        Caps below are from <span style={{ color: T.cyan }}>core/client.py</span>.
+      </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+        <thead>
+          <tr>
+            <th style={thStyle}>Category</th>
+            <th style={{ ...thStyle, textAlign: 'right' }}>Daily cap</th>
+            <th style={{ ...thStyle, textAlign: 'right' }}>Spent today</th>
+            <th style={{ ...thStyle, textAlign: 'right' }}>/s limit</th>
+            <th style={{ ...thStyle, textAlign: 'right' }}>/min limit</th>
+          </tr>
+        </thead>
+        <tbody>
+          {DHAN_RATE_CAPS.map(row => (
+            <tr key={row.category}>
+              <td style={tdStyle(true)}>{row.category}</td>
+              <td style={{ ...tdStyle(false), textAlign: 'right', color: T.ink1 }}>{row.perDay}</td>
+              <td style={{ ...tdStyle(false), textAlign: 'right', color: T.ink3 }}>—</td>
+              <td style={{ ...tdStyle(false), textAlign: 'right' }}>{row.perSec}</td>
+              <td style={{ ...tdStyle(false), textAlign: 'right' }}>{row.perMin}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </SysPanel>
+  )
+}
+
 function FullLogPanel({ logs }) {
   const all  = logs?.data?.logs ?? []
   const rows = all.slice(-50)
@@ -1352,9 +1410,10 @@ function SystemTab({ data }) {
     <div style={{ padding: mobile ? '14px 12px 40px' : '20px 24px 40px' }}>
       <ServicesRow data={data} />
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(320px, 100%), 1fr))', gap: 16, marginBottom: 16 }}>
-        <DBPanel       dbStats={data.dbStats} />
-        <BackfillPanel backfill={data.backfill} />
-        <AutomationPanel systemHealth={data.systemHealth} />
+        <DBPanel            dbStats={data.dbStats} />
+        <BackfillPanel      backfill={data.backfill} />
+        <AutomationPanel    systemHealth={data.systemHealth} />
+        <ApiRateLimitPanel />
       </div>
       <div style={{ height: 420 }}>
         <FullLogPanel logs={data.logs} />
