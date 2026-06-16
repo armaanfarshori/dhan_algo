@@ -33,7 +33,9 @@ resource "aws_instance" "db" {
   }))
 
   lifecycle {
-    ignore_changes = [ami, user_data]
+    # associate_public_ip_address drifts to true once an EIP is attached;
+    # ignoring it prevents a destructive instance replacement on re-apply.
+    ignore_changes = [ami, user_data, associate_public_ip_address]
   }
 }
 
@@ -88,7 +90,9 @@ resource "aws_instance" "agent" {
   }))
 
   lifecycle {
-    ignore_changes = [ami, user_data]
+    # associate_public_ip_address drifts to true once an EIP is attached;
+    # ignoring it prevents a destructive instance replacement on re-apply.
+    ignore_changes = [ami, user_data, associate_public_ip_address]
   }
 }
 
