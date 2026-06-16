@@ -33,6 +33,18 @@ class AsyncDBBackend:
     Optional async companion to TradeLogger.
     Writes signals and trades to TimescaleDB alongside the JSON-lines file.
     Fails silently if DB is unavailable — never blocks the trading loop.
+
+    Engine ownership: AsyncDBBackend reuses db.py's shared engine/pool
+    (pool_size=5, max_overflow=10).  It never creates its own engine in
+    production — connect() calls db.init_db() if needed, then piggybacks on
+    db.get_session() / db.get_engine().  This caps the trader's total
+    connections to the shared pool rather than opening a second pool (~3+5=8
+    extra connections against the 2 GB DB box).
+
+    Test-override: tests may set _engine / _Session directly after construction
+    (e.g. to inject a SQLite engine).  _exec() and _ping() honour those
+    overrides when present, falling back to db.get_session()/get_engine()
+    otherwise.
     """
 
     def __init__(self):
@@ -42,6 +54,8 @@ class AsyncDBBackend:
         # "localhost" is the pydantic-settings default; treat it (and "")
         # the same as an unset variable so CI / dev boxes stay disabled.
         self._enabled = get_config().db_host not in ("", "localhost")
+        # _engine / _Session: None in production (db.py's shared pool is used);
+        # may be set by tests to inject an alternate engine.
         self._engine  = None
         self._Session = None
 
@@ -50,35 +64,44 @@ class AsyncDBBackend:
             _log.info("AsyncDBBackend: DB_HOST not set — DB journalling disabled")
             return
         try:
-            from sqlalchemy import create_engine
-            from sqlalchemy.orm import sessionmaker
+            import db as _db
             from config import get_config
-            url = get_config().db_url
-            self._engine  = create_engine(url, pool_pre_ping=True, pool_size=3, max_overflow=5)
-            self._Session = sessionmaker(bind=self._engine)
+            # Ensure the shared engine is initialised (idempotent if already done
+            # by apps/trader.py's startup sequence).
+            if _db._engine is None:
+                _db.init_db(get_config().db_url)
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self._ping)
-            _log.info("AsyncDBBackend: connected to TimescaleDB")
+            _log.info("AsyncDBBackend: connected to TimescaleDB (shared engine)")
         except Exception as exc:
             _log.warning("AsyncDBBackend: connect failed (%s) — DB journalling disabled", exc)
             self._enabled = False
 
     def _ping(self):
         from sqlalchemy import text
-        with self._engine.connect() as conn:
+        import db as _db
+        engine = self._engine if self._engine is not None else _db.get_engine()
+        with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
 
     def _exec(self, sql: str, params: dict):
         from sqlalchemy import text
-        session = self._Session()
-        try:
-            session.execute(text(sql), params)
-            session.commit()
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            session.close()
+        if self._Session is not None:
+            # Test-injected session factory — use manual lifecycle to match
+            # the original behaviour expected by the test harness.
+            session = self._Session()
+            try:
+                session.execute(text(sql), params)
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+            finally:
+                session.close()
+        else:
+            import db as _db
+            with _db.get_session() as session:
+                session.execute(text(sql), params)
 
     async def _run(self, sql: str, params: dict):
         if not self._enabled:
@@ -279,22 +302,36 @@ class AsyncDBBackend:
 
         def _insert():
             from sqlalchemy import text
-            session = self._Session()
-            try:
-                result = session.execute(text("""
-                    INSERT INTO runs (started_at, mode, strategy, version, outcome)
-                    VALUES (:ts, :mode, :strategy, :version, 'running')
-                    RETURNING id
-                """), {
-                    "ts": datetime.now(timezone.utc),
-                    "mode": mode, "strategy": strategy, "version": git_sha,
-                })
-                run_id[0] = result.scalar()
-                session.commit()
-            except Exception:
-                session.rollback()
-            finally:
-                session.close()
+            if self._Session is not None:
+                # Test-injected session factory.
+                session = self._Session()
+                try:
+                    result = session.execute(text("""
+                        INSERT INTO runs (started_at, mode, strategy, version, outcome)
+                        VALUES (:ts, :mode, :strategy, :version, 'running')
+                        RETURNING id
+                    """), {
+                        "ts": datetime.now(timezone.utc),
+                        "mode": mode, "strategy": strategy, "version": git_sha,
+                    })
+                    run_id[0] = result.scalar()
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                finally:
+                    session.close()
+            else:
+                import db as _db
+                with _db.get_session() as session:
+                    result = session.execute(text("""
+                        INSERT INTO runs (started_at, mode, strategy, version, outcome)
+                        VALUES (:ts, :mode, :strategy, :version, 'running')
+                        RETURNING id
+                    """), {
+                        "ts": datetime.now(timezone.utc),
+                        "mode": mode, "strategy": strategy, "version": git_sha,
+                    })
+                    run_id[0] = result.scalar()
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _insert)
