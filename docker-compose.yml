@@ -1,11 +1,26 @@
-# LOCAL DEVELOPMENT ONLY — NOT used in production (AWS EC2, private subnet)
-# Use for: running alembic migrations locally, testing backfill, local dev
-#   docker compose up -d && alembic upgrade head
-# Production DB is on EC2: DB_HOST=<private DB IP> (set in .env on agent)
+# Production DB definition — the platform DB IS a Docker TimescaleDB container
+# running on the DB EC2 (private subnet). This file is the SOURCE OF TRUTH for it.
+#
+# Recreate / apply config changes (data persists in the bind-mounted PGDATA):
+#   docker compose up -d
+#
+# Requires a sibling .env (gitignored — never commit the real password):
+#   DB_PASSWORD=<real prod password>              # from the AWS access package
+#   TIMESCALE_DATA_DIR=/data/timescaledb/pgdata   # prod data-volume mount
+# For LOCAL dev, omit TIMESCALE_DATA_DIR (defaults to ./pgdata) and set any DB_PASSWORD.
 services:
   timescaledb:
-    image: timescale/timescaledb:2.17.2-pg16
-    container_name: dhan_timescaledb
+    # Pinned to the exact image digest deployed in prod. NOTE: prod runs the
+    # latest-pg16 line (PG 16.14), which diverged from OPS-12's 2.17.2-pg16
+    # intent — pinning to the digest reflects reality; revisit the version pin
+    # deliberately, not by surprise on the next `up`.
+    image: timescale/timescaledb:latest-pg16@sha256:51ac20ec295699c05573adf896e2449d8b3a026223a951905d5763687409d7d4
+    container_name: timescaledb
+    restart: always
+    # The 64 MB default /dev/shm OOMs parallel scans over the ~800M-row `bars`
+    # table ("could not resize shared memory segment"). 1 GB is ample headroom
+    # over the ~90 MB such queries need, while staying safe on the box's RAM.
+    shm_size: 1gb
     ports:
       - "5432:5432"
     environment:
@@ -13,12 +28,9 @@ services:
       POSTGRES_USER: trader
       POSTGRES_PASSWORD: ${DB_PASSWORD:-trader123}
     volumes:
-      - timescale_data:/var/lib/postgresql/data
+      - ${TIMESCALE_DATA_DIR:-./pgdata}:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U trader -d dhan_trading"]
       interval: 10s
       timeout: 5s
       retries: 5
-
-volumes:
-  timescale_data:
