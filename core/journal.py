@@ -127,35 +127,85 @@ class AsyncDBBackend:
     async def log_trade_entry(self, security_id: str, side: str, qty: int,
                               entry_price: float, strategy: str,
                               signal_id: Optional[int] = None,
-                              dhan_order_id: Optional[str] = None) -> None:
-        await self._run("""
-            INSERT INTO trades (signal_id, security_id, side, qty, entry_ts, entry_price, strategy, dhan_order_id, status)
-            VALUES (:signal_id, :security_id, :side, :qty, :entry_ts, :entry_price, :strategy, :order_id, 'OPEN')
-        """, {
-            "signal_id": signal_id, "security_id": security_id, "side": side,
-            "qty": qty, "entry_ts": datetime.now(timezone.utc),
-            "entry_price": entry_price, "strategy": strategy, "order_id": dhan_order_id,
-        })
+                              dhan_order_id: Optional[str] = None) -> Optional[int]:
+        """Insert a new OPEN trade row and return its id, or None if disabled/error."""
+        if not self._enabled:
+            return None
+        trade_id: list[Optional[int]] = [None]
+
+        def _insert():
+            from sqlalchemy import text as _text
+            params = {
+                "signal_id": signal_id, "security_id": security_id, "side": side,
+                "qty": qty, "entry_ts": datetime.now(timezone.utc),
+                "entry_price": entry_price, "strategy": strategy, "order_id": dhan_order_id,
+            }
+            sql = """
+                INSERT INTO trades (signal_id, security_id, side, qty, entry_ts, entry_price, strategy, dhan_order_id, status)
+                VALUES (:signal_id, :security_id, :side, :qty, :entry_ts, :entry_price, :strategy, :order_id, 'OPEN')
+                RETURNING id
+            """
+            if self._Session is not None:
+                session = self._Session()
+                try:
+                    result = session.execute(_text(sql), params)
+                    trade_id[0] = result.scalar()
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    raise
+                finally:
+                    session.close()
+            else:
+                import db as _db
+                with _db.get_session() as session:
+                    result = session.execute(_text(sql), params)
+                    trade_id[0] = result.scalar()
+
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _insert)
+        except Exception as exc:
+            _log.warning("AsyncDBBackend log_trade_entry error: %s", exc)
+            return None
+        return trade_id[0]
 
     async def log_trade_exit(self, security_id: str, exit_price: float, pnl: float,
-                             dhan_order_id: Optional[str] = None) -> None:
-        # Close exactly ONE open row (the most recent matching) — never a
-        # blanket close. A null order_id (paper) used to close EVERY open row
-        # for the security with the same pnl, double-counting into daily_pnl
-        # and the risk halt. Scoping to a single row eliminates that.
-        await self._run("""
-            UPDATE trades SET exit_ts=:exit_ts, exit_price=:exit_price, pnl=:pnl, status='CLOSED'
-            WHERE id = (
-                SELECT id FROM trades
-                WHERE security_id=:security_id AND status='OPEN'
-                  AND (:order_id IS NULL OR dhan_order_id=:order_id)
-                ORDER BY entry_ts DESC, id DESC
-                LIMIT 1
-            )
-        """, {
-            "exit_ts": datetime.now(timezone.utc), "exit_price": exit_price,
-            "pnl": pnl, "security_id": security_id, "order_id": dhan_order_id,
-        })
+                             dhan_order_id: Optional[str] = None,
+                             trade_id: Optional[int] = None) -> None:
+        # When trade_id is provided (the normal path after DATA-03), close that
+        # exact row — no ambiguity even if two entries for the same security are
+        # open concurrently (e.g. during a flip).  When trade_id is absent (boot
+        # reconcile or legacy callers), fall back to the ORDER BY heuristic that
+        # closes the most-recent matching open row.
+        if trade_id is not None:
+            sql = """
+                UPDATE trades SET exit_ts=:exit_ts, exit_price=:exit_price, pnl=:pnl, status='CLOSED'
+                WHERE id = :trade_id AND status='OPEN'
+            """
+            params: dict = {
+                "exit_ts": datetime.now(timezone.utc), "exit_price": exit_price,
+                "pnl": pnl, "trade_id": trade_id,
+            }
+        else:
+            # Fallback heuristic: close the most recent open row for this
+            # security (optionally scoped to a specific order_id).  Kept for
+            # back-compat with reconcile paths that have no in-memory trade_id.
+            sql = """
+                UPDATE trades SET exit_ts=:exit_ts, exit_price=:exit_price, pnl=:pnl, status='CLOSED'
+                WHERE id = (
+                    SELECT id FROM trades
+                    WHERE security_id=:security_id AND status='OPEN'
+                      AND (:order_id IS NULL OR dhan_order_id=:order_id)
+                    ORDER BY entry_ts DESC, id DESC
+                    LIMIT 1
+                )
+            """
+            params = {
+                "exit_ts": datetime.now(timezone.utc), "exit_price": exit_price,
+                "pnl": pnl, "security_id": security_id, "order_id": dhan_order_id,
+            }
+        await self._run(sql, params)
         today = datetime.now(timezone.utc).date()
         await self._run("""
             INSERT INTO daily_pnl (date, realized_pnl, trades_count, wins, losses)
