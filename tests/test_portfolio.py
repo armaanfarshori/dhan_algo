@@ -65,3 +65,19 @@ def test_unrealized_pnl(pf):
     asyncio.run(pf.apply_fill(fill("BUY", 10, 100)))
     assert pf.unrealized_pnl(lambda sid: 103.0) == 30
     assert pf.summary(lambda sid: 103.0)["total_pnl"] == 30
+
+
+# TEST-08 — partial reduce: qty shrinks, avg_price unchanged, realized P&L correct
+def test_partial_reduce_long(pf):
+    """Open BUY 20 @ 100, then SELL 10 @ 110 (partial reduce).
+    Remaining qty must be +10, avg_price must stay 100 (reduce never reprices),
+    and realized P&L must be (110 - 100) * 10 == 100."""
+    asyncio.run(pf.apply_fill(fill("BUY", 20, 100), strategy="ORB"))
+    realized = asyncio.run(pf.apply_fill(fill("SELL", 10, 110)))
+
+    pos = pf.get("999")
+    assert pos.qty == 10, f"expected qty 10 after partial reduce, got {pos.qty}"
+    assert pos.avg_price == 100, (
+        f"avg_price must not change on a reduce — expected 100, got {pos.avg_price}")
+    assert realized == 100, f"expected realized P&L 100, got {realized}"
+    assert pf.realized_pnl == 100

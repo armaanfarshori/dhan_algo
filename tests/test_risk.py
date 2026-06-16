@@ -160,3 +160,82 @@ def test_resume_clears_halt_file(tmp_path):
     assert hf.exists()
     rm.resume()
     assert not hf.exists() and not rm.state.halted
+
+
+# ── _evaluate monitoring paths (TEST-04) ─────────────────────────────────────
+
+def _stub_refresh(rm, monkeypatch):
+    """Replace refresh_pnl with an async no-op so _evaluate doesn't hit the DB."""
+    async def _noop():
+        pass
+    monkeypatch.setattr(rm, "refresh_pnl", _noop)
+
+
+def test_evaluate_daily_loss_triggers_halt(monkeypatch):
+    """day P&L < -daily_loss_budget  →  halted, scope 'day', on_halt callback fires."""
+    # equity = 500k, daily budget = 500k * 0.02 = 10k
+    rm = make_engine()
+    _stub_refresh(rm, monkeypatch)
+
+    # Set realized today to -8k and give the portfolio an unrealized loss of -3k.
+    # day_total = -8000 + -3000 = -11000 < -10000 budget → should halt.
+    rm._realized_today = -8_000
+    rm._portfolio.positions["999"] = Position(security_id="999", qty=10, avg_price=100)
+    # ltp at 70 → unrealized = (70 - 100) * 10 = -300… not enough.
+    # Use qty=100 @ avg 100, ltp 70 → unrealized = (70-100)*100 = -3000. Done.
+    rm._portfolio.positions["999"] = Position(security_id="999", qty=100, avg_price=100)
+    rm._ltp = lambda sid: 70.0
+
+    halt_fired = []
+    rm.on_halt(lambda reason: halt_fired.append(reason))
+
+    asyncio.run(rm._evaluate())
+
+    assert rm.state.halted is True
+    assert rm.state.halt_scope == "day"
+    assert len(halt_fired) == 1, "on_halt callback must fire exactly once"
+
+
+def test_evaluate_weekly_loss_triggers_halt(monkeypatch):
+    """week P&L < -weekly_loss_budget but day within budget → halt scope 'week'."""
+    # equity = 500k, weekly budget = 500k * 0.05 = 25k, daily budget = 10k
+    rm = make_engine()
+    _stub_refresh(rm, monkeypatch)
+
+    # today's realized = -3k (within daily budget of 10k when added to unrealized 0)
+    # week realized = -30k → week_total = -30k + 0 = -30k < -25k → week halt
+    rm._realized_today = -3_000
+    rm._realized_week = -30_000
+    # No open positions → unrealized = 0
+    rm._ltp = lambda sid: 0.0
+
+    halt_fired = []
+    rm.on_halt(lambda reason: halt_fired.append(reason))
+
+    asyncio.run(rm._evaluate())
+
+    assert rm.state.halted is True
+    assert rm.state.halt_scope == "week"
+    assert len(halt_fired) == 1
+
+
+def test_evaluate_killswitch_file_triggers_halt(tmp_path, monkeypatch):
+    """Writing the killswitch file causes _evaluate to set kill_switch + halt."""
+    ks = tmp_path / "killswitch"
+    rm = make_engine(killswitch_file=ks)
+    _stub_refresh(rm, monkeypatch)
+
+    # Write the kill-switch file and ensure realized values are safe (no extra halt)
+    ks.write_text("operator test")
+    rm._realized_today = 0.0
+    rm._realized_week = 0.0
+    rm._ltp = lambda sid: 0.0
+
+    halt_fired = []
+    rm.on_halt(lambda reason: halt_fired.append(reason))
+
+    asyncio.run(rm._evaluate())
+
+    assert rm.state.kill_switch is True
+    assert rm.state.halted is True
+    assert len(halt_fired) >= 1, "on_halt callback must fire when kill switch trips"
