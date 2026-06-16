@@ -83,30 +83,16 @@ for i in $(seq 1 24); do
 done
 .venv/bin/alembic upgrade head
 
-# ── systemd service ───────────────────────────────────────────────────────────
-printf '%s\n' \
-  '[Unit]' \
-  'Description=Dhan Algorithmic Trading Agent' \
-  'After=network.target' \
-  '[Service]' \
-  'Type=simple' \
-  'User=ubuntu' \
-  "WorkingDirectory=$APP_DIR" \
-  "EnvironmentFile=$APP_DIR/.env" \
-  "ExecStart=$APP_DIR/.venv/bin/python3 main.py" \
-  'Restart=on-failure' \
-  'RestartSec=10' \
-  '[Install]' \
-  'WantedBy=multi-user.target' \
-  > /etc/systemd/system/dhan-agent.service
+# ── Log directory (units write to /var/log/dhan/) ─────────────────────────────
+mkdir -p /var/log/dhan
+chown ubuntu:ubuntu /var/log/dhan
+
+# ── systemd services (copy canonical units from repo) ─────────────────────────
+cp "$APP_DIR/infra/systemd/dhan-trader.service" /etc/systemd/system/dhan-trader.service
+cp "$APP_DIR/infra/systemd/dhan-api.service"    /etc/systemd/system/dhan-api.service
 
 systemctl daemon-reload
-
-# NSE hours cron (IST = UTC+5:30): open 09:00 = 03:30 UTC, close+15 = 10:15 UTC
-printf '%s\n' \
-  '30 3 * * 1-5 root systemctl start dhan-agent' \
-  '15 10 * * 1-5 root systemctl stop dhan-agent' \
-  > /etc/cron.d/dhan-agent
+systemctl enable --now dhan-trader dhan-api
 
 chown -R ubuntu:ubuntu "$APP_DIR"
 echo "Agent setup complete" > /var/log/setup_agent_done.txt
