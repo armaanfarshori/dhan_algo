@@ -12,11 +12,12 @@ The design priority is **evidence before exposure**: paper trading is the hard d
 
 ## Dashboard
 
-The `dhan-api` process serves a React dashboard (Signals · Portfolio · System) at `:8765`, read-only and mobile-friendly. Live captures from a paper session:
+The `dhan-api` process serves the **Tessera** React dashboard (Signals · Portfolio · System) at `:8765` — read-only, mobile-friendly, with a light/dark theme toggle. Built with the shadcn/ui design language (Tailwind v4 + Geist). Live captures from a paper session:
 
-| Signals | Portfolio | System |
-|---|---|---|
-| ![Signals tab](docs/images/dashboard-signals.png) | ![Portfolio tab](docs/images/dashboard-portfolio.png) | ![System tab](docs/images/dashboard-system.png) |
+| | Signals | Portfolio | System |
+|---|---|---|---|
+| **Dark** | ![Signals — dark](docs/images/dashboard-signals-dark.png) | ![Portfolio — dark](docs/images/dashboard-portfolio-dark.png) | ![System — dark](docs/images/dashboard-system-dark.png) |
+| **Light** | ![Signals — light](docs/images/dashboard-signals-light.png) | ![Portfolio — light](docs/images/dashboard-portfolio-light.png) | ![System — light](docs/images/dashboard-system-light.png) |
 
 *Signals — ORB cockpit (per-security range ladders), executions feed, Kronos gate verdicts, Today P&L. Portfolio — equity curve, calendar P&L, trade table, win-rate/profit-factor metrics. System — services health, TimescaleDB stats, backfill progress, automation/alerts, and the cross-process **API rate-limit spend** panel (FEAT-02).*
 
