@@ -40,6 +40,11 @@ class Portfolio:
         self.positions: Dict[str, Position] = {}
         self.realized_pnl: float = 0.0         # this session
         self._db = db_backend                  # AsyncDBBackend for trades journal
+        # Map security_id → trades.id of the currently-open trade row.
+        # Populated by log_trade_entry; cleared when the position goes flat.
+        # Absent (None) for positions restored by reconcile_on_boot that have
+        # no in-memory provenance — exits fall back to the heuristic in that case.
+        self._open_trade_id: Dict[str, Optional[int]] = {}
 
     # ── Queries ───────────────────────────────────────────────────────────────
 
@@ -88,10 +93,12 @@ class Portfolio:
             if strategy:
                 pos.strategy = strategy
             if self._db:
-                await self._db.log_trade_entry(
+                tid = await self._db.log_trade_entry(
                     security_id=fill.security_id, side=fill.side,
                     qty=fill.qty, entry_price=fill.price,
                     strategy=strategy or pos.strategy, dhan_order_id=fill.order_id)
+                # Store the trade row id so the exit can close the exact row.
+                self._open_trade_id[fill.security_id] = tid
         else:
             # Reducing / closing / flipping
             closing = min(abs(signed), abs(pos.qty))
@@ -105,17 +112,24 @@ class Portfolio:
             elif flipped:
                 pos.avg_price = fill.price   # remainder is a NEW position at fill price
             if self._db:
-                # Close the old position…
+                # Close the old position by exact trade row id (or fall back to
+                # the ORDER BY heuristic when no id is in memory — e.g. after a
+                # reconcile_on_boot that pre-dated DATA-03).
+                old_trade_id = self._open_trade_id.pop(fill.security_id, None)
                 await self._db.log_trade_exit(
                     security_id=fill.security_id, exit_price=fill.price,
-                    pnl=realized, dhan_order_id=fill.order_id)
-                # …and on a flip, the remainder is a fresh opposite position —
-                # journal it as an entry so it isn't lost from the trades table.
+                    pnl=realized, dhan_order_id=fill.order_id,
+                    trade_id=old_trade_id)
                 if flipped:
-                    await self._db.log_trade_entry(
+                    # Remainder is a fresh opposite position — journal it as an
+                    # entry and keep its id for the next exit.
+                    tid = await self._db.log_trade_entry(
                         security_id=fill.security_id, side=fill.side,
                         qty=abs(pos.qty), entry_price=fill.price,
                         strategy=strategy or pos.strategy, dhan_order_id=fill.order_id)
+                    self._open_trade_id[fill.security_id] = tid
+                # On a clean close (pos.qty == 0, not a flip) the pop above
+                # already cleared the entry; nothing more to do.
 
         await self._persist(pos)
         logger.info("Portfolio[%s]: %s now qty=%+d avg=%.2f (session realized ₹%+.2f)",

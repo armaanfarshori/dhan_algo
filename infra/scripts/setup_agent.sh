@@ -108,5 +108,20 @@ cp "$APP_DIR/infra/systemd/dhan-alert@.service"  /etc/systemd/system/dhan-alert@
 systemctl daemon-reload
 systemctl enable --now dhan-trader dhan-api
 
+# ── Agent crontab (weekday automation + health monitor) ───────────────────────
+# All times are UTC; IST = UTC+5:30
+# health_alert.py: every 5 min (all hours — disk + log errors are 24/7;
+#   market-hours gate is inside the script itself)
+# Backfill watchdog: every 15 min weekdays (existing)
+# Calibration fill+report: 11:15 UTC = 16:45 IST weekdays (existing)
+# EOD summary: 11:30 UTC = 17:00 IST weekdays (existing)
+(crontab -l -u ubuntu 2>/dev/null || true; cat <<'CRON_EOF'
+*/5 * * * * cd /opt/dhan-trading && .venv/bin/python scripts/health_alert.py >> /var/log/dhan/health_alert.log 2>&1
+*/15 * * * 1-5 cd /opt/dhan-trading && bash hermes_skills/dhan/backfill_watchdog/scripts/watchdog.sh >> /var/log/dhan/backfill_watchdog.log 2>&1
+15 11 * * 1-5 cd /opt/dhan-trading && .venv/bin/python -m ml.calibration fill >> /var/log/dhan/calibration.log 2>&1 && .venv/bin/python -m ml.calibration report >> /var/log/dhan/calibration.log 2>&1
+30 11 * * 1-5 cd /opt/dhan-trading && .venv/bin/python scripts/eod_summary.py >> /var/log/dhan/eod_summary.log 2>&1
+CRON_EOF
+) | crontab -u ubuntu -
+
 chown -R ubuntu:ubuntu "$APP_DIR"
 echo "Agent setup complete" > /var/log/setup_agent_done.txt

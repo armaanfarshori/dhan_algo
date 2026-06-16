@@ -208,7 +208,17 @@ class RiskEngine:
         return qty * dist
 
     async def get_adv(self, security_id: str) -> Optional[float]:
-        """20-day average daily volume from the 1d bars (cached per session)."""
+        """~20-trading-day average daily volume from the 1d bars (cached per session).
+
+        Uses a time-bounded WHERE clause (≥ CURRENT_DATE - 30 days) so TimescaleDB
+        can exclude old chunks entirely — no full scan, no decompression of historical
+        chunks.  ~30 calendar days ≈ ~20 trading days of 1d bars, close enough for
+        the ADV liquidity cap.
+
+        The old query used ORDER BY time DESC LIMIT 20, which is the banned anti-pattern
+        on this 300M-row hypertable: it forces a chunk scan + sort before the LIMIT
+        prunes rows, making it orders of magnitude slower than chunk-excluded aggregates.
+        """
         if security_id in self._adv_cache:
             return self._adv_cache[security_id]
         def _query():
@@ -216,11 +226,9 @@ class RiskEngine:
             from db import get_session
             with get_session() as s:
                 return s.execute(text("""
-                    SELECT AVG(volume) FROM (
-                        SELECT volume FROM bars
-                        WHERE security_id = :sid AND timeframe = '1d'
-                        ORDER BY time DESC LIMIT 20
-                    ) t
+                    SELECT AVG(volume) FROM bars
+                    WHERE security_id = :sid AND timeframe = '1d'
+                      AND time >= (CURRENT_DATE - INTERVAL '30 days')
                 """), {"sid": security_id}).scalar()
         try:
             adv = await asyncio.get_running_loop().run_in_executor(None, _query)

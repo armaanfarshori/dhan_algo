@@ -77,6 +77,44 @@ cat /opt/dhan-trading/backfill_ckpt_NSE_EQ.json   # checkpoint {index, total}
 
 The retired LLM ops agent must stay retired — plain cron + Telegram does this job at zero cost. Likewise the old process-watchdog cron (which kill-9'd slow boots) must never be re-added; systemd owns restarts.
 
+## Alerting coverage
+
+All alerts land in the Telegram channel configured by `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` in `.env`.
+
+| Source | Condition | When |
+|---|---|---|
+| `dhan-trader` (engine) | Kill-switch triggered / risk halt | Any hour, immediately on event |
+| `scripts/eod_summary.py` (cron 17:00 IST) | Daily trades, P&L, gate verdicts | Weekdays after square-off |
+| Backfill watchdog (cron every 15 min) | Backfill screen dead | Weekdays while backfill runs |
+| `scripts/health_alert.py` (cron every 5 min) | See table below | All hours (market-hours gate inside script) |
+| systemd `OnFailure=dhan-alert@%n.service` | Service crash | Any time dhan-trader/dhan-api exits non-zero |
+| `hermes_skills/dhan/db_backup` | Backup success/failure | After nightly backup |
+
+### `health_alert.py` — conditions monitored
+
+| Condition key | Trigger | Market-hours only? |
+|---|---|---|
+| `heartbeat_stale` | `run/trader_heartbeat.json` missing or `ts` > 90 s old | Yes (09:15–15:30 IST, weekdays) |
+| `feed_down` | `feed.connected == false` in heartbeat | Yes |
+| `risk_halted` | `risk.halted == true` in heartbeat | No (catches overnight halts too) |
+| `disk_full` | `/` usage > 80% (`shutil.disk_usage`) | No |
+| `log_errors` | New `CRITICAL` or `REJECTED` lines in `/var/log/dhan/trader.log` since last run | No |
+
+**De-duplication:** state is persisted in `run/health_alert_state.json`. Single-condition checks (all except `log_errors`) alert once on the False→True edge and send a CLEARED message on recovery; the byte offset into `trader.log` prevents re-alerting the same log lines on the next run.
+
+**Run manually (safe — prints only, no Telegram):**
+
+```bash
+cd /opt/dhan-trading
+python scripts/health_alert.py --dry-run
+```
+
+**Check its own log:**
+
+```bash
+tail -50 /var/log/dhan/health_alert.log
+```
+
 ## Database operations
 
 ```bash
