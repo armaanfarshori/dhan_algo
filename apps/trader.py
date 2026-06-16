@@ -104,7 +104,7 @@ async def seed_opening_ranges(runners, dhan, segment: str, orb_minutes: int):
 
 
 async def write_heartbeat(*, runners, portfolio, risk, feed, bar_builder,
-                          kronos_scanner, start_time, names=None):
+                          kronos_scanner, start_time, client=None, names=None):
     """Atomically export trader state for the api process."""
     names = names or {}
     while True:
@@ -130,6 +130,7 @@ async def write_heartbeat(*, runners, portfolio, risk, feed, bar_builder,
                 },
                 "bars": bar_builder.status(),
                 "kronos_scanner": kronos_scanner.get_state() if kronos_scanner else None,
+                "rate_limits": client.rate_limit_usage() if client else {},
             }
             tmp = HEARTBEAT_FILE.with_suffix(".tmp")
             tmp.write_text(json.dumps(payload))
@@ -391,7 +392,7 @@ async def main():
             asyncio.create_task(write_heartbeat(
                 runners=runners, portfolio=portfolio, risk=risk, feed=feed,
                 bar_builder=bar_builder, kronos_scanner=kronos_scanner,
-                start_time=start_time, names=names), name="heartbeat"),
+                start_time=start_time, client=dhan, names=names), name="heartbeat"),
             *[asyncio.create_task(r.run(), name=f"orb_{r.sid}") for r in runners],
         ]
         if kronos_scanner:

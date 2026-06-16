@@ -1305,15 +1305,21 @@ function AutomationPanel({ systemHealth }) {
   )
 }
 
-// Caps from core/client.py RateLimiter.LIMITS — update here if LIMITS changes.
-const DHAN_RATE_CAPS = [
-  { category: 'Orders',          perDay: '7,000',    perSec: '10',   perMin: '250'  },
-  { category: 'Data (charts)',   perDay: '100,000',  perSec: '5',    perMin: '—'    },
-  { category: 'Quote',           perDay: '(no cap)', perSec: '1',    perMin: '—'    },
-  { category: 'Non-trading',     perDay: '(no cap)', perSec: '20',   perMin: '—'    },
-]
+// Display labels for each rate-limit category key from the heartbeat.
+const RATE_LIMIT_LABELS = {
+  orders:      'Orders',
+  data:        'Data (charts)',
+  quote:       'Quote',
+  non_trading: 'Non-trading',
+}
 
-function ApiRateLimitPanel() {
+// Ordered display sequence (matches the heartbeat key order).
+const RATE_LIMIT_KEYS = ['orders', 'data', 'quote', 'non_trading']
+
+function ApiRateLimitPanel({ rateLimits }) {
+  const rl = rateLimits ?? {}
+  const hasData = Object.keys(rl).length > 0
+
   const thStyle = {
     fontFamily: T.mono, fontSize: 8, color: T.ink3,
     letterSpacing: '0.12em', textTransform: 'uppercase',
@@ -1323,42 +1329,102 @@ function ApiRateLimitPanel() {
     fontFamily: T.mono, fontSize: 10, color: highlight ? T.ink0 : T.ink2,
     padding: '5px 8px', borderBottom: `1px solid ${T.line}`,
   })
+
+  // Compute the highest usage % across capped categories for the panel accent.
+  let maxUsagePct = 0
+  RATE_LIMIT_KEYS.forEach(key => {
+    const cat = rl[key]
+    if (cat && cat.per_day != null && cat.per_day > 0) {
+      const pct = (cat.calls_today ?? 0) / cat.per_day * 100
+      if (pct > maxUsagePct) maxUsagePct = pct
+    }
+  })
+  const accent = maxUsagePct >= 80 ? T.red : maxUsagePct >= 50 ? T.amber : T.cyan
+
   return (
     <SysPanel
-      title="API Rate-Limit Spend (per day)"
-      right="dhan caps — live counts coming soon"
-      accent={T.amber}
+      title="API Rate-Limit Spend"
+      right={hasData ? 'live · resets IST midnight' : 'waiting for trader…'}
+      accent={accent}
     >
-      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.amber,
-        letterSpacing: '0.12em', marginBottom: 12, lineHeight: 1.6 }}>
-        Coming soon — feature in development
-      </div>
-      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, marginBottom: 10, lineHeight: 1.6 }}>
-        Spent-today counts will be wired from the trader's RateLimiter in a future release.
-        Caps below are from <span style={{ color: T.cyan }}>core/client.py</span>.
-      </div>
+      {!hasData && (
+        <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, marginBottom: 10, lineHeight: 1.6 }}>
+          waiting for trader…
+        </div>
+      )}
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
         <thead>
           <tr>
             <th style={thStyle}>Category</th>
-            <th style={{ ...thStyle, textAlign: 'right' }}>Daily cap</th>
             <th style={{ ...thStyle, textAlign: 'right' }}>Spent today</th>
-            <th style={{ ...thStyle, textAlign: 'right' }}>/s limit</th>
-            <th style={{ ...thStyle, textAlign: 'right' }}>/min limit</th>
+            <th style={{ ...thStyle, textAlign: 'right' }}>Daily cap</th>
+            <th style={{ ...thStyle, textAlign: 'right', minWidth: 90 }}>Usage</th>
+            <th style={{ ...thStyle, textAlign: 'right' }}>/s used · cap</th>
           </tr>
         </thead>
         <tbody>
-          {DHAN_RATE_CAPS.map(row => (
-            <tr key={row.category}>
-              <td style={tdStyle(true)}>{row.category}</td>
-              <td style={{ ...tdStyle(false), textAlign: 'right', color: T.ink1 }}>{row.perDay}</td>
-              <td style={{ ...tdStyle(false), textAlign: 'right', color: T.ink3 }}>—</td>
-              <td style={{ ...tdStyle(false), textAlign: 'right' }}>{row.perSec}</td>
-              <td style={{ ...tdStyle(false), textAlign: 'right' }}>{row.perMin}</td>
-            </tr>
-          ))}
+          {RATE_LIMIT_KEYS.map(key => {
+            const cat = rl[key] ?? {}
+            const label      = RATE_LIMIT_LABELS[key] ?? key
+            const callsToday = cat.calls_today ?? null
+            const perDay     = cat.per_day ?? null
+            const perSecUsed = cat.per_sec_used ?? null
+            const perSec     = cat.per_sec ?? null
+            const capped     = perDay != null
+            const usagePct   = capped && callsToday != null
+              ? Math.min((callsToday / perDay) * 100, 100)
+              : null
+            const barColor   = usagePct == null ? T.line
+              : usagePct >= 80 ? T.red
+              : usagePct >= 50 ? T.amber
+              : T.green
+
+            return (
+              <tr key={key}>
+                <td style={tdStyle(true)}>{label}</td>
+
+                {/* Spent today */}
+                <td style={{ ...tdStyle(false), textAlign: 'right', color: T.ink1 }}>
+                  {callsToday != null ? callsToday.toLocaleString('en-IN') : '—'}
+                </td>
+
+                {/* Daily cap */}
+                <td style={{ ...tdStyle(false), textAlign: 'right', color: T.ink2 }}>
+                  {capped ? perDay.toLocaleString('en-IN') : 'no cap'}
+                </td>
+
+                {/* Usage bar + % for capped; dash for uncapped */}
+                <td style={{ ...tdStyle(false), textAlign: 'right', minWidth: 90 }}>
+                  {usagePct != null ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'flex-end' }}>
+                      <div style={{ width: 52, height: 4, background: T.bg3, overflow: 'hidden', flexShrink: 0 }}>
+                        <div style={{ height: '100%', width: `${usagePct}%`, background: barColor, transition: 'width 0.5s' }} />
+                      </div>
+                      <span style={{ fontFamily: T.mono, fontSize: 9, color: barColor, minWidth: 32, textAlign: 'right' }}>
+                        {usagePct.toFixed(1)}%
+                      </span>
+                    </div>
+                  ) : (
+                    <span style={{ color: T.ink3 }}>—</span>
+                  )}
+                </td>
+
+                {/* /s used vs cap */}
+                <td style={{ ...tdStyle(false), textAlign: 'right', color: T.ink2 }}>
+                  {perSecUsed != null && perSec != null
+                    ? `${perSecUsed} / ${perSec}`
+                    : perSec != null
+                      ? `— / ${perSec}`
+                      : '—'}
+                </td>
+              </tr>
+            )
+          })}
         </tbody>
       </table>
+      <div style={{ marginTop: 10, fontFamily: T.mono, fontSize: 8.5, color: T.ink3, lineHeight: 1.6 }}>
+        Counts are for the trading process; the backfill uses a separate quota.
+      </div>
     </SysPanel>
   )
 }
@@ -1413,7 +1479,7 @@ function SystemTab({ data }) {
         <DBPanel            dbStats={data.dbStats} />
         <BackfillPanel      backfill={data.backfill} />
         <AutomationPanel    systemHealth={data.systemHealth} />
-        <ApiRateLimitPanel />
+        <ApiRateLimitPanel rateLimits={data.trader?.rate_limits} />
       </div>
       <div style={{ height: 420 }}>
         <FullLogPanel logs={data.logs} />
