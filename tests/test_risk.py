@@ -306,8 +306,6 @@ def test_refresh_pnl_db_failure_preserves_weekly_loss(monkeypatch):
         raise RuntimeError("DB connection lost")
 
     # Patch the internal query by monkey-patching run_in_executor to raise.
-    original_refresh = rm.refresh_pnl
-
     async def patched_refresh():
         # Replicate the fallback branch directly: DB fails, fallback fires.
         try:

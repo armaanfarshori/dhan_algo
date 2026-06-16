@@ -16,11 +16,8 @@ factory used in production. DB calls and heartbeat reads are patched to avoid
 any real I/O.
 """
 import asyncio
-import json
 import pytest
-from unittest.mock import MagicMock, patch
 
-import aiohttp
 from aiohttp.test_utils import TestServer, TestClient
 
 import apps.api as api_mod
@@ -271,7 +268,6 @@ async def test_equity_intraday_shape(monkeypatch):
     }
 
     # equity_handler checks cache then calls _db_query; patch both
-    import apps.routes.db as db_routes
 
     def _fake_db_query(fn):
         async def _inner():

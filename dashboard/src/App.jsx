@@ -1,4 +1,4 @@
-import { useState, useEffect, Component } from 'react'
+import { useState, useEffect, useRef, Component } from 'react'
 import { useDashboardData } from './hooks/useDashboardData'
 import { Tabs } from '@/components/ui'
 import { TopBar } from '@/components/shell/TopBar'
@@ -38,6 +38,7 @@ const TAB_ITEMS = [
   { value: 'portfolio', label: 'Portfolio' },
   { value: 'system',    label: 'System' },
 ]
+const TAB_ORDER = TAB_ITEMS.map(t => t.value)
 
 export default function App() {
   const data = useDashboardData()
@@ -58,15 +59,41 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
+  // Swipe left/right between tabs on touch devices
+  const touch = useRef(null)
+  const onTouchStart = (e) => {
+    const t = e.touches[0]
+    touch.current = { x: t.clientX, y: t.clientY }
+  }
+  const onTouchEnd = (e) => {
+    if (!touch.current) return
+    const t = e.changedTouches[0]
+    const dx = t.clientX - touch.current.x
+    const dy = t.clientY - touch.current.y
+    touch.current = null
+    // horizontal swipe only — ignore taps and vertical scrolls
+    if (Math.abs(dx) < 55 || Math.abs(dx) < Math.abs(dy) * 1.4) return
+    const i = TAB_ORDER.indexOf(tab)
+    if (dx < 0 && i < TAB_ORDER.length - 1) setTab(TAB_ORDER[i + 1])
+    else if (dx > 0 && i > 0) setTab(TAB_ORDER[i - 1])
+  }
+
   return (
     <ErrorBoundary>
-      <div className="min-h-screen bg-background text-foreground">
+      <div className="min-h-screen overflow-x-clip bg-background text-foreground">
         <TopBar data={data} />
         <OfflineBanner data={data} />
         <div className="mx-auto max-w-[1320px] overflow-x-clip px-[22px]">
           <Tabs items={TAB_ITEMS} value={tab} onValueChange={setTab} />
           <ErrorBoundary>
-            <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`}>
+            <div
+              role="tabpanel"
+              id={`panel-${tab}`}
+              aria-labelledby={`tab-${tab}`}
+              onTouchStart={onTouchStart}
+              onTouchEnd={onTouchEnd}
+              className="touch-pan-y"
+            >
               {tab === 'signals'   && <SignalsTab   data={data} />}
               {tab === 'portfolio' && <PortfolioTab data={data} />}
               {tab === 'system'    && <SystemTab    data={data} />}

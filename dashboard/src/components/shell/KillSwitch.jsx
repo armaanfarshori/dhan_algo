@@ -38,9 +38,14 @@ export function KillSwitch() {
 
   return (
     <>
-      <Button variant="destructive" onClick={openDialog} disabled={fired}>
+      <Button variant="destructive" onClick={openDialog} disabled={fired} className="shrink-0 whitespace-nowrap">
         <span className={`mr-1.5 inline-block h-2 w-2 rounded-full bg-loss ${fired ? '' : 'animate-pulse-soft'}`} />
-        {fired ? 'HALTED' : 'KILL SWITCH'}
+        {fired ? 'HALTED' : (
+          <>
+            <span className="sm:hidden">KILL</span>
+            <span className="hidden sm:inline">KILL SWITCH</span>
+          </>
+        )}
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent>
