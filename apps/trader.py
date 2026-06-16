@@ -46,6 +46,12 @@ HEARTBEAT_FILE = RUN_DIR / "trader_heartbeat.json"
 KILLSWITCH_FILE = RUN_DIR / "killswitch"
 HEARTBEAT_INTERVAL = 5.0
 
+# Holds the live ApiUsageFlusher created by write_heartbeat() so that the
+# shutdown path can reuse it (with its accumulated _last state) instead of
+# constructing a fresh instance that would re-flush the entire calls_today as
+# a delta and double-count API calls in the DB.
+_heartbeat_flusher = None
+
 
 async def seed_opening_ranges(runners, dhan, segment: str, orb_minutes: int):
     """
@@ -109,9 +115,11 @@ async def seed_opening_ranges(runners, dhan, segment: str, orb_minutes: int):
 async def write_heartbeat(*, runners, portfolio, risk, feed, bar_builder,
                           kronos_scanner, start_time, client=None, names=None):
     """Atomically export trader state for the api process."""
+    global _heartbeat_flusher
     from core.api_usage import ApiUsageFlusher
     names = names or {}
     flusher = ApiUsageFlusher(process="trader")
+    _heartbeat_flusher = flusher  # expose to shutdown path so it reuses _last
     _flush_ticks = 0
     _FLUSH_EVERY = max(1, round(60.0 / HEARTBEAT_INTERVAL))  # ~every 60s
 
@@ -426,9 +434,13 @@ async def main():
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        # Final API usage flush so the last ~60s of calls are recorded
+        # Final API usage flush so the last ~60s of calls are recorded.
+        # Reuse the live flusher from write_heartbeat (which has _last up-to-date)
+        # so we only flush the true remaining delta — not the full calls_today.
+        # A fresh instance would have _last={} and re-send the entire count,
+        # doubling the DB total (QR-C2).
         from core.api_usage import ApiUsageFlusher
-        _shutdown_flusher = ApiUsageFlusher(process="trader")
+        _shutdown_flusher = _heartbeat_flusher or ApiUsageFlusher(process="trader")
         await _shutdown_flusher.flush(dhan)
         await db.log_run_stop(run_id, outcome="stopped")
         logger.info("✅ dhan-trader shut down cleanly")

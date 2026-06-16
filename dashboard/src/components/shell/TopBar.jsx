@@ -78,8 +78,9 @@ export function TopBar({ data }) {
           <button
             onClick={toggle}
             title="Toggle light / dark"
-            aria-label="Toggle theme"
-            className="grid h-[34px] w-[34px] place-items-center rounded-[var(--radius-md)] border border-border2 bg-card text-[15px] text-muted-foreground transition-colors hover:border-faint hover:text-foreground"
+            aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
+            aria-pressed={theme === 'dark'}
+            className="grid h-9 w-9 place-items-center rounded-[var(--radius-md)] border border-border2 bg-card text-[15px] text-muted-foreground transition-colors hover:border-faint hover:text-foreground"
           >
             {theme === 'dark' ? '☾' : '☀'}
           </button>

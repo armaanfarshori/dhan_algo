@@ -102,4 +102,10 @@ resource "aws_eip" "agent" {
   instance = aws_instance.agent.id
 
   tags = { Name = "${local.name_prefix}-eip-agent", Purpose = "dhan-api-whitelist" }
+
+  lifecycle {
+    # Destroying this EIP would change the agent's public IP, triggering
+    # Dhan's 7-day re-whitelist lock and halting live order placement.
+    prevent_destroy = true
+  }
 }

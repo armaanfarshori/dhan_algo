@@ -178,3 +178,58 @@ def test_candle_builder_high_low_update():
     assert cur["low"] == 98.0
     assert cur["open"] == 100.0
     assert cur["close"] == 98.0
+
+
+# ── QR-C3: tick-cache staleness tests ────────────────────────────────────────
+
+def test_tick_cache_cleared_on_invalidate():
+    """_invalidate_tick_cache() must remove all cached ticks and timestamps.
+
+    QR-C3: after a WebSocket disconnect the old prices must not survive in
+    _ticks so that get_tick() / get_ltp() return empty / zero, forcing the
+    runner to fall back to REST rather than using pre-disconnect prices.
+    """
+    feed = _make_feed()
+    # Inject a synthetic tick directly (bypasses network)
+    feed._on_data({"security_id": "2885", "LTP": 150.0, "volume": 1000})
+    assert feed.get_ltp("2885") == 150.0, "tick must be cached before invalidation"
+
+    feed._invalidate_tick_cache()
+
+    assert feed.get_tick("2885") is None, "tick must be gone after invalidation"
+    assert feed.get_ltp("2885") == 0.0,   "ltp must be 0 (not cached) after invalidation"
+
+
+def test_tick_age_none_when_cache_cold():
+    """get_tick_age_s() returns None for a security that has never ticked or
+    whose cache was cleared — so callers treat it as infinite age (stale).
+    """
+    feed = _make_feed()
+    assert feed.get_tick_age_s("2885") is None
+
+
+def test_tick_age_none_after_invalidation():
+    """After a reconnect invalidation, get_tick_age_s() must return None even
+    for a security that had a fresh tick before the disconnect.
+    """
+    feed = _make_feed()
+    feed._on_data({"security_id": "2885", "LTP": 150.0, "volume": 1000})
+    assert feed.get_tick_age_s("2885") is not None, "age must be set after tick"
+
+    feed._invalidate_tick_cache()
+
+    assert feed.get_tick_age_s("2885") is None, "age must be None after cache clear"
+
+
+def test_tick_age_grows_over_time():
+    """get_tick_age_s() must return a non-negative value that increases over
+    time, so the staleness check in the runner is meaningful.
+    """
+    import time as _time
+    feed = _make_feed()
+    feed._on_data({"security_id": "2885", "LTP": 150.0, "volume": 1000})
+    age1 = feed.get_tick_age_s("2885")
+    _time.sleep(0.05)
+    age2 = feed.get_tick_age_s("2885")
+    assert age1 is not None and age1 >= 0
+    assert age2 > age1, "age must grow with wall-clock time"

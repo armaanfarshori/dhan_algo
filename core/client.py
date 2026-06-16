@@ -348,6 +348,10 @@ class DhanClient:
         try:
             result = await self._request("POST", endpoint, "orders", payload, idempotent=False)
             logger.info(f"Order placed: {result}")
+            # Inject correlation_id into the result so callers can store it as
+            # client_order_id in the orders table audit trail.
+            if isinstance(result, dict):
+                result = {**result, "correlationId": correlation_id}
             return result
         except (aiohttp.ClientError, DhanAPIError, asyncio.TimeoutError, RuntimeError) as exc:
             # The order MAY have already reached the broker — never blind-retry.
@@ -368,9 +372,13 @@ class DhanClient:
                         "place_order: idempotent recovery — order already at broker "
                         "(correlation_id=%s, result=%s)", correlation_id, existing,
                     )
+                    if "correlationId" not in existing:
+                        existing = {**existing, "correlationId": correlation_id}
                     return existing
 
             # Confirmed not placed (or unknown) — re-raise for the caller / risk layer
+            # Attach correlation_id to the exception so LiveExecutor can audit-log it.
+            exc._correlation_id = correlation_id  # type: ignore[attr-defined]
             raise
 
     async def modify_order(

@@ -66,9 +66,11 @@ export default function App() {
         <div className="mx-auto max-w-[1320px] overflow-x-clip px-[22px]">
           <Tabs items={TAB_ITEMS} value={tab} onValueChange={setTab} />
           <ErrorBoundary>
-            {tab === 'signals'   && <SignalsTab   data={data} />}
-            {tab === 'portfolio' && <PortfolioTab data={data} />}
-            {tab === 'system'    && <SystemTab    data={data} />}
+            <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`}>
+              {tab === 'signals'   && <SignalsTab   data={data} />}
+              {tab === 'portfolio' && <PortfolioTab data={data} />}
+              {tab === 'system'    && <SystemTab    data={data} />}
+            </div>
           </ErrorBoundary>
         </div>
       </div>

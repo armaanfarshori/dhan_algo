@@ -53,7 +53,7 @@ export function PnlAreaChart({ data, height = 210, xKey = 't', dataKey = 'v' }) 
             fontSize: 10,
             borderRadius: 6,
           }}
-          labelStyle={{ color: 'hsl(var(--muted-foreground))' }}
+          labelStyle={{ color: 'hsl(var(--muted-fg))' }}
           formatter={(v) => [INR0(v), 'P&L']}
         />
         <Area

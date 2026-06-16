@@ -12,8 +12,8 @@
   --panel:      240 6% 95%;
   --card:       0 0% 100%;
   --foreground: 240 10% 9%;
-  --muted-fg:   240 4% 44%;
-  --faint:      240 4% 60%;
+  --muted-fg:   240 4% 40%;
+  --faint:      240 4% 48%;
   --border:     240 6% 90%;
   --border2:    240 5% 83%;
 
@@ -28,7 +28,6 @@
   --top-bg:     0 0% 100%;
   --top-alpha:  0.80;
   --shadow:     0 1px 2px hsl(240 6% 70% / .18), 0 1px 3px hsl(240 6% 70% / .12);
-  --radius:     12px;
 }
 
 .dark {
@@ -36,8 +35,8 @@
   --panel:      240 8% 5.5%;
   --card:       240 6% 7.5%;
   --foreground: 0 0% 98%;
-  --muted-fg:   240 5% 58%;
-  --faint:      240 5% 40%;
+  --muted-fg:   240 5% 62%;
+  --faint:      240 5% 50%;
   --border:     240 5% 14%;
   --border2:    240 5% 18%;
 
@@ -60,7 +59,6 @@
   --color-panel:         hsl(var(--panel));
   --color-card:          hsl(var(--card));
   --color-foreground:    hsl(var(--foreground));
-  --color-muted:         hsl(var(--border));
   --color-muted-foreground: hsl(var(--muted-fg));
   --color-faint:         hsl(var(--faint));
   --color-border:        hsl(var(--border));
@@ -106,37 +104,43 @@ html, body {
 }
 
 @keyframes pulse  { 0%,100%{opacity:1} 50%{opacity:.35} }
-@keyframes spin   { to { transform: rotate(360deg); } }
 .animate-pulse-soft { animation: pulse 2s ease-in-out infinite; }
 
+/* Respect users who prefer reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse-soft { animation: none; }
+  html, body { transition: none; }
+  .tessera-cal *, .rdp * { transition: none !important; }
+}
+
 /* ── react-day-picker theming (Calendar P&L) ── */
-.dhan-cal .rdp-root {
+.tessera-cal .rdp-root {
   --rdp-accent-color: hsl(var(--profit));
   --rdp-accent-background-color: hsl(var(--profit) / .12);
   --rdp-font-family: 'Geist', system-ui, sans-serif;
   margin: 0;
 }
-.dhan-cal .rdp-months, .dhan-cal .rdp-month { width: 100%; max-width: 100%; }
-.dhan-cal .rdp-month_grid { width: 100%; border-collapse: separate; border-spacing: 4px; }
-.dhan-cal .rdp-month_caption { display: flex; align-items: center; padding: 0 2px 12px; }
-.dhan-cal .rdp-caption_label { font-size: 13px; font-weight: 600; color: hsl(var(--foreground)); }
-.dhan-cal .rdp-dropdowns { display: flex; gap: 6px; }
-.dhan-cal .rdp-dropdown {
+.tessera-cal .rdp-months, .tessera-cal .rdp-month { width: 100%; max-width: 100%; }
+.tessera-cal .rdp-month_grid { width: 100%; border-collapse: separate; border-spacing: 4px; }
+.tessera-cal .rdp-month_caption { display: flex; align-items: center; padding: 0 2px 12px; }
+.tessera-cal .rdp-caption_label { font-size: 13px; font-weight: 600; color: hsl(var(--foreground)); }
+.tessera-cal .rdp-dropdowns { display: flex; gap: 6px; }
+.tessera-cal .rdp-dropdown {
   appearance: none; background: hsl(var(--card)); color: hsl(var(--foreground));
   border: 1px solid hsl(var(--border2)); border-radius: 6px; font-size: 12px;
   padding: 4px 8px; font-family: 'Geist', system-ui, sans-serif; cursor: pointer;
 }
-.dhan-cal .rdp-dropdown:hover { border-color: hsl(var(--faint)); }
-.dhan-cal .rdp-button_previous, .dhan-cal .rdp-button_next {
-  width: 28px; height: 28px; border-radius: 7px; border: 1px solid hsl(var(--border2));
-  color: hsl(var(--muted-foreground)); background: hsl(var(--card));
+.tessera-cal .rdp-dropdown:hover { border-color: hsl(var(--faint)); }
+.tessera-cal .rdp-button_previous, .tessera-cal .rdp-button_next {
+  width: 34px; height: 34px; border-radius: 8px; border: 1px solid hsl(var(--border2));
+  color: hsl(var(--muted-fg)); background: hsl(var(--card));
 }
-.dhan-cal .rdp-button_previous:hover, .dhan-cal .rdp-button_next:hover {
+.tessera-cal .rdp-button_previous:hover, .tessera-cal .rdp-button_next:hover {
   background: hsl(var(--panel)); color: hsl(var(--foreground));
 }
-.dhan-cal .rdp-chevron { fill: currentColor; }
-.dhan-cal .rdp-weekday {
+.tessera-cal .rdp-chevron { fill: currentColor; }
+.tessera-cal .rdp-weekday {
   font-size: 9.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em;
   color: hsl(var(--faint)); padding-bottom: 6px;
 }
-.dhan-cal .rdp-day { padding: 0; vertical-align: top; }
+.tessera-cal .rdp-day { padding: 0; vertical-align: top; }

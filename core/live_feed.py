@@ -17,6 +17,7 @@ Usage:
 
 import asyncio
 import logging
+import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional
@@ -104,8 +105,9 @@ class LiveFeed:
         self._access_token = access_token
         self._subscriptions: list = []      # list of (exchange_code, security_id)
 
-        self._ticks:   Dict[str, dict]          = {}   # sid → {ltp, volume, ...}
-        self._candles: Dict[str, CandleBuilder] = defaultdict(CandleBuilder)
+        self._ticks:    Dict[str, dict]          = {}   # sid → {ltp, volume, ...}
+        self._tick_ts:  Dict[str, float]         = {}   # sid → monotonic receive time (s)
+        self._candles:  Dict[str, CandleBuilder] = defaultdict(CandleBuilder)
         self._running  = False
         self._feed: Optional[MarketFeed] = None
         self._connected = asyncio.Event()
@@ -185,6 +187,18 @@ class LiveFeed:
             "volume": cur.get("volume", 0),
         }
 
+    def get_tick_age_s(self, security_id: str) -> Optional[float]:
+        """Seconds since the last tick was received for this security.
+
+        Returns None if no tick has ever been received (i.e. the cache is cold
+        or was cleared on a disconnect).  Callers should treat None as infinite
+        age (stale / no data).
+        """
+        ts = self._tick_ts.get(str(security_id))
+        if ts is None:
+            return None
+        return time.monotonic() - ts
+
     def is_connected(self) -> bool:
         return self._connected.is_set()
 
@@ -226,6 +240,18 @@ class LiveFeed:
         finally:
             await self._close_feed()
 
+    def _invalidate_tick_cache(self):
+        """Clear cached ticks and their timestamps on disconnect.
+
+        After a WebSocket disconnect the cached prices are pre-disconnect data.
+        Clearing them prevents the runner from handing the ORB strategy a stale
+        price as if it were fresh — it will fall back to REST until new ticks
+        arrive on reconnect.
+        """
+        self._ticks.clear()
+        self._tick_ts.clear()
+        logger.debug("LiveFeed: tick cache invalidated on disconnect")
+
     async def _close_feed(self):
         """Best-effort close of the current MarketFeed socket. Releases the
         connection on Dhan's side instead of leaving it for a server-side TTL."""
@@ -233,6 +259,7 @@ class LiveFeed:
         self._feed = None
         if feed is None:
             return
+        self._invalidate_tick_cache()
         try:
             ws = getattr(feed, "ws", None)
             if ws is not None:
@@ -323,7 +350,8 @@ class LiveFeed:
         # Fallback to server-receive time when the field is missing/zero.
         tick_ts: Optional[datetime] = self._parse_ltt(data.get("LTT"))
 
-        self._ticks[sid] = data
+        self._ticks[sid]   = data
+        self._tick_ts[sid] = time.monotonic()
         self._candles[sid].on_tick(ltp, volume, ts=tick_ts)
 
         if self._on_tick_cb is not None:

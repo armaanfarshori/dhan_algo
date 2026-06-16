@@ -254,3 +254,72 @@ def test_query_today_totals_all_categories_and_caps(tmp_path):
     # non_trading: absent from table → total=0, per_day=None (uncapped)
     assert cats["non_trading"]["total"] == 0
     assert cats["non_trading"]["per_day"] is None
+
+
+# ── (d) QR-C2: shutdown flush must not double-count ────────────────────────────
+
+def test_shutdown_flush_does_not_double_count(tmp_path):
+    """Regression for QR-C2: simulates the trader mid-session flush followed by
+    a shutdown flush.
+
+    Before the fix, the shutdown path constructed a *fresh* ApiUsageFlusher
+    (with _last={}) and flushed the full calls_today as a delta, doubling the
+    DB total.  The correct behaviour is that the shutdown flusher reuses the
+    same instance (or one whose _last matches the last-flushed value) so only
+    the true remaining delta is written.
+
+    Scenario:
+      1. Create ONE flusher (simulating the live write_heartbeat instance).
+      2. Mid-session flush: 100 data calls → DB should hold 100.
+      3. No new calls occur before shutdown.
+      4. Shutdown flush: same flusher → delta == 0 → DB still holds 100.
+      5. Assert total == 100, not 200.
+    """
+    db_path = tmp_path / "t.db"
+    eng = _make_sqlite_engine(db_path)
+
+    from contextlib import contextmanager
+    from sqlalchemy.orm import sessionmaker
+    Session = sessionmaker(bind=eng)
+
+    @contextmanager
+    def _session_ctx():
+        s = Session()
+        try:
+            yield s
+            s.commit()
+        except Exception:
+            s.rollback()
+            raise
+        finally:
+            s.close()
+
+    # Single flusher — shared between heartbeat loop and shutdown path
+    flusher = ApiUsageFlusher(process="trader")
+
+    async def do_flush(calls_today: int):
+        client = _make_fake_client({"data": calls_today, "orders": 0, "quote": 0, "non_trading": 0})
+        with patch("db.get_session", _session_ctx):
+            await flusher.flush(client)
+
+    # Step 2: mid-session flush at 100 calls
+    asyncio.run(do_flush(100))
+    rows = _rows(eng)
+    data_total = sum(r["calls"] for r in rows if r["category"] == "data")
+    assert data_total == 100, f"After mid-session flush expected 100, got {data_total}"
+
+    # Step 3–4: shutdown flush — no new calls, same flusher, delta must be 0
+    asyncio.run(do_flush(100))  # calls_today still 100
+    rows = _rows(eng)
+    data_total = sum(r["calls"] for r in rows if r["category"] == "data")
+    assert data_total == 100, (
+        f"QR-C2 regression: shutdown flush double-counted — expected 100, got {data_total}"
+    )
+
+    # Sanity: if 5 more calls happen before shutdown, only those 5 are written
+    asyncio.run(do_flush(105))
+    rows = _rows(eng)
+    data_total = sum(r["calls"] for r in rows if r["category"] == "data")
+    assert data_total == 105, (
+        f"Expected 105 after +5 tail calls, got {data_total}"
+    )

@@ -21,5 +21,14 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
+    rollupOptions: {
+      output: {
+        // Split the heavy viz libs out of the main chunk for faster first load.
+        manualChunks(id) {
+          if (id.includes('node_modules/recharts') || id.includes('node_modules/d3')) return 'recharts'
+          if (id.includes('react-day-picker') || id.includes('node_modules/date-fns')) return 'calendar'
+        },
+      },
+    },
   },
 })

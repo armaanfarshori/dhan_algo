@@ -75,6 +75,7 @@ class LiveExecutor(OrderExecutor):
         self._run_id = run_id
 
     async def submit(self, intent: OrderIntent, ref_price: float) -> Optional[Fill]:
+        correlation_id: Optional[str] = None
         try:
             result = await self._client.place_order(
                 transaction_type=intent.side,
@@ -87,27 +88,65 @@ class LiveExecutor(OrderExecutor):
         except Exception as exc:
             logger.error("🔴 LIVE order FAILED %s %d %s: %s",
                          intent.side, intent.qty, intent.security_id, exc)
+            # Recover the correlation_id the client attached to the exception (if any)
+            correlation_id = getattr(exc, "_correlation_id", None)
+            if self._db:
+                await self._db.log_order(
+                    security_id=intent.security_id,
+                    exchange_segment=intent.exchange_segment,
+                    side=intent.side, qty=intent.qty,
+                    order_type="MARKET", product_type=intent.product_type,
+                    mode="LIVE", price=ref_price,
+                    dhan_order_id=None, client_order_id=correlation_id,
+                    run_id=self._run_id, status="FAILED",
+                )
             return None
 
-        order_id = (result or {}).get("orderId")
+        result = result or {}
+        order_id = result.get("orderId")
+        correlation_id = result.get("correlationId")
         logger.warning("🔴 [LIVE] %s %d %s placed @ ref ₹%.2f  order_id=%s — %s",
                        intent.side, intent.qty, intent.security_id, ref_price,
                        order_id, intent.reason)
         if not order_id:
             logger.critical("LIVE order returned no orderId (%s) — treating as failed", result)
+            if self._db:
+                await self._db.log_order(
+                    security_id=intent.security_id,
+                    exchange_segment=intent.exchange_segment,
+                    side=intent.side, qty=intent.qty,
+                    order_type="MARKET", product_type=intent.product_type,
+                    mode="LIVE", price=ref_price,
+                    dhan_order_id=None, client_order_id=correlation_id,
+                    run_id=self._run_id, status="FAILED",
+                )
             return None
 
         fill = await self._confirm_fill(order_id, intent, ref_price)
 
-        if self._db and fill is not None:
-            await self._db.log_order(
-                security_id=intent.security_id,
-                exchange_segment=intent.exchange_segment,
-                side=intent.side, qty=fill.qty,
-                order_type="MARKET", product_type=intent.product_type,
-                mode="LIVE", price=fill.price,
-                dhan_order_id=order_id, run_id=self._run_id, status="TRADED",
-            )
+        if self._db:
+            if fill is not None:
+                await self._db.log_order(
+                    security_id=intent.security_id,
+                    exchange_segment=intent.exchange_segment,
+                    side=intent.side, qty=fill.qty,
+                    order_type="MARKET", product_type=intent.product_type,
+                    mode="LIVE", price=fill.price,
+                    dhan_order_id=order_id, client_order_id=correlation_id,
+                    run_id=self._run_id, status="TRADED",
+                )
+            else:
+                # REJECTED / CANCELLED — still write an audit row so no placement
+                # outcome goes unrecorded.
+                await self._db.log_order(
+                    security_id=intent.security_id,
+                    exchange_segment=intent.exchange_segment,
+                    side=intent.side, qty=intent.qty,
+                    order_type="MARKET", product_type=intent.product_type,
+                    mode="LIVE", price=ref_price,
+                    dhan_order_id=order_id, client_order_id=correlation_id,
+                    run_id=self._run_id, status="REJECTED",
+                )
         return fill
 
     async def _confirm_fill(self, order_id: str, intent: OrderIntent,

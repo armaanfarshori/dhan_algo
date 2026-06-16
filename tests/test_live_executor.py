@@ -1,5 +1,6 @@
 """LiveExecutor fill confirmation + LIVE broker reconcile — the paper→live path."""
 import asyncio
+from typing import Optional
 
 import pytest
 
@@ -109,3 +110,109 @@ def test_paper_mode_is_noop(monkeypatch):
             raise AssertionError("paper mode must not query the broker")
     asyncio.run(pf.reconcile_with_broker(Boom()))
     assert pf.get("999").qty == 10
+
+
+# ── QR-C4: orders audit trail for failed/rejected LIVE placements ─────────────
+
+class _CapturingDB:
+    """Minimal AsyncDBBackend stand-in that records every log_order call."""
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def log_order(self, **kw):
+        self.calls.append(kw)
+
+
+class _DhanRejected:
+    """Broker that places successfully but immediately rejects at confirmation."""
+    def __init__(self, correlation_id="CORR-REJECT-1"):
+        self._cid = correlation_id
+
+    async def place_order(self, **kw):
+        return {"orderId": "OID-REJ", "correlationId": self._cid}
+
+    async def get_order_by_id(self, order_id):
+        return {"data": {"orderStatus": "REJECTED",
+                         "omsErrorDescription": "Insufficient funds"}}
+
+
+class _DhanNetworkFail:
+    """Broker whose place_order raises a network error with an attached correlation_id."""
+    def __init__(self, correlation_id="CORR-NET-1"):
+        self._cid = correlation_id
+
+    async def place_order(self, **kw):
+        exc = RuntimeError("DH-906 network timeout")
+        exc._correlation_id = self._cid  # as client.py would set it
+        raise exc
+
+    async def get_order_by_id(self, order_id):  # should never be called
+        raise AssertionError("get_order_by_id must not be called on network failure")
+
+
+def _fast_ex(client, db):
+    ex = LiveExecutor(client, db_backend=db)
+    ex._CONFIRM_WAITS = [0.01]
+    return ex
+
+
+def test_rejected_live_order_writes_orders_row():
+    """QR-C4: a REJECTED live order must write an orders row with status=REJECTED
+    and preserve the dhan_order_id + correlation_id as client_order_id."""
+    db = _CapturingDB()
+    client = _DhanRejected(correlation_id="CORR-REJECT-1")
+    ex = _fast_ex(client, db)
+
+    fill = asyncio.run(ex.submit(intent(), ref_price=100.0))
+
+    assert fill is None, "REJECTED order must return no fill"
+    assert len(db.calls) == 1, "exactly one orders row must be written"
+    row = db.calls[0]
+    assert row["status"] == "REJECTED"
+    assert row["dhan_order_id"] == "OID-REJ"
+    assert row["client_order_id"] == "CORR-REJECT-1"
+    assert row["mode"] == "LIVE"
+    assert row["security_id"] == "999"
+
+
+def test_network_failed_live_order_writes_orders_row():
+    """QR-C4: a network-failed live placement must write an orders row with
+    status=FAILED and the correlation_id surfaced by the client exception."""
+    db = _CapturingDB()
+    client = _DhanNetworkFail(correlation_id="CORR-NET-1")
+    ex = _fast_ex(client, db)
+
+    fill = asyncio.run(ex.submit(intent(), ref_price=100.0))
+
+    assert fill is None, "network-failed order must return no fill"
+    assert len(db.calls) == 1, "exactly one orders row must be written"
+    row = db.calls[0]
+    assert row["status"] == "FAILED"
+    assert row["dhan_order_id"] is None
+    assert row["client_order_id"] == "CORR-NET-1"
+    assert row["mode"] == "LIVE"
+    assert row["security_id"] == "999"
+
+
+def test_successful_live_order_still_writes_orders_row():
+    """QR-C4 non-regression: a successful trade still writes its orders row
+    with status=TRADED and correct correlation_id."""
+    db = _CapturingDB()
+
+    class _DhanTraded:
+        async def place_order(self, **kw):
+            return {"orderId": "OID-OK", "correlationId": "CORR-OK-1"}
+
+        async def get_order_by_id(self, order_id):
+            return {"data": {"orderStatus": "TRADED",
+                             "averageTradedPrice": 101.5, "filledQty": 10}}
+
+    ex = _fast_ex(_DhanTraded(), db)
+    fill = asyncio.run(ex.submit(intent(), ref_price=100.0))
+
+    assert fill is not None and fill.price == 101.5
+    assert len(db.calls) == 1
+    row = db.calls[0]
+    assert row["status"] == "TRADED"
+    assert row["dhan_order_id"] == "OID-OK"
+    assert row["client_order_id"] == "CORR-OK-1"
