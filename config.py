@@ -122,6 +122,12 @@ class Config(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # ── Backfill paths ───────────────────────────────────────────────────────
+    # Absolute paths match what is hardcoded in apps/api.py's backfill_status_handler
+    # so production behaviour is unchanged when these env vars are unset.
+    backfill_checkpoint_path: str = "/opt/dhan-trading/backfill_ckpt_NSE_EQ.json"
+    backfill_log_path: str = "/tmp/backfill.log"
+
     # ── TimescaleDB ─────────────────────────────────────────────────────────
     db_host: str = "localhost"
     db_port: int = 5432

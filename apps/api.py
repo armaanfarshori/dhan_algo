@@ -772,13 +772,13 @@ async def backfill_status_handler(_r: web.Request) -> web.Response:
     import subprocess
     ckpt = {}
     try:
-        ckpt = json.loads(Path("/opt/dhan-trading/backfill_ckpt_NSE_EQ.json").read_text())
+        ckpt = json.loads(Path(cfg.backfill_checkpoint_path).read_text())
         ckpt["pct"] = round(ckpt["index"] / max(ckpt["total"], 1) * 100, 1)
     except Exception:
         pass
     lines: list[str] = []
     try:
-        result = subprocess.run(["tail", "-30", "/tmp/backfill.log"],
+        result = subprocess.run(["tail", "-30", cfg.backfill_log_path],
                                 capture_output=True, text=True, timeout=3)
         lines = [l for l in result.stdout.strip().split("\n") if l]
     except Exception:
