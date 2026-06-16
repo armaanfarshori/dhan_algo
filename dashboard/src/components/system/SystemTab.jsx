@@ -358,7 +358,7 @@ function LogsPanel({ logs }) {
         title="Recent Logs"
         meta={<span className="mono">trader.log · IST</span>}
       />
-      <div className="mono px-4 py-3 text-[10.5px] leading-[1.7]">
+      <div className="mono max-h-[340px] overflow-auto px-4 py-3 text-[10.5px] leading-[1.7]">
         {rows.length === 0 ? (
           <span className="text-faint">No log output</span>
         ) : (
