@@ -434,25 +434,18 @@ async def run_backfill(args, cfg):
                 logger.warning("DB seeding failed (%s) — starting from index 0", exc)
                 start_idx = 0
 
-        _chunk_counter = 0  # counts completed securities; flush usage every 50
-        _FLUSH_EVERY = 50
-        # Full-history backfill is ~minutes PER security, so the 50-security gate
-        # could take a day to trip — and _chunk_counter resets on every restart,
-        # so usage was never persisted. Also flush on a wall-clock cadence so the
-        # spend panel reflects reality within ~2 min regardless of per-security pace.
+        _chunk_counter = 0  # completed securities (logging only)
+        # Flush API usage on a wall-clock cadence (~2 min) so the spend panel
+        # reflects reality regardless of pace (the old 50-security gate could take
+        # a day to trip and reset on every restart).
         _FLUSH_SECONDS = 120
         _last_flush = _time.monotonic()
 
-        try:
-            idx = start_idx
-            while idx < n_total:
-                sid = id_list[idx]
-                logger.info("═══ [%d/%d] security_id=%s ═══", idx + 1, n_total, sid)
+        _CONCURRENCY = max(1, getattr(args, "concurrency", 1))
 
-                # Pick up any token main.py rotated since the last security
-                # (multi-day runs outlive a single ~24h token).
-                _reload_token(client)
-
+        async def _process_one(sid: str):
+            """Backfill one security (intraday + daily), retrying on token expiry."""
+            while True:
                 try:
                     if args.do_intraday:
                         n = await backfill_intraday(
@@ -460,34 +453,43 @@ async def run_backfill(args, cfg):
                             args.from_date, args.to_date, args.dry_run,
                         )
                         if n > 0:
-                            logger.info("  1m done — %d rows upserted", n)
-
+                            logger.info("  1m done — %d rows upserted (sid=%s)", n, sid)
                     if args.do_daily:
-                        n = await backfill_daily(
+                        await backfill_daily(
                             client, sid, args.exchange_segment,
                             args.daily_from, args.to_date, args.dry_run,
                         )
+                    return
                 except _TokenExpired as exc:
-                    # Token died and no fresh one yet. Do NOT checkpoint — wait
-                    # for main.py to rotate, then retry the SAME security.
-                    logger.error("  Auth token expired at index %d (sid=%s): %s — "
-                                 "holding, will retry once token rotates", idx, sid, exc)
+                    # Token died and no fresh one yet — wait for main.py to rotate,
+                    # then retry the SAME security (the batch never checkpoints past it).
+                    logger.error("  Auth token expired (sid=%s): %s — holding for rotation", sid, exc)
                     if not await _wait_for_fresh_token(client):
-                        logger.error("  No fresh token after max wait — is main.py alive? "
-                                     "Staying on sid=%s without checkpointing.", sid)
-                    continue   # retry same idx; checkpoint not advanced
+                        logger.error("  No fresh token after max wait — retrying sid=%s", sid)
 
-                # Checkpoint only after a security actually completes (data or
-                # legitimately empty) — never on an auth failure.
+        try:
+            idx = start_idx
+            while idx < n_total:
+                end   = min(idx + _CONCURRENCY, n_total)
+                batch = [id_list[i] for i in range(idx, end)]
+                logger.info("═══ [%d-%d/%d] security_ids=%s ═══",
+                            idx + 1, end, n_total, ",".join(batch))
+
+                # Pick up any token main.py rotated (multi-day runs outlive a token).
+                _reload_token(client)
+
+                # Process the batch concurrently. The shared client rate-limiter
+                # bounds the API call rate across all of them; ON CONFLICT makes the
+                # writes idempotent, so a mid-batch crash safely re-does the batch.
+                await asyncio.gather(*[_process_one(sid) for sid in batch])
+
+                # Whole batch done -> every index < end is complete; checkpoint it.
                 if not args.dry_run:
-                    _save_checkpoint(idx, sid)
-                idx += 1
+                    _save_checkpoint(end - 1, id_list[end - 1])
+                idx = end
 
-                # Flush API usage every N securities — backfill is the heaviest
-                # consumer (100K data calls / day) so frequent flushing matters.
-                _chunk_counter += 1
-                if (_chunk_counter % _FLUSH_EVERY == 0
-                        or _time.monotonic() - _last_flush >= _FLUSH_SECONDS):
+                _chunk_counter += len(batch)
+                if _time.monotonic() - _last_flush >= _FLUSH_SECONDS:
                     await _usage_flusher.flush(client)
                     _last_flush = _time.monotonic()
 
@@ -541,6 +543,10 @@ def main():
         help="Exchange segment override (default: WATCHLIST_EXCHANGE_SEGMENT)")
     parser.add_argument("--dry-run", action="store_true",
         help="Fetch only — no DB writes")
+    parser.add_argument("--concurrency", type=int, default=1,
+        help="Securities processed in parallel per batch (checkpoint advances per "
+             "batch). >1 overlaps fetch+write across securities; keep modest (3-5) "
+             "so the shared rate-limiter doesn't trigger DH-904. Default 1 (serial).")
 
     raw = parser.parse_args()
     cfg = get_config()
