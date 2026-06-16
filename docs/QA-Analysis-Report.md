@@ -6,6 +6,8 @@
 
 > ✅ **STATUS UPDATE (2026-06-16): all risk-register findings (C1, C2, H1–H4, M1–M6) are RESOLVED.** The suite is at **195 passed, 0 xfailed**. See §8 (Remediation status) for the per-finding detail. The "Severity note" and amendments immediately below are the *original* review framing, kept for history. A new **Time Rendering & Timestamp Analysis** section (findings T1–T8, two of them High) is appended at the end.
 
+> 🔁 **NEW — Re-Review (2026-06-16 EOD), after the full Tessera dashboard redesign:** a **16-agent parallel audit + Opus-led UI/UX testing** surfaced **~160 findings** (a fresh set, IDs `QR-*`), concentrated in the new React dashboard and its contract with the engine. Highlights: a kill-switch flatten-path gap, an API-usage double-count on shutdown, a cluster of **API↔dashboard field-name mismatches** (gate pill shows "live" in shadow; kill-switch indicator stuck "armed"; profit-factor "n/a"), broken financial metrics (drawdown computed on reversed order → 1123%, unstable Sharpe 11.61), WCAG-AA contrast failures on all small labels, and the dashboard being **absent from CI**. See **§9 — Re-Review** at the end. *These are newly-found and NOT yet remediated.*
+
 > Severity note: several findings (C1, H3, H4, M6) bite only in **live mode**, which the platform is deliberately not in yet — treat them as "fix before M8 (tiny live)," not "fix tonight." C2, H1, and H2 can affect paper/backfill today.
 
 > **Amendment (2026-06-15, post-test):** Two corrections after writing the test suite.
@@ -424,3 +426,88 @@ The `trading_days` query (`backtest/engine.py:193`) uses `ORDER BY 1` (the date 
 7. **(Low — T7/T8)** No code change required if the current convention (all times UTC, display offsets incidental) is accepted and the box stays UTC. Document the decision.
 
 *Audited 2026-06-16. All `file:line` references verified against the commit at audit time.*
+
+---
+
+## 9. Re-Review — Tessera Dashboard Redesign Audit (2026-06-16 EOD)
+
+**Trigger:** the entire React dashboard was rebuilt today (shadcn/ui on Tailwind v4, react-day-picker, Geist) and the product was rebranded **DhanAI → Tessera**.
+**Method:** **16 parallel review agents** (one per narrow slice: each dashboard tab, UI primitives, styles, hooks, deps, a11y, and every engine/core/apps/infra/security/test domain) + **Opus-led rendered UI/UX testing** against the live paper session (headless, dark+light, desktop+mobile).
+**Result:** ~160 findings. The engine/core remain solid (the heavy lifting was the UI); most new issues are in the dashboard and, critically, in the **contract between the dashboard and the engine heartbeat**. None block paper trading today; several are **live-readiness blockers** and several are **plainly visible UX defects**.
+
+### Severity tally (Opus-normalised across the 16 agents)
+| | Critical | High | Medium | Low |
+|---|---|---|---|---|
+| Trading-safety / engine | 3 | 4 | 7 | 4 |
+| API ↔ dashboard contract | — | 5 | 1 | — |
+| Financial-metric correctness | — | 3 | 2 | 2 |
+| Accessibility (WCAG/UX) | — | 6 | 6 | 6 |
+| Frontend code / styles / hooks | — | 5 | 14 | 18 |
+| Infra / CI / deps / security | — | 6 | 9 | 9 |
+
+### 🔴 Critical (verify/fix before any live exposure)
+- **QR-C1 — Kill-switch flatten path.** `engine/risk.py` `activate_kill_switch()` (sync) bypasses `_halt()`, so the `on_halt` *flatten-positions* callback never fires on that path. **Action: confirm the live path** — the dashboard's `POST /api/killswitch` writes the `run/killswitch` file and the risk loop's file-watch should call `_halt()` (which *does* flatten); the direct `activate_kill_switch()` method is the gap. Make both paths converge on `_halt()`. *(agent 10)*
+- **QR-C2 — API-usage double count on shutdown.** `core/api_usage.py` shutdown flusher constructs a fresh accumulator with `_last={}` and re-emits the whole `calls_today` as a delta → the day's API-call count is **doubled** in the DB (corrupts the rate-limit spend panel + accounting). *(agent 13)*
+- **QR-C3 — Stale tick after WS reconnect.** `core/live_feed.py`/`engine/runner.py`: `_ticks[sid]` survives a feed reconnect and `_FEED_FRESH_S` is a dead constant, so the runner can hand ORB a **pre-disconnect price** with no staleness guard. *(agent 11)*
+- **QR-C4 — No audit row for failed live orders.** `engine/execution.py`: REJECTED / network-failed LIVE orders are never written to the `orders` table — no DB trail of a failed/ambiguous fill. *(agent 10)*
+
+### 🟠 High — API ↔ dashboard contract mismatches (root cause: no contract test)
+The dashboard reads fields the engine heartbeat/endpoints never emit. Each renders a silently-wrong value:
+| Field read by dashboard | Reality | Visible effect | Fix |
+|---|---|---|---|
+| `trader.kronos_gate === 'SHADOW'` | engine emits lowercase `"shadow"` | **Gate KPI shows "live" in shadow mode** (inverse of truth) | compare lowercase |
+| `t.kill_switch_active` (HeartbeatPanel) | never emitted; state is `risk.halted` | **kill-switch row stuck on "armed"** even after firing | use `!!t.risk.halted` (TopBar already does) |
+| `t.heartbeat_age_s` | never emitted | Uptime sub always "heartbeat stale" | compute in `snapshot_handler` |
+| `limits.max_positions` | key is `max_open_positions` | positions cap shows `—` | rename read |
+| `summary.profit_factor` (Signals) | `/api/trades` never emits it | Signals Win-Rate KPI always "n/a" (Portfolio computes its own → 1.08) | emit it, or compute client-side |
+
+*(agents 1, 3, 10, 14, 16 — independently cross-validated)*
+
+### 🟠 High — Financial-metric correctness (Portfolio)
+- **QR-H6** Max-drawdown loops `exits` in **DB DESC (newest-first) order without sorting** → wrong peak-to-trough; also yields absurd `1123.0%` from a tiny early peak. Sort ascending by `exit_ts`; cap/relabel the %.
+- **QR-H7** Intraday Sharpe shown with **n ≥ 2 days**, population variance, ×√252 → unstable/meaningless (**renders 11.61**), yet labelled "annualised". Require n ≥ ~20, sample variance, add `(n=Xd)`, or hide until enough data.
+- **QR-H8** `todayCt` / round-trip counts derive from **sliced arrays** (cap 30), not the API summary → understated on busy days.
+- `INR0(negative)` → `₹-3,013` (minus inside the symbol) at two sites; use the `-₹` form (PerformancePanel already does).
+
+### 🟠 High — Accessibility (verified against tokens + DOM)
+- **Dialog (Kill-switch confirm):** no focus trap, no focus restoration on close, no `aria-labelledby` → keyboard/SR users can't safely operate the single most important control.
+- **Tabs:** no Arrow-key roving tabindex, no `role="tabpanel"`/`aria-controls`.
+- **Contrast:** the `--faint` token = **2.97:1 (light) / 3.06:1 (dark)** on cards — **fails WCAG AA** for the ubiquitous 9–10.5px mono labels (axis ticks, range-ladder lo/hi, calendar day numbers, exec timestamps, schema IDs). Amber `PAPER` badge also fails in light.
+- No `prefers-reduced-motion` guard on the kill-switch pulse; touch targets < 44px (theme toggle 34, calendar nav 28); tabular data rendered as div-grids (no table semantics). *(agents 5, 9)*
+
+### 🟠 High — Frontend correctness / styles / hooks / infra / security (selected)
+- **QR-H-styles** `hsl(var(--muted-foreground))` is used in **plain CSS** (`index.css:132` `.dhan-cal` nav) and a recharts inline style (`PnlAreaChart.jsx:56` tooltip) — the token is `--muted-fg` (only `--color-muted-foreground` exists). Invalid → falls back to an inherited (wrong) colour. *(agent 6)*
+- **QR-H-kill** `KillSwitch.jsx`: a non-ok HTTP response **closes the dialog silently** (no error surfaced), and it sends `X-Dashboard-Token` from a `localStorage('dashboard_token')` key **nothing ever writes** → if `DASHBOARD_TOKEN` is set server-side, kill POSTs go unauthenticated → 401 → silent failure of the safety control. *(agents 4, 16)*
+- **QR-H-poller** `usePoller` has **no `AbortController`** → 16 in-flight fetches `setState` after unmount on every navigation/HMR; the error branch keeps stale data with no "stale" signal. *(agent 7)*
+- **QR-H-ci** The **dashboard is never built or linted in CI** → Vite/React regressions are silent until the agent deploy. `scripts/build_clean_db.py` uses a **`LATERAL … ORDER BY time LIMIT 1` on `bars`** (the forbidden pattern) → can hang/OOM the live DB if `--identify` runs. *(agents 8, 15)*
+- **QR-H-sec** `apps/api.py` CORS is wildcard `*` on **all** routes incl. `/api/killswitch`, and `DASHBOARD_TOKEN` **fails open** by default → a cross-origin page can POST the kill-switch when the token is unset. HMAC `/postback` path is **untested** (`_FakeRequest` has no `read()`). `/postback` is also in the **dev proxy** (`vite.config.js`), relaying to prod when `DHAN_API_TARGET` points at the agent. *(agents 8, 16)*
+
+### 🟡 Medium / Low (themes — see per-agent detail)
+- **Deps/perf:** `lucide-react` (^1.20, ~39 MB) is a **prod dep with zero imports** — remove. All 15 deps use `^` ranges (vs the "pinned" policy). Bundle is **~601 KB single chunk, no code-splitting** (split recharts + react-day-picker). Google-Fonts CDN call = egress/IP-leak for a private dashboard (self-host Geist).
+- **Engine/core:** weekly-P&L DB-fallback understates the loss meter after a DB blip; paper executor can swallow a fill on a DB error; Kronos "confidence" measures temporal spread, not inter-sample uncertainty (samples are averaged before `pred_df`); `_evaluate()` does work after halting.
+- **Infra:** `ssh_allowed_cidr` defaults `0.0.0.0/0` (no validation block); `dhan-alert@.service` runs `python` (no alias on 22.04) → silent alert death; `aws_eip` has no `prevent_destroy` (Dhan 7-day re-whitelist risk); `alembic.ini` ships a plaintext `trader123` default.
+- **Dead/cosmetic:** `@keyframes spin` unused; `--radius`/`--color-muted` dead tokens; 14 `.dhan-cal` selectors + a `PortfolioTab` class still use the pre-rebrand `dhan` name; index-as-`key` in feeds; `/api/system/health` polled every 30 s but never rendered.
+
+### Opus UI/UX rendered testing (my own pass, live data, dark+light, desktop+mobile)
+- **Confirmed visually broken metrics:** Max Drawdown renders **`1123.0%`** and Sharpe **`11.61`** — both look like bugs to any user and undercut trust (QR-H6/H7).
+- **Truncation:** the `SHARPE (INTRADAY)` KPI label truncates to `SHARPE (INTRA…` at narrow widths (StatCard `truncate` + tight column).
+- **Rebrand:** "Tessera" wordmark, title, and theme all render correctly; calendar nav arrows **do render** (mis-coloured via the `--muted-fg` bug, not invisible — agent claim of "invisible" downgraded).
+- **Responsive:** mobile (390px) correctly drops to 2-col KPIs + single-column cockpit/grids; **touch targets are visibly small** (confirms the a11y finding).
+- **Consistency:** Signals shows gate "shadow/live" and Win-Rate "n/a" while Portfolio shows real profit-factor — the contract bugs produce **inconsistent numbers across tabs**, which a user *will* notice.
+
+### Test gaps (highest-value additions)
+1. **API contract test** (`aiohttp.TestClient` asserting the `/api/snapshot`, `/api/trades`, `/api/rate-limits` response shapes) — would have caught **all five** contract mismatches above.
+2. **Any** dashboard tests (currently zero) — start with `KillSwitch` (sends token, surfaces failure) and the Portfolio metric maths.
+3. HMAC `/postback` valid/invalid/missing-signature tests (give `_FakeRequest` a `read()`).
+4. Coverage for the new handlers (`system_health`, `backfill_status`, `watchlist_refresh` auth, `rate_limits`, `kronos_screener`).
+
+### Recommended remediation order
+1. **Contract mismatches** (5 one-line fixes in the dashboard or heartbeat) — biggest visible-correctness win.
+2. **Financial metrics** (drawdown sort + cap, Sharpe guard) — visible credibility.
+3. **Kill-switch safety** (QR-C1 path convergence + KillSwitch error surfacing + token) — before live.
+4. **QR-C2 / QR-C3 / QR-C4** engine fixes — before live.
+5. **CI: build + lint the dashboard**; add the contract test.
+6. **A11y**: focus trap on the dialog, `--faint` contrast bump, reduced-motion, touch targets.
+7. Cleanup: remove `lucide-react`, code-split, fix `--muted-fg`, dead code.
+
+*Re-review by 16 parallel agents + Opus synthesis/UX testing, 2026-06-16. Full per-domain detail captured above; `file:line` refs verified at audit time. **Status: documented, not yet remediated.***
