@@ -11,10 +11,17 @@ Cleaning filters:
   2. Liquid: avg daily volume > 50K over last 6 months of data
   3. History: ≥ 2 years of 1m bars (≥ 480 trading days)
   4. Drop pre-market auction rows (before 09:15 IST)
-  5. Corporate action detection: instruments with any overnight close→open
-     gap > 15% are excluded from the training universe entirely
+  5. Corporate action handling: a session whose first-1m open gapped > 15%
+     vs the prior trading day's last-1m close is dropped (split/bonus/large
+     overnight event) — but the INSTRUMENT is kept. The strategy is intraday,
+     so overnight gaps don't contaminate intraday P&L; excluding whole names
+     would bias the universe toward stable, low-event stocks.
   6. Circuit breaker detection: drop individual sessions where total
      session volume < 1 000 (zero/near-zero volume day)
+
+  Known limitation — SURVIVORSHIP BIAS: the universe comes from the current
+  `instruments` scrip master, so delisted names are absent → M3 backtest
+  results are an optimistic upper bound (logged loudly at run time).
 
 Run on the agent EC2 (has AWS instance-profile creds for S3):
   python build_clean_db.py --identify          # dry-run: print liquid universe
@@ -30,7 +37,6 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from pathlib import Path
 
 import boto3
 import pandas as pd
@@ -73,7 +79,7 @@ S3_PREFIX  = "kronos/training-data"
 
 MIN_AVG_DAILY_VOLUME  = 50_000
 MIN_TRADING_DAYS      = 480       # ~2 years
-CORP_ACTION_THRESHOLD = 0.15      # 15% overnight gap → exclude instrument
+CORP_ACTION_THRESHOLD = 0.15      # 15% overnight gap → drop that session (not the instrument)
 CIRCUIT_BREAKER_VOL   = 1_000     # session volume below this → drop session
 IST_OFFSET_HOURS      = 5.5       # UTC+5:30
 MARKET_OPEN_IST       = "09:15"   # drop bars strictly before this (auction)
@@ -161,14 +167,20 @@ def ensure_clean_db():
 
 # ── Stage 1: Identify liquid universe ─────────────────────────────────────────
 
+# NOTE on corp actions: we do NOT exclude an instrument just because it once had
+# a large overnight gap. The strategy is INTRADAY (resets every session, never
+# holds overnight), so a split/bonus gap does not contaminate intraday P&L —
+# within a session all bars share the same price scale. Excluding whole names
+# would (a) shrink the universe and (b) bias it toward stable, low-event stocks
+# — the opposite of what an ORB breakout strategy trades. Instead, the transform
+# stage drops only the *specific gap-day sessions* per security (see transform()).
 IDENTIFY_SQL = """
 WITH daily_stats AS (
     -- Aggregate 1m bars into daily volume per security
     SELECT
         security_id,
         time::date AS day,
-        SUM(volume)  AS day_volume,
-        MIN(close)   AS day_close
+        SUM(volume)  AS day_volume
     FROM bars
     WHERE timeframe = '1m'
       AND security_id IN (
@@ -185,43 +197,6 @@ summary AS (
         AVG(day_volume)::BIGINT                       AS avg_daily_volume
     FROM daily_stats
     GROUP BY security_id
-),
-corp_action_flags AS (
-    -- Detect overnight gaps > 15% (open vs prev-day close).
-    --
-    -- Safe on a 300M-row hypertable: we first materialize one row per
-    -- (security_id, day) using TimescaleDB's chunk-aware last() aggregate
-    -- bounded by the date range already found in `summary` (no full-table
-    -- ORDER BY time).  The outer LAG() then walks only that small daily
-    -- summary — O(trading_days × N_securities), not O(all bars).
-    SELECT DISTINCT security_id
-    FROM (
-        SELECT
-            security_id,
-            day,
-            day_open,
-            LAG(day_close) OVER (
-                PARTITION BY security_id ORDER BY day
-            ) AS prev_close
-        FROM (
-            -- One row per (security_id, calendar-day): first open, last close.
-            -- Bounded to the date range discovered in `summary` so the planner
-            -- can prune chunks; last()/first() never sort the entire hypertable.
-            SELECT
-                b.security_id,
-                DATE(b.time AT TIME ZONE 'Asia/Kolkata') AS day,
-                first(b.open,  b.time)                   AS day_open,
-                last(b.close,  b.time)                   AS day_close
-            FROM bars b
-            JOIN summary s USING (security_id)
-            WHERE b.timeframe = '1d'
-              AND b.time >= s.first_day::timestamptz
-              AND b.time <  s.last_day::timestamptz + INTERVAL '2 days'
-            GROUP BY b.security_id, DATE(b.time AT TIME ZONE 'Asia/Kolkata')
-        ) daily
-    ) windowed
-    WHERE prev_close > 0
-      AND ABS(day_open - prev_close) / prev_close > %(corp_thresh)s
 )
 SELECT
     s.security_id,
@@ -235,13 +210,19 @@ FROM summary s
 JOIN instruments i USING (security_id)
 WHERE s.trading_days     >= %(min_days)s
   AND s.avg_daily_volume >= %(min_vol)s
-  AND s.security_id NOT IN (SELECT security_id FROM corp_action_flags)
 ORDER BY s.avg_daily_volume DESC
 """
 
 
 def identify_universe(dry_run=True):
     log.info("Stage 1: identifying liquid universe from raw DB…")
+    log.warning(
+        "SURVIVORSHIP BIAS: the universe is drawn from the CURRENT `instruments` "
+        "scrip master (NSE_EQ), so any name delisted/suspended during the window "
+        "is absent. Backtests on this universe see only survivors and OVERSTATE "
+        "returns — treat M3 results as an optimistic upper bound. A point-in-time "
+        "universe needs delisted-instrument history (not available from the feed)."
+    )
     conn = raw_conn()
     cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     # Guard against long-running queries holding locks or OOM-ing the DB while
@@ -252,7 +233,6 @@ def identify_universe(dry_run=True):
     cur.execute("SET statement_timeout = '600000'")   # 10 minutes
     cur.execute("SET lock_timeout      = '5000'")     # 5 seconds
     cur.execute(IDENTIFY_SQL, {
-        "corp_thresh": CORP_ACTION_THRESHOLD,
         "min_days":    MIN_TRADING_DAYS,
         "min_vol":     MIN_AVG_DAILY_VOLUME,
     })
@@ -388,6 +368,7 @@ def transform(universe: list[str], batch_size: int = 50):
               AND timeframe = '1m'
               AND (time AT TIME ZONE 'Asia/Kolkata')::time >= '09:15'
               AND (time AT TIME ZONE 'Asia/Kolkata')::time <= '15:30'
+              -- Drop circuit-breaker sessions: session volume below threshold
               AND DATE(time AT TIME ZONE 'Asia/Kolkata') NOT IN (
                   SELECT DATE(time AT TIME ZONE 'Asia/Kolkata')
                   FROM bars
@@ -395,8 +376,33 @@ def transform(universe: list[str], batch_size: int = 50):
                   GROUP BY DATE(time AT TIME ZONE 'Asia/Kolkata')
                   HAVING SUM(volume) < %s
               )
+              -- Drop corp-action gap sessions: this day's first-1m open gapped
+              -- > threshold vs the prior trading day's last-1m close (split/bonus/
+              -- large overnight event). Computed from 1m so it never depends on
+              -- 1d bars; per-security so it stays on the security_id index.
+              AND DATE(time AT TIME ZONE 'Asia/Kolkata') NOT IN (
+                  SELECT day FROM (
+                      SELECT
+                          day,
+                          day_open,
+                          LAG(day_close) OVER (ORDER BY day) AS prev_close
+                      FROM (
+                          SELECT
+                              DATE(time AT TIME ZONE 'Asia/Kolkata') AS day,
+                              first(open,  time) AS day_open,
+                              last(close,  time) AS day_close
+                          FROM bars
+                          WHERE security_id = %s AND timeframe = '1m'
+                            AND (time AT TIME ZONE 'Asia/Kolkata')::time >= '09:15'
+                            AND (time AT TIME ZONE 'Asia/Kolkata')::time <= '15:30'
+                          GROUP BY DATE(time AT TIME ZONE 'Asia/Kolkata')
+                      ) d
+                  ) g
+                  WHERE prev_close > 0
+                    AND ABS(day_open - prev_close) / prev_close > %s
+              )
             ORDER BY time
-        """, (sid, sid, CIRCUIT_BREAKER_VOL))
+        """, (sid, sid, CIRCUIT_BREAKER_VOL, sid, CORP_ACTION_THRESHOLD))
 
         rows = raw_cur2.fetchall()
         raw_cur2.close()
