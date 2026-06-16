@@ -99,6 +99,10 @@ class Config(BaseSettings):
 
     # ── Web / dashboard ─────────────────────────────────────────────────────
     webhook_port: int = 8765
+    # Shared secret for mutating POST endpoints (/api/killswitch,
+    # /api/watchlist/refresh).  Empty = unprotected (fail-open so a
+    # misconfigured secret never locks the operator out of the kill-switch).
+    dashboard_token: str = ""
 
     # ── Telegram alerts (plain bot API — free, no LLM) ──────────────────────
     telegram_bot_token: str = ""

@@ -15,6 +15,7 @@ until M6, so nothing dangerous is one HTTP request away.
 This process can crash, hang, or redeploy without touching order flow.
 """
 import asyncio
+import hmac
 import json
 import logging
 import sys
@@ -66,11 +67,62 @@ def read_heartbeat() -> tuple[dict, bool]:
 
 @web.middleware
 async def cors_middleware(request, handler):
+    # OPTIONS preflight must return 200 before the real handler runs.
+    if request.method == "OPTIONS":
+        return web.Response(status=200, headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, X-Dashboard-Token, Authorization",
+        })
     resp = await handler(request)
     resp.headers["Access-Control-Allow-Origin"] = "*"
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Dashboard-Token, Authorization"
     return resp
+
+
+# ── Auth guard for mutating POST endpoints ────────────────────────────────────
+
+_unprotected_warned = False  # log the warning once per process lifetime
+
+
+def _check_auth(request: web.Request):
+    """Return a 401 Response if the request fails the shared-secret check,
+    or None if the request is allowed.
+
+    Behaviour:
+    - Token unset (empty string): ALLOW but log a one-time WARNING so the
+      operator knows the control surface is open.  This preserves current
+      behaviour so a misconfigured secret never locks anyone out of the
+      kill-switch.
+    - Token set: require either
+        X-Dashboard-Token: <token>
+      or
+        Authorization: Bearer <token>
+      Any mismatch → 401.
+    """
+    global _unprotected_warned
+    token = cfg.dashboard_token
+    if not token:
+        if not _unprotected_warned:
+            logger.warning(
+                "Control endpoints are UNPROTECTED — set DASHBOARD_TOKEN in .env"
+            )
+            _unprotected_warned = True
+        return None  # fail-open
+
+    # Check X-Dashboard-Token header first, then Authorization: Bearer …
+    provided = request.headers.get("X-Dashboard-Token", "")
+    if not provided:
+        auth_hdr = request.headers.get("Authorization", "")
+        if auth_hdr.startswith("Bearer "):
+            provided = auth_hdr[len("Bearer "):]
+
+    if not hmac.compare_digest(provided, token):
+        return web.json_response(
+            {"ok": False, "error": "unauthorized"}, status=401
+        )
+    return None
 
 
 # ── Heartbeat-backed handlers ─────────────────────────────────────────────────
@@ -291,6 +343,8 @@ async def trading_mode_handler(request: web.Request) -> web.Response:
 
 
 async def killswitch_handler(request: web.Request) -> web.Response:
+    if (denial := _check_auth(request)) is not None:
+        return denial
     RUN_DIR.mkdir(exist_ok=True)
     KILLSWITCH_FILE.write_text(f"dashboard @ {datetime.now(timezone.utc).isoformat()}")
     logger.critical("⛔ KILL SWITCH requested via dashboard — flag written for trader")
@@ -686,6 +740,8 @@ async def watchlist_handler(request: web.Request) -> web.Response:
 
 
 async def watchlist_refresh_handler(request: web.Request) -> web.Response:
+    if (denial := _check_auth(request)) is not None:
+        return denial
     wl = request.app.get("watchlist")
     if not wl:
         return web.json_response({"ok": False, "error": "Watchlist not initialised"}, status=503)
