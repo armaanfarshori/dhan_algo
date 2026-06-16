@@ -7,6 +7,7 @@ Handles auth, rate limiting, retries, and response normalisation.
 import asyncio
 import logging
 import time
+import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from collections import deque
@@ -16,8 +17,28 @@ import aiohttp
 logger = logging.getLogger("dhan.client")
 
 
+class RateLimitExceeded(Exception):
+    """Raised when a long-horizon rate limit (hour/day) is exhausted.
+
+    Sleeping for hours inside a trading process is unacceptable — the caller
+    must surface this loudly instead of silently blocking execution.
+    """
+    def __init__(self, category: str, window: str):
+        self.category = category
+        self.window = window
+        super().__init__(f"Rate limit exceeded for category={category!r} window={window!r}")
+
+
 class RateLimiter:
-    """Token-bucket rate limiter respecting DhanHQ API limits."""
+    """Sliding-window rate limiter respecting DhanHQ API limits.
+
+    Short windows (per_sec, per_min): throttle by sleeping until the oldest
+    entry ages out, then re-check. Safe because the wait is brief.
+
+    Long windows (per_hour, per_day): raise RateLimitExceeded immediately.
+    A trading process must never block for hours; exhausting the daily quota
+    is a hard operational error that must surface loudly.
+    """
 
     LIMITS = {
         "orders":        {"per_sec": 10, "per_min": 250, "per_hour": 1000, "per_day": 7000},
@@ -26,23 +47,63 @@ class RateLimiter:
         "non_trading":   {"per_sec": 20, "per_min": None, "per_hour": None, "per_day": None},
     }
 
+    # (window_attr, span_seconds, limit_key, is_long)
+    _WINDOWS = [
+        ("_second_window", 1.0,     "per_sec",  False),
+        ("_min_window",    60.0,    "per_min",  False),
+        ("_hour_window",   3600.0,  "per_hour", True),
+        ("_day_window",    86400.0, "per_day",  True),
+    ]
+
     def __init__(self, category: str = "orders"):
         self.category = category
         cfg = self.LIMITS[category]
-        self.per_sec = cfg["per_sec"]
+        self.per_sec  = cfg["per_sec"]
+        self.per_min  = cfg["per_min"]
+        self.per_hour = cfg["per_hour"]
+        self.per_day  = cfg["per_day"]
+        # Always create all four window deques, even when the limit is None.
         self._second_window: deque = deque()
+        self._min_window:    deque = deque()
+        self._hour_window:   deque = deque()
+        self._day_window:    deque = deque()
 
     async def acquire(self):
+        for attr, span, limit_key, is_long in self._WINDOWS:
+            limit = getattr(self, limit_key)
+            if limit is None:
+                continue  # this window is unconstrained for the category
+
+            window: deque = getattr(self, attr)
+
+            while True:
+                now = time.monotonic()
+                # Prune entries older than the window span
+                while window and now - window[0] > span:
+                    window.popleft()
+
+                if len(window) < limit:
+                    break  # capacity available — proceed
+
+                if is_long:
+                    # Never sleep for hours inside a trading process
+                    raise RateLimitExceeded(self.category, limit_key)
+                else:
+                    # Sleep until the oldest entry ages out, then re-check
+                    sleep_for = span - (now - window[0])
+                    if sleep_for > 0:
+                        logger.debug(
+                            "Rate limit hit (%s/%s), sleeping %.3fs",
+                            self.category, limit_key, sleep_for,
+                        )
+                        await asyncio.sleep(sleep_for)
+                    # Re-check after sleep (loop continues)
+
+        # Record the call timestamp in every tracked (non-None) window
         now = time.monotonic()
-        # Clear entries older than 1 second
-        while self._second_window and now - self._second_window[0] > 1.0:
-            self._second_window.popleft()
-        if len(self._second_window) >= self.per_sec:
-            sleep_for = 1.0 - (now - self._second_window[0])
-            if sleep_for > 0:
-                logger.debug(f"Rate limit hit ({self.category}), sleeping {sleep_for:.3f}s")
-                await asyncio.sleep(sleep_for)
-        self._second_window.append(time.monotonic())
+        for attr, _span, limit_key, _is_long in self._WINDOWS:
+            if getattr(self, limit_key) is not None:
+                getattr(self, attr).append(now)
 
 
 class DhanAPIError(Exception):
@@ -131,8 +192,20 @@ class DhanClient:
         rate_category: str = "orders",
         payload: Optional[Dict] = None,
         params: Optional[Dict] = None,
+        idempotent: bool = True,
     ) -> Any:
-        """Core request method with retry logic and rate limiting."""
+        """Core request method with retry logic and rate limiting.
+
+        idempotent=True (default): retries on transient errors (429/5xx,
+            aiohttp.ClientError) are safe because the call is read-only or
+            the upstream already de-duplicates via correlation ID.
+
+        idempotent=False: at most ONE network attempt is made. On a retriable
+            HTTP status (429/5xx) or aiohttp.ClientError the error is raised
+            immediately — the caller is responsible for reconciliation. Auth
+            token refreshes (DH-901 etc.) may still happen once before the
+            single attempt, since they do not re-send the request body.
+        """
         if self._session is None:
             raise RuntimeError("Use DhanClient as async context manager.")
 
@@ -153,7 +226,9 @@ class DhanClient:
                     # DhanHQ error envelope
                     if isinstance(body, dict) and "errorCode" in body:
                         error_code = body.get("errorCode", "")
-                        # Auto-refresh token on auth errors and retry once
+                        # Auto-refresh token on auth errors and retry once.
+                        # This is safe even for non-idempotent calls because
+                        # we have not re-sent the original payload yet.
                         if error_code in AUTH_ERROR_CODES and self._auth_manager:
                             logger.warning(f"Auth error {error_code} — refreshing token and retrying")
                             new_token = await self._auth_manager.handle_auth_error()
@@ -166,19 +241,24 @@ class DhanClient:
                         )
 
                     # Retriable HTTP errors
-                    if resp.status in (429, 500, 502, 503, 504) and attempt < self.max_retries:
-                        wait = 2 ** attempt
-                        logger.warning(f"HTTP {resp.status} on {endpoint}, retry {attempt} in {wait}s")
-                        await asyncio.sleep(wait)
-                        continue
+                    if resp.status in (429, 500, 502, 503, 504):
+                        if idempotent and attempt < self.max_retries:
+                            wait = 2 ** attempt
+                            logger.warning(f"HTTP {resp.status} on {endpoint}, retry {attempt} in {wait}s")
+                            await asyncio.sleep(wait)
+                            continue
+                        else:
+                            # Non-idempotent: raise immediately so the caller can reconcile.
+                            resp.raise_for_status()
 
                     resp.raise_for_status()
 
             except aiohttp.ClientError as e:
-                if attempt >= self.max_retries:
+                if idempotent and attempt < self.max_retries:
+                    await asyncio.sleep(2 ** attempt)
+                    logger.warning(f"Network error {e}, retry {attempt}")
+                else:
                     raise
-                await asyncio.sleep(2 ** attempt)
-                logger.warning(f"Network error {e}, retry {attempt}")
 
         raise RuntimeError(f"All {self.max_retries} retries exhausted for {endpoint}")
 
@@ -203,7 +283,17 @@ class DhanClient:
         correlation_id: str = "",
         slice_order: bool = False,
     ) -> Dict:
-        """Place a new order (or sliced order for F&O over freeze limit)."""
+        """Place a new order (or sliced order for F&O over freeze limit).
+
+        Idempotency: if correlation_id is not supplied, one is auto-generated
+        (20-char hex, within Dhan's correlationId length limit). The POST is
+        sent with idempotent=False — on any transient error we NEVER blindly
+        retry; instead we query get_order_by_correlation_id to see whether the
+        order actually landed at the broker before re-raising.
+        """
+        if not correlation_id:
+            correlation_id = uuid.uuid4().hex[:20]
+
         payload = {
             "dhanClientId": self.client_id,
             "correlationId": correlation_id,
@@ -221,9 +311,33 @@ class DhanClient:
             "amoTime": amo_time,
         }
         endpoint = "orders/slicing" if slice_order else "orders"
-        result = await self._request("POST", endpoint, "orders", payload)
-        logger.info(f"Order placed: {result}")
-        return result
+        try:
+            result = await self._request("POST", endpoint, "orders", payload, idempotent=False)
+            logger.info(f"Order placed: {result}")
+            return result
+        except (aiohttp.ClientError, DhanAPIError, asyncio.TimeoutError, RuntimeError) as exc:
+            # The order MAY have already reached the broker — never blind-retry.
+            # Reconcile via correlation ID before deciding what to do.
+            logger.warning(
+                "place_order: transient error (%s) — reconciling via correlation_id=%s",
+                exc, correlation_id,
+            )
+            try:
+                existing = await self.get_order_by_correlation_id(correlation_id)
+            except Exception:
+                existing = None
+
+            # Accept a reconciled result if it looks like a real placed order
+            if isinstance(existing, dict):
+                if existing.get("orderId") or existing.get("data"):
+                    logger.warning(
+                        "place_order: idempotent recovery — order already at broker "
+                        "(correlation_id=%s, result=%s)", correlation_id, existing,
+                    )
+                    return existing
+
+            # Confirmed not placed (or unknown) — re-raise for the caller / risk layer
+            raise
 
     async def modify_order(
         self,
