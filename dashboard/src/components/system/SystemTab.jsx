@@ -531,7 +531,7 @@ export default function SystemTab({ data }) {
       <KpiRow data={data} />
 
       {/* Two-column layout: main (1fr) + sidebar (372px) */}
-      <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-[1fr_372px] items-start">
+      <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-[minmax(0,1fr)_372px] items-start [&>*]:min-w-0">
 
         {/* LEFT — Services, Rate-limit, Logs */}
         <div className="flex flex-col gap-3.5">

@@ -623,7 +623,7 @@ export default function SignalsTab({ data }) {
       </section>
 
       {/* ── Two-column body ── */}
-      <div className="grid grid-cols-1 items-start gap-[14px] lg:grid-cols-[1fr_372px]">
+      <div className="grid grid-cols-1 items-start gap-[14px] lg:grid-cols-[minmax(0,1fr)_372px] [&>*]:min-w-0">
 
         {/* LEFT: sparkline + cockpit */}
         <div className="flex flex-col gap-[14px]">

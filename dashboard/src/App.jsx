@@ -51,7 +51,7 @@ export default function App() {
       <div className="min-h-screen bg-background text-foreground">
         <TopBar data={data} />
         <OfflineBanner data={data} />
-        <div className="mx-auto max-w-[1320px] px-[22px]">
+        <div className="mx-auto max-w-[1320px] overflow-x-clip px-[22px]">
           <Tabs items={TAB_ITEMS} value={tab} onValueChange={setTab} />
           <ErrorBoundary>
             {tab === 'signals'   && <SignalsTab   data={data} />}

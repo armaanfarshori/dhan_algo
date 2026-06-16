@@ -594,7 +594,7 @@ export default function PortfolioTab({ data }) {
       <KpiRow tradelog={data.tradelog} risk={data.risk} />
 
       {/* Two-column body */}
-      <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-[1fr_372px]">
+      <div className="grid grid-cols-1 items-start gap-3.5 lg:grid-cols-[minmax(0,1fr)_372px] [&>*]:min-w-0">
         {/* Left: Equity Curve + Calendar */}
         <div className="flex flex-col gap-3.5">
           <EquityCurve equity={data.equity} tradelog={data.tradelog} />
