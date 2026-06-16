@@ -53,7 +53,7 @@ docker run -d \
   -e "POSTGRES_PASSWORD=$DB_PASSWORD" \
   -v /data/timescaledb/pgdata:/var/lib/postgresql/data \
   -p 5432:5432 \
-  timescale/timescaledb:latest-pg16
+  timescale/timescaledb:2.17.2-pg16
 
 for i in $(seq 1 30); do
   docker exec timescaledb pg_isready -U trader -d dhan_trading && break || sleep 5

@@ -87,9 +87,23 @@ done
 mkdir -p /var/log/dhan
 chown ubuntu:ubuntu /var/log/dhan
 
+# ── Log rotation (daily, 14 days, compressed; copytruncate safe for open FDs) ──
+cat > /etc/logrotate.d/dhan-trading << 'LOGROTATE_EOF'
+/var/log/dhan/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+LOGROTATE_EOF
+
 # ── systemd services (copy canonical units from repo) ─────────────────────────
-cp "$APP_DIR/infra/systemd/dhan-trader.service" /etc/systemd/system/dhan-trader.service
-cp "$APP_DIR/infra/systemd/dhan-api.service"    /etc/systemd/system/dhan-api.service
+cp "$APP_DIR/infra/systemd/dhan-trader.service"  /etc/systemd/system/dhan-trader.service
+cp "$APP_DIR/infra/systemd/dhan-api.service"     /etc/systemd/system/dhan-api.service
+cp "$APP_DIR/infra/systemd/dhan-alert@.service"  /etc/systemd/system/dhan-alert@.service
 
 systemctl daemon-reload
 systemctl enable --now dhan-trader dhan-api
