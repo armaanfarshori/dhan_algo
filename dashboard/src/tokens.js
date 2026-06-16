@@ -24,3 +24,4 @@ export function fmtTime(iso) {
   if (!iso) return '—'
   return new Date(iso).toLocaleTimeString('en-IN', {hour12:false, timeZone:'Asia/Kolkata'})
 }
+export const istDateKey = d => new Date(d).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })

@@ -6,10 +6,12 @@ Use approximate_row_count() / hypertable_size() / chunk-catalog ranges.
 """
 import json
 import logging
+from zoneinfo import ZoneInfo
 
 from aiohttp import web
 
 logger = logging.getLogger("dhan.api")
+_IST = ZoneInfo("Asia/Kolkata")   # equity-curve x-axis labels render in IST
 
 
 async def equity_handler(_r: web.Request) -> web.Response:
@@ -34,7 +36,7 @@ async def equity_handler(_r: web.Request) -> web.Response:
                 GROUP BY 1 ORDER BY 1
             """)).fetchall()
         return {"ok": True, "intraday": [
-            {"t": str(r[0])[11:16],
+            {"t": r[0].astimezone(_IST).strftime("%H:%M"),  # IST label, not UTC
              "pnl": round(float(r[1] or 0) + float(r[2] or 0), 2),
              "equity": round(float(r[3] or 0), 2)}
             for r in rows]}

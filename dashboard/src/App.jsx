@@ -1,6 +1,6 @@
 import { useState, useEffect, Component } from 'react'
 import { useDashboardData } from './hooks/useDashboardData'
-import { T, INR, INR0, colorPnl, fmtTime, fmtUptime } from './tokens'
+import { T, INR, INR0, colorPnl, fmtTime, fmtUptime, istDateKey } from './tokens'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
 import FloatingKillSwitch from './components/cockpit/FloatingKillSwitch'
 
@@ -1031,25 +1031,41 @@ function CalendarPnL({ tradelog }) {
   const trades = tradelog?.data?.trades ?? []
   const exits  = trades.filter(t => t.status === 'CLOSED' && t.pnl != null && t.exit_ts)
 
-  // Realized P&L by close date
+  // Realized P&L by close date — grouped in IST so exit_ts UTC timestamps
+  // map to the correct Indian trading day regardless of browser timezone.
   const byDate = {}
   exits.forEach(t => {
-    const d = t.exit_ts?.slice(0, 10)
-    if (d) byDate[d] = (byDate[d] ?? 0) + (t.pnl ?? 0)
+    if (t.exit_ts) {
+      const d = istDateKey(t.exit_ts)
+      byDate[d] = (byDate[d] ?? 0) + (t.pnl ?? 0)
+    }
   })
   const maxAbs = Math.max(...Object.values(byDate).map(Math.abs), 1)
 
-  // Fixed 4-week grid ending this week (Mon-aligned) — renders the same
-  // shape whether there's one trading day of history or thirty.
-  const today = new Date()
-  const todayKey = today.toISOString().slice(0, 10)
-  const end = new Date(today)
-  end.setDate(end.getDate() + ((7 - ((end.getDay() + 6) % 7)) - 1))   // this week's Sunday
+  // Fixed 4-week grid ending this week's Sunday — all dates computed in IST.
+  const todayKey = istDateKey(new Date())
+  // Derive IST weekday (0=Mon … 6=Sun) from the key string to avoid
+  // browser-local Date.getDay() which reflects the viewer's timezone.
+  const keyWeekday = key => {
+    const [y, mo, dy] = key.split('-').map(Number)
+    // Use noon UTC on that IST calendar date to get a stable JS Date.
+    return new Date(Date.UTC(y, mo - 1, dy, 6, 30)).getDay() // 0=Sun,1=Mon…
+  }
+  // Advance todayKey to this week's Sunday (ISO: Mon=1 … Sun=0).
+  const todayWd = keyWeekday(todayKey)
+  // Days to add to reach Sunday: Sun=0 → +0, Mon=1 → +6, Tue=2 → +5, …
+  const daysToSun = todayWd === 0 ? 0 : 7 - todayWd
+  // Build the anchor (Sunday) key by arithmetic on the date parts.
+  const [ty, tmo, tdy] = todayKey.split('-').map(Number)
+  const anchorDate = new Date(Date.UTC(ty, tmo - 1, tdy + daysToSun))
+  const anchorKey = istDateKey(anchorDate)
+
+  // Generate 28 keys (Mon–Sun × 4 weeks) ending at anchorKey.
   const days = []
   for (let i = 27; i >= 0; i--) {
-    const d = new Date(end)
-    d.setDate(end.getDate() - i)
-    days.push(d)
+    const [ay, amo, ady] = anchorKey.split('-').map(Number)
+    const d = new Date(Date.UTC(ay, amo - 1, ady - i))
+    days.push(istDateKey(d))
   }
 
   return (
@@ -1068,11 +1084,13 @@ function CalendarPnL({ tradelog }) {
         ))}
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4 }}>
-        {days.map(d => {
-          const key = d.toISOString().slice(0, 10)
+        {days.map(key => {
           const pnl = byDate[key]
-          const weekend = d.getDay() === 0 || d.getDay() === 6
-          const future = d > today
+          // Derive day number and weekend from the IST key — never from browser-local Date.
+          const dayNum = Number(key.slice(8, 10))
+          const wd = keyWeekday(key) // 0=Sun, 6=Sat
+          const weekend = wd === 0 || wd === 6
+          const future = key > todayKey
           const intensity = pnl != null ? Math.abs(pnl) / maxAbs : 0
           const bg = pnl == null ? (weekend ? 'transparent' : T.bg3)
             : pnl > 0 ? `oklch(${0.3 + intensity * 0.3} 0.19 145)`
@@ -1088,7 +1106,7 @@ function CalendarPnL({ tradelog }) {
                 color: pnl != null ? 'rgba(255,255,255,0.8)' : future ? 'transparent' : T.ink3,
                 cursor: 'default',
               }}>
-              {d.getDate()}
+              {dayNum}
             </div>
           )
         })}
