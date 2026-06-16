@@ -111,6 +111,13 @@ class MasterTokenManager:
         self._token:  Optional[str]      = None
         self._expiry: Optional[datetime] = None
         self._callbacks: list[Callable]  = []
+        # Serializes concurrent DH-901 auth-error handling so that multiple
+        # in-flight requests racing on the same expired token only generate
+        # one new token instead of each spawning an independent network call.
+        # Initialized lazily on first use to avoid requiring an event loop at
+        # construction time (Python 3.9 asyncio.Lock() binds to the running
+        # loop at __init__, which may not exist yet outside a coroutine).
+        self._refresh_lock: Optional[asyncio.Lock] = None
 
     def on_token_refresh(self, cb: Callable):
         self._callbacks.append(cb)
@@ -210,7 +217,28 @@ class MasterTokenManager:
                     await self._generate()
 
     async def handle_auth_error(self) -> str:
-        """Called by DhanClient on DH-901/806 — force refresh."""
-        logger.warning("Auth error detected — forcing token refresh")
-        renewed = await self._renew()
-        return renewed or await self._generate()
+        """Called by DhanClient on DH-901/806 — force refresh.
+
+        Serialized via _refresh_lock so that concurrent DH-901 responses from
+        multiple in-flight requests only trigger one actual token generation.
+        Double-check pattern: if another caller already refreshed the token
+        while we waited for the lock, return the fresh cached token immediately
+        rather than generating a second new token.
+
+        The lock is created lazily here (inside a running event loop) to stay
+        compatible with Python 3.9, where asyncio.Lock() at __init__ time
+        requires an active event loop.
+        """
+        if self._refresh_lock is None:
+            self._refresh_lock = asyncio.Lock()
+
+        token_before_lock = self._token
+        async with self._refresh_lock:
+            # Double-check: another waiter may have already refreshed the token
+            if self._token and self._token != token_before_lock and self.is_valid():
+                logger.info("handle_auth_error: token already refreshed by concurrent caller")
+                return self._token
+
+            logger.warning("Auth error detected — forcing token refresh")
+            renewed = await self._renew()
+            return renewed or await self._generate()

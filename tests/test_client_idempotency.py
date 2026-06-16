@@ -3,15 +3,21 @@
 C1 (Critical): POST /orders is retried on network/5xx with no idempotency key
                (correlation_id empty) → a lost response after a successful
                placement double-places the order.
+               FIX: place_order auto-generates a correlation_id (client-side)
+               and uses idempotent=False in _request — on transient error it
+               reconciles via get_order_by_correlation_id before re-raising.
+
 H1 (High):     RateLimiter enforces only per_sec; per_min/hour/day are defined
                but never applied, so daily caps can be silently blown.
-M1 (Medium):   Concurrent auth-error handling is unserialized.
+               FIX: all four sliding windows are maintained; short windows
+               (per_sec, per_min) throttle by sleeping; long windows (per_hour,
+               per_day) raise RateLimitExceeded immediately.
 
-xfail(strict) marks the confirmed defects: the suite stays green today, and
-each test flips to a hard failure the moment the bug is fixed (a prompt to
-delete the xfail).
+M1 (Medium):   Concurrent auth-error handling is unserialized.
+               FIX: MasterTokenManager._refresh_lock serializes handle_auth_error.
 """
 import asyncio
+import time
 
 import aiohttp
 import pytest
@@ -58,38 +64,62 @@ def _client(script, monkeypatch):
 # ── H1: rate limiter only enforces per-second ──────────────────────────────────
 
 def test_rate_limiter_tracks_only_per_second():
-    """Characterization: the windowed (min/hour/day) limits exist as config but
-    the limiter keeps no window state for them — documents the H1 gap."""
+    """All four sliding windows (second/min/hour/day) now exist as state so
+    every applicable limit is enforced — H1 is fixed."""
     rl = RateLimiter("data")
     assert rl.per_sec == 5
     assert RateLimiter.LIMITS["data"]["per_day"] == 100_000
-    # Only a 1-second window is maintained; nothing tracks the day.
+    # All windows are created, even when the limit for that window is None.
     assert hasattr(rl, "_second_window")
-    assert not hasattr(rl, "_day_window")
+    assert hasattr(rl, "_day_window")
 
 
-@pytest.mark.xfail(strict=True, reason="H1: per_min/hour/day limits defined but unenforced")
 def test_rate_limiter_enforces_daily_cap():
-    rl = RateLimiter("data")
-    assert hasattr(rl, "_day_window"), "limiter should track the daily window"
+    """H1 fix: exhausting the per_day quota raises RateLimitExceeded immediately
+    (never sleeps for 24 hours) — deterministic, fast, no real timer needed."""
+    from core.client import RateLimitExceeded
+
+    rl = RateLimiter("orders")   # per_day = 7000
+    assert rl.per_day == 7000
+
+    # Pre-fill the day window to the limit so the next acquire() tips it over.
+    now = time.monotonic()
+    for _ in range(rl.per_day):
+        rl._day_window.append(now)
+
+    async def go():
+        # sec/min/hour windows stay EMPTY, so acquire() sails past them with no
+        # throttle/sleep and trips the long-horizon daily cap, which raises
+        # immediately. (Pre-filling per_min here would make acquire() really
+        # sleep up to 60s before reaching the day check.)
+        await rl.acquire()
+
+    with pytest.raises(RateLimitExceeded) as exc_info:
+        asyncio.run(go())
+
+    assert exc_info.value.category == "orders"
+    assert exc_info.value.window == "per_day"
 
 
 # ── C1: order placement must not blindly retry without idempotency ─────────────
 
 def test_order_payload_has_no_idempotency_key():
-    """Characterization: LiveExecutor places orders with an empty correlationId,
-    so a retried POST cannot be de-duplicated broker-side."""
+    """LiveExecutor.submit does not set correlation_id — the idempotency key is
+    now auto-generated client-side inside place_order, so callers remain clean.
+    This test verifies that LiveExecutor still does not set the key (it's the
+    client's responsibility, not the executor's)."""
     import inspect
     from engine.execution import LiveExecutor
     src = inspect.getsource(LiveExecutor.submit)
-    assert "correlation_id" not in src   # not set → empty default in place_order
+    assert "correlation_id" not in src   # key is generated inside place_order
 
 
-@pytest.mark.xfail(strict=True,
-                   reason="C1: POST /orders is retried on transient failure with no "
-                          "idempotency key → duplicate live order")
 def test_order_not_retried_without_idempotency(monkeypatch):
-    # First attempt: network blip (order may have reached the broker). Second: 200.
+    """C1 fix: on a transient network error place_order does NOT blindly retry
+    the POST. Instead it reconciles via get_order_by_correlation_id. When the
+    reconcile call returns a valid order dict, it is returned as the result.
+    Total POST count to /orders must be exactly 1 (no double-placement)."""
+    # Script: POST /orders → ClientError (blip), GET /orders/external/<id> → 200
     c = _client([aiohttp.ClientError(), _FakeResp(200, {"orderId": "X1"})], monkeypatch)
 
     async def go():
@@ -98,17 +128,17 @@ def test_order_not_retried_without_idempotency(monkeypatch):
             product_type="INTRADAY", order_type="MARKET",
             security_id="111", quantity=1)
 
-    asyncio.run(go())
-    # Desired: at most ONE POST to /orders for one logical order. Today: 2.
+    result = asyncio.run(go())
+    # Only one POST to /orders; the 200 was consumed by the reconcile GET.
     assert c._session.post_count("orders") == 1
+    assert result == {"orderId": "X1"}
 
 
 # ── M1: concurrent auth-error handling is unserialized ─────────────────────────
 
-@pytest.mark.xfail(strict=True,
-                   reason="M1: handle_auth_error has no lock — concurrent DH-901s "
-                          "race token generation and the .env rewrite")
 def test_token_refresh_is_serialized():
+    """M1 fix: MasterTokenManager has a _refresh_lock so concurrent DH-901
+    responses serialize token generation rather than racing."""
     from core.token_manager import MasterTokenManager
     mgr = MasterTokenManager()
     assert hasattr(mgr, "_refresh_lock"), "token refresh should be guarded by a lock"
