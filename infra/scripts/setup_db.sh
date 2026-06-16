@@ -74,10 +74,10 @@ DB_PASS=$(aws ssm get-parameter --region "$AWS_REGION" \
 # TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be present in /etc/dhan-env (or .env).
 _backup_notify_fail() {
   local msg="[dhan-trading] BACKUP FAILED on $(hostname) at $DATE — check /var/log/db_backup.log"
-  if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-      -d "chat_id=${TELEGRAM_CHAT_ID}" \
-      -d "text=${msg}" > /dev/null || true
+  if [ -n "$${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "$${TELEGRAM_CHAT_ID:-}" ]; then
+    curl -s -X POST "https://api.telegram.org/bot$${TELEGRAM_BOT_TOKEN}/sendMessage" \
+      -d "chat_id=$${TELEGRAM_CHAT_ID}" \
+      -d "text=$${msg}" > /dev/null || true
   else
     echo "WARNING: TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set — cannot send alert" >&2
   fi
