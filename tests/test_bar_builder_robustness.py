@@ -11,7 +11,6 @@ import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-import pytest
 
 from engine.bar_builder import BarBuilder
 
@@ -44,9 +43,6 @@ def test_cumulative_volume_delta_and_reset():
 
 # ── M4: unbounded pending on flush failure ──────────────────────────────────────
 
-@pytest.mark.xfail(strict=True,
-                   reason="M4: _pending re-queues without bound on sustained DB "
-                          "failure → unbounded memory growth")
 def test_pending_is_bounded_on_repeated_flush_failure(monkeypatch):
     import db as _db
     def _boom(*a, **k):

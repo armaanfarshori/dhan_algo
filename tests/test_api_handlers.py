@@ -15,7 +15,6 @@ avoid standing up a full app + event loop fixture.
 import asyncio
 import types
 
-import pytest
 
 import apps.api as api
 
@@ -61,9 +60,6 @@ def test_postback_acks(monkeypatch):
     assert resp.status == 200
 
 
-@pytest.mark.xfail(strict=True,
-                   reason="M6: postback is a no-op logger — it should reconcile the "
-                          "broker fill (and verify the source) rather than discard it")
 def test_postback_reconciles_fill(monkeypatch):
     recorded = []
     # A reconciling implementation would route the fill somewhere observable.

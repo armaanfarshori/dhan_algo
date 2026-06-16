@@ -236,8 +236,75 @@ from apps.routes.system import (  # noqa: E402
     logs_handler,
     backfill_status_handler,
     system_health_handler,
-    postback_handler,
 )
+
+
+# ── Postback webhook (Dhan order-update notifications) ────────────────────────
+# Kept here (not in routes/system.py) so that monkeypatching
+# apps.api._reconcile_postback in tests resolves at call time from this
+# module's namespace rather than from the routes sub-module.
+
+def _reconcile_postback(payload: dict) -> None:
+    """Persist the authoritative broker fill to the journal table.
+
+    The api process owns no trading state — positions live in the trader
+    process.  Full cross-process reconciliation (trader adopting the fill)
+    is the larger M6/M8 follow-up work.  This call captures the raw event
+    for audit and later reconcile without mutating any in-memory state.
+    """
+    try:
+        import json as _json
+        from db import get_session
+        from sqlalchemy import text
+        with get_session() as session:
+            session.execute(text(
+                "INSERT INTO journal (level, category, security_id, message, detail) "
+                "VALUES (:lvl, :cat, :sid, :msg, CAST(:detail AS JSONB))"),
+                {"lvl": "ORDER", "cat": "postback",
+                 "sid": str(payload.get("securityId") or "")[:20],
+                 "msg": f"postback {payload.get('orderStatus')} {payload.get('orderId')}",
+                 "detail": _json.dumps(payload)})
+    except Exception:
+        # A webhook must always ack — swallow persistence errors (non-fatal).
+        logger.exception("_reconcile_postback: failed to persist fill (non-fatal)")
+
+
+async def postback_handler(request: web.Request) -> web.Response:
+    """Dhan order-update webhook.
+
+    SEC-09: HMAC verification via DHAN_WEBHOOK_SECRET / X-Dhan-Signature.
+    M6: persists the fill to the journal table via _reconcile_postback so
+    the authoritative broker event is no longer silently discarded.
+    """
+    import hashlib
+    secret = cfg.dhan_webhook_secret
+    if secret:
+        raw_body = await request.read()
+        expected = hmac.new(
+            secret.encode(), raw_body, hashlib.sha256
+        ).hexdigest()
+        provided = request.headers.get("X-Dhan-Signature", "")
+        if not provided or not hmac.compare_digest(expected, provided):
+            logger.warning("Postback rejected — invalid or missing X-Dhan-Signature")
+            return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
+        try:
+            payload = json.loads(raw_body)
+        except Exception:
+            return web.json_response({"ok": False, "error": "bad json"}, status=400)
+    else:
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "bad json"}, status=400)
+    try:
+        logger.info("📬 Postback: %s order %s → %s",
+                    payload.get("tradingSymbol", "?"), payload.get("orderId"),
+                    payload.get("orderStatus"))
+        _reconcile_postback(payload)
+        return web.json_response({"ack": "ok"})
+    except Exception:
+        logger.exception("postback_handler failed")
+        return web.json_response({"ok": False, "error": "internal error"}, status=400)
 
 
 def build_app() -> web.Application:
