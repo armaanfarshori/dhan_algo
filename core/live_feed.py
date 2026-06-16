@@ -98,7 +98,8 @@ class LiveFeed:
     _RECONNECT_MAX     = 60     # backoff ceiling (s)
     _RECONNECT_429_MIN = 30     # on HTTP 429, never retry faster than this
 
-    def __init__(self, client_id: str, access_token: str, on_tick=None):
+    def __init__(self, client_id: str, access_token: str, on_tick=None,
+                 bar_builder=None):
         self._client_id    = client_id
         self._access_token = access_token
         self._subscriptions: list = []      # list of (exchange_code, security_id)
@@ -111,6 +112,18 @@ class LiveFeed:
         # Optional sync callback(sid, ltp, cum_volume) — BarBuilder hooks in
         # here to persist 1-minute bars to the DB. Must never raise/block.
         self._on_tick_cb = on_tick
+        # When a BarBuilder is wired in, get_ohlc_tick() reads intrabar H/L
+        # from it instead of the internal CandleBuilder — single source of
+        # truth so the strategy and Kronos/DB see identical intrabar candles.
+        # If bar_builder is not passed explicitly, auto-detect it from the
+        # on_tick bound-method's owner (duck-typed: any object with get_current).
+        # This lets existing call-sites (trader.py) work without modification.
+        if bar_builder is not None:
+            self._bar_builder = bar_builder
+        elif on_tick is not None and hasattr(getattr(on_tick, "__self__", None), "get_current"):
+            self._bar_builder = on_tick.__self__
+        else:
+            self._bar_builder = None
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -139,12 +152,28 @@ class LiveFeed:
         return float(t.get("LTP") or t.get("ltp") or 0)
 
     def get_ohlc_tick(self, security_id: str) -> dict:
-        """Returns current intrabar OHLC suitable for strategy on_tick()."""
+        """Returns current intrabar OHLC suitable for strategy on_tick().
+
+        When a BarBuilder is wired in (the normal live path), intrabar H/L/O/C
+        come from BarBuilder.get_current() — the same aggregator that writes
+        bars to the DB and feeds Kronos.  This is the single-source-of-truth
+        fix for DATA-04: the strategy and the DB now see identical intrabar
+        candles.
+
+        When no BarBuilder is wired (unit tests / lightweight callers), falls
+        back to the internal CandleBuilder so behaviour is unchanged.
+        """
         sid  = str(security_id)
         tick = self._ticks.get(sid, {})
         ltp  = float(tick.get("LTP") or tick.get("ltp") or 0)
-        cb   = self._candles.get(sid)
-        cur  = cb.current if cb else {}
+
+        # Prefer BarBuilder's in-progress bar (authoritative, feeds Kronos/DB)
+        if self._bar_builder is not None:
+            cur = self._bar_builder.get_current(sid) or {}
+        else:
+            cb  = self._candles.get(sid)
+            cur = cb.current if cb else {}
+
         return {
             "last_price": ltp,
             "ohlc": {

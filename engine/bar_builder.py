@@ -129,6 +129,23 @@ class BarBuilder:
             self._pending = batch + self._pending
             logger.warning("BarBuilder: flush failed (%s) — %d bars re-queued", exc, len(batch))
 
+    def get_current(self, security_id: str) -> Optional[dict]:
+        """Return the in-progress bar's intrabar OHLC, or None if no bar exists.
+
+        Used by LiveFeed.get_ohlc_tick() so the runner reads from the same
+        aggregator that feeds Kronos/DB (single source of truth for intrabar H/L).
+        """
+        bar = self._current.get(security_id)
+        if bar is None:
+            return None
+        return {
+            "open":   bar.open,
+            "high":   bar.high,
+            "low":    bar.low,
+            "close":  bar.close,
+            "volume": bar.volume,
+        }
+
     def stop(self):
         self._running = False
 

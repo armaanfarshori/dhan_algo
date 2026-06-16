@@ -43,3 +43,37 @@ def test_ignores_zero_price():
     bb = BarBuilder()
     bb.on_tick("999", 0.0, ts=ts(10, 0, 1))
     assert "999" not in bb._current
+
+
+# ── DATA-04: get_current() for single-source-of-truth intrabar OHLC ──────────
+
+def test_get_current_returns_intrabar_ohlc():
+    """get_current() must expose the in-progress bar to LiveFeed.get_ohlc_tick()."""
+    bb = BarBuilder()
+    bb.on_tick("999", 100.0, cum_volume=1000, ts=ts(10, 0, 1))
+    bb.on_tick("999", 103.0, cum_volume=1500, ts=ts(10, 0, 30))
+    bb.on_tick("999",  97.0, cum_volume=1800, ts=ts(10, 0, 59))
+    cur = bb.get_current("999")
+    assert cur is not None
+    assert cur["open"]  == 100.0
+    assert cur["high"]  == 103.0
+    assert cur["low"]   == 97.0
+    assert cur["close"] == 97.0
+    assert cur["volume"] == 800   # deltas: 0 + 500 + 300
+
+
+def test_get_current_unknown_sid_returns_none():
+    """get_current() on an unseen SID must return None, not raise."""
+    bb = BarBuilder()
+    assert bb.get_current("does_not_exist") is None
+
+
+def test_get_current_updates_after_minute_roll():
+    """After a minute boundary, get_current() reflects only the new bar."""
+    bb = BarBuilder()
+    bb.on_tick("999", 100.0, cum_volume=1000, ts=ts(10, 0, 50))
+    bb.on_tick("999", 101.0, cum_volume=1200, ts=ts(10, 1,  5))
+    cur = bb.get_current("999")
+    # New minute bar opened at 101; old bar was closed into _pending
+    assert cur["open"] == 101.0
+    assert cur["close"] == 101.0

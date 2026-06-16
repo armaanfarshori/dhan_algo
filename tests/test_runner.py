@@ -143,8 +143,12 @@ class FakeStrategy:
         self._decision = decision
         self.fills_notified: list = []
         self.flats_notified: int = 0
+        # Records (price, high, low) for each on_tick call so tests can verify
+        # the runner threads the correct intrabar H/L from the feed.
+        self.ticks_received: list = []
 
     def on_tick(self, now, price, high=None, low=None) -> Optional[Decision]:
+        self.ticks_received.append((price, high, low))
         return self._decision
 
     def notify_fill(self, side: str, qty: int, price: float):
@@ -414,3 +418,42 @@ def test_status_includes_entries_today():
     assert s["entries_today"] == 3
     assert s["last_price"] == 107.5
     assert "security_id" in s    # merged from strategy.status()
+
+
+# ─── 11. DATA-04: runner threads feed H/L into strategy ──────────────────────
+
+def test_runner_passes_intrabar_high_low_to_strategy():
+    """The runner must forward the intrabar high and low from the feed to
+    strategy.on_tick().  This is the DATA-04 behavioral contract: whatever
+    aggregator the feed exposes, the runner threads it to the strategy intact.
+    With a BarBuilder-backed feed the high/low are now single-source-of-truth.
+    """
+    runner, strategy, *_ = make_runner(ltp=105.0, high=108.5, low=103.2)
+
+    asyncio.run(runner._poll_once(ist(10, 0)))
+
+    assert len(strategy.ticks_received) == 1
+    price, high, low = strategy.ticks_received[0]
+    assert price == 105.0
+    assert high  == 108.5
+    assert low   == 103.2
+
+
+def test_runner_uses_ltp_as_fallback_when_ohlc_missing():
+    """FakeFeed returns ltp=90 but ohlc keys absent → runner must fall back to
+    ltp for both high and low (the guard in _get_price: ``or ltp``)."""
+
+    class FeedNoOHLC:
+        def get_ohlc_tick(self, sid: str) -> dict:
+            return {"last_price": 90.0, "ohlc": {}}   # empty ohlc
+
+    runner, strategy, *_ = make_runner()
+    runner._feed = FeedNoOHLC()
+
+    asyncio.run(runner._poll_once(ist(10, 0)))
+
+    assert len(strategy.ticks_received) == 1
+    price, high, low = strategy.ticks_received[0]
+    assert price == 90.0
+    assert high  == 90.0   # fell back to ltp
+    assert low   == 90.0   # fell back to ltp
