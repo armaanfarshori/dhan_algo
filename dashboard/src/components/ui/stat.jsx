@@ -5,7 +5,7 @@ import { Progress } from './progress'
 /** KPI stat card: label + optional right chip, big mono value, sub line, optional bar. */
 export function StatCard({ label, value, valueClassName, right, sub, bar, className }) {
   return (
-    <Card className={cn('relative flex flex-col gap-[9px] overflow-hidden px-[17px] py-4', className)}>
+    <Card className={cn('relative flex flex-col gap-[9px] px-[17px] py-4', className)}>
       <div className="flex items-center justify-between">
         <Label>{label}</Label>
         {right}
