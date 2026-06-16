@@ -1,0 +1,6 @@
+# OPS-02 partial backend config — copy to backend.hcl (gitignored) and fill the
+# real bucket name. The bucket embeds the AWS account id, so it must NOT be
+# committed to this public repo.
+#   cp backend.hcl.example backend.hcl
+#   terraform init -migrate-state -backend-config=backend.hcl
+bucket = "dhan-trading-tfstate-<ACCOUNT_ID>"
