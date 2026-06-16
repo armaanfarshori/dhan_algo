@@ -6,20 +6,19 @@ export function usePoller(url, interval = 5000) {
   const [error, setError]     = useState(null)
   const fetchFn = useRef(null)
 
-  fetchFn.current = async () => {
-    try {
-      const r = await fetch(url)
-      if (!r.ok) throw new Error(`HTTP ${r.status}`)
-      setData(await r.json())
-      setError(null)
-    } catch (e) {
-      setError(e.message)
-    } finally {
-      setLoading(false)
-    }
-  }
-
   useEffect(() => {
+    fetchFn.current = async () => {
+      try {
+        const r = await fetch(url)
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        setData(await r.json())
+        setError(null)
+      } catch (e) {
+        setError(e.message)
+      } finally {
+        setLoading(false)
+      }
+    }
     fetchFn.current()
     // Pause while the tab is hidden — a backgrounded dashboard shouldn't
     // keep hammering the API; refresh immediately on return.
