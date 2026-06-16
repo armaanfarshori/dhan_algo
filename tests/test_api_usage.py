@@ -12,7 +12,6 @@ Tests are hermetic (SQLite in-memory or tmp file) and fast (<200ms total).
 No real DB connection required.
 """
 import asyncio
-from datetime import date
 from unittest.mock import MagicMock, patch
 
 
@@ -200,7 +199,11 @@ def test_query_today_totals_all_categories_and_caps(tmp_path):
     eng = _make_sqlite_engine(db_path)
 
     from sqlalchemy import text
-    today_str = date.today().isoformat()
+    # query_today_totals() keys "today" off IST (datetime.now(IST).date()), so the
+    # test must too — otherwise it flakes when CI runs after IST midnight (UTC ~18:30+).
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today_str = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
 
     # Insert some rows: trader + backfill both had data calls; only trader had orders
     with eng.begin() as c:
