@@ -23,7 +23,6 @@ function compact(v) {
   return (v >= 0 ? '+₹' : '−₹') + Math.round(abs)
 }
 
-/** IST weekday from an YYYY-MM-DD key. Returns 0=Sun … 6=Sat (same as Date.getDay). */
 // ─── KPI row ─────────────────────────────────────────────────────────────────
 
 function KpiRow({ tradelog }) {
@@ -232,7 +231,7 @@ function CalendarPnL({ tradelog }) {
   return (
     <Panel>
       <PanelHeader title="Calendar P&L" meta={`${tradingDays} trading day${tradingDays !== 1 ? 's' : ''}`} />
-      <div className="dhan-cal px-3 py-3">
+      <div className="tessera-cal px-3 py-3">
         <DayPicker
           month={month}
           onMonthChange={setMonth}
