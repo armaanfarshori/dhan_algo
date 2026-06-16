@@ -236,8 +236,8 @@ class KronosSignalEngine:
             result["last_bar_ts"] = last_ts.isoformat()
             result["data_age_min"] = round(
                 (datetime.now(timezone.utc) - last_ts).total_seconds() / 60, 1)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("kronos: failed to compute data_age_min (%s)", exc)
         return result
 
     # ------------------------------------------------------------------

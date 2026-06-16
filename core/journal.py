@@ -36,10 +36,12 @@ class AsyncDBBackend:
     """
 
     def __init__(self):
-        import os
-        # DB_HOST presence (not value) decides whether journalling is on —
-        # local dev without a DB should run with the backend disabled.
-        self._enabled = bool(os.getenv("DB_HOST"))
+        from config import get_config
+        # DB_HOST presence (not default value) decides whether journalling is
+        # on — local dev without a DB should run with the backend disabled.
+        # "localhost" is the pydantic-settings default; treat it (and "")
+        # the same as an unset variable so CI / dev boxes stay disabled.
+        self._enabled = get_config().db_host not in ("", "localhost")
         self._engine  = None
         self._Session = None
 
