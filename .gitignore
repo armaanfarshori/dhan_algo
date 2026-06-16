@@ -15,6 +15,9 @@ venv/
 
 # Cache
 .cache/
+.coverage
+.ruff_cache/
+.pytest_cache/
 
 # Trade logs (local only — contains real trade history)
 .logs/

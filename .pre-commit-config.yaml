@@ -1,0 +1,13 @@
+repos:
+  # Ruff: Pyflakes-only linting (matches CI gate — see pyproject.toml [tool.ruff])
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.17
+    hooks:
+      - id: ruff
+
+  # Built-in pre-commit hooks for basic hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: detect-private-key        # block accidental key commits
+      - id: check-added-large-files   # warn on files > 500 KB (default)

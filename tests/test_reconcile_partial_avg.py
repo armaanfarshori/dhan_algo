@@ -11,7 +11,6 @@ import asyncio
 import pytest
 
 from engine.portfolio import Portfolio
-from engine.types import Position
 
 
 class _FakeBroker:

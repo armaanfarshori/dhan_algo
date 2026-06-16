@@ -5,8 +5,6 @@ FakeDB captures log_signal calls so we can assert persistence without a real DB.
 """
 import asyncio
 
-import pytest
-
 from ml.kronos_gate import KronosGate
 
 
