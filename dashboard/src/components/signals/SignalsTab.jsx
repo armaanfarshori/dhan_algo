@@ -338,9 +338,9 @@ function ExecutionsFeed({ signals }) {
   const exits = feed.filter(s => s.action === 'EXIT').length
 
   return (
-    <Panel className="flex h-full flex-col">
+    <Panel>
       <PanelHeader title="Executions" meta={`today · ${exits} round trips`} />
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="overflow-y-auto" style={{ maxHeight: 360 }}>
         {feed.length === 0 ? (
           <div className="p-4 mono text-[10px] text-muted-foreground">
             No executions today — entries appear here when ORB fires
@@ -395,7 +395,7 @@ function GatePanel({ gate }) {
   const isShadow  = decisions.some(d => d.shadow)
 
   return (
-    <Panel className="flex h-full flex-col">
+    <Panel>
       <PanelHeader
         title={
           <span className="flex items-center gap-2">
@@ -422,11 +422,11 @@ function GatePanel({ gate }) {
       )}
 
       {decisions.length === 0 ? (
-        <div className="min-h-0 flex-1 p-4 mono text-[10px] text-muted-foreground">
+        <div className="p-4 mono text-[10px] text-muted-foreground">
           No gate decisions today — they fire on ORB breakouts
         </div>
       ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="overflow-y-auto" style={{ maxHeight: 360 }}>
           {decisions.map((d, i) => {
             const isAllow  = d.verdict === 'ALLOW'
             const verdictCls = isAllow
@@ -491,23 +491,21 @@ export default function SignalsTab({ data }) {
         <KpiKronosGate trader={trader} gate={gate} />
       </section>
 
-      {/* ── Two-column body — columns stretch to equal height; the last panel
-            in each column grows so both columns end on a clean aligned line. ── */}
-      <div className="grid grid-cols-1 items-stretch gap-[14px] lg:grid-cols-[minmax(0,1fr)_372px] [&>*]:min-w-0">
+      {/* Intraday P&L — full-width hero */}
+      <div className="mb-[14px]">
+        <IntradaySparkline equity={equity} />
+      </div>
 
-        {/* LEFT: sparkline + cockpit */}
-        <div className="flex flex-col gap-[14px] [&>*:last-child]:flex-1">
-          <IntradaySparkline equity={equity} />
-          <ORBCockpit data={data} />
-        </div>
+      {/* ORB Cockpit — full-width (uses the width for more columns, so it
+          stays short even with many securities) */}
+      <div className="mb-[14px]">
+        <ORBCockpit data={data} />
+      </div>
 
-        {/* RIGHT: executions + gate — equal halves, each scrolls, together
-              filling the column height to match the cockpit on the left. */}
-        <div className="flex flex-col gap-[14px] [&>*]:min-h-0 [&>*]:flex-1">
-          <ExecutionsFeed signals={signals} />
-          <GatePanel gate={gate} />
-        </div>
-
+      {/* Executions + Kronos Gate — side by side at the bottom */}
+      <div className="grid grid-cols-1 items-start gap-[14px] lg:grid-cols-2 [&>*]:min-w-0">
+        <ExecutionsFeed signals={signals} />
+        <GatePanel gate={gate} />
       </div>
     </div>
   )
