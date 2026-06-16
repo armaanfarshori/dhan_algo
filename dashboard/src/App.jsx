@@ -1,4 +1,4 @@
-import { useState, Component } from 'react'
+import { useState, useEffect, Component } from 'react'
 import { useDashboardData } from './hooks/useDashboardData'
 import { Tabs } from '@/components/ui'
 import { TopBar } from '@/components/shell/TopBar'
@@ -45,6 +45,18 @@ export default function App() {
     const q = new URLSearchParams(window.location.search).get('tab')
     return ['signals', 'portfolio', 'system'].includes(q) ? q : 'signals'
   })
+
+  // Jump tabs with the 1 / 2 / 3 keys
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return
+      if (['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return
+      const map = { 1: 'signals', 2: 'portfolio', 3: 'system' }
+      if (map[e.key]) setTab(map[e.key])
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   return (
     <ErrorBoundary>

@@ -281,7 +281,7 @@ function RateLimitPanel({ rateLimitsData }) {
   return (
     <Panel>
       <PanelHeader
-        title="Rate-limit Spend"
+        title="API Spend"
         meta={
           <span className="mono">{metaLabel}</span>
         }
@@ -358,7 +358,7 @@ function LogsPanel({ logs }) {
         title="Recent Logs"
         meta={<span className="mono">trader.log · IST</span>}
       />
-      <div className="mono max-h-[340px] overflow-auto px-4 py-3 text-[10.5px] leading-[1.7]">
+      <div className="mono max-h-[460px] overflow-auto px-4 py-3 text-[10.5px] leading-[1.7]">
         {rows.length === 0 ? (
           <span className="text-faint">No log output</span>
         ) : (
@@ -528,26 +528,25 @@ function SchemaPanel({ dbStats }) {
 
 export default function SystemTab({ data }) {
   return (
-    <div className="px-[22px] pb-10 pt-[18px]">
+    <div className="px-4 pb-10 pt-5 sm:px-[22px]">
       {/* KPI row */}
       <KpiRow data={data} />
 
-      {/* Two-column layout: main (1fr) + sidebar (372px) */}
-      <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-[minmax(0,1fr)_372px] items-start [&>*]:min-w-0">
+      {/* Logs — the hero panel (most important, full width) */}
+      <div className="mb-3.5">
+        <LogsPanel logs={data.logs} />
+      </div>
 
-        {/* LEFT — Services, Rate-limit, Logs */}
-        <div className="flex flex-col gap-3.5">
-          <ServicesPanel data={data} />
-          <RateLimitPanel rateLimitsData={data.rateLimitsData} />
-          <LogsPanel logs={data.logs} />
-        </div>
-
-        {/* RIGHT — Heartbeat, Infra, Schema */}
-        <div className="flex flex-col gap-3.5">
-          <HeartbeatPanel data={data} />
-          <InfraPanel dbStats={data.dbStats} />
-          <SchemaPanel dbStats={data.dbStats} />
-        </div>
+      {/* Everything else — uniform responsive grid that grows with content */}
+      <div
+        className="grid items-start gap-3.5"
+        style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 300px), 1fr))' }}
+      >
+        <ServicesPanel data={data} />
+        <RateLimitPanel rateLimitsData={data.rateLimitsData} />
+        <HeartbeatPanel data={data} />
+        <InfraPanel dbStats={data.dbStats} />
+        <SchemaPanel dbStats={data.dbStats} />
       </div>
     </div>
   )

@@ -14,13 +14,10 @@
  */
 
 import {
-  AreaChart, Area, XAxis, YAxis, Tooltip,
-  ResponsiveContainer, CartesianGrid,
-} from 'recharts'
-import {
   Panel, PanelHeader,
   StatCard, Badge, Pill, Tag,
 } from '@/components/ui'
+import { PnlAreaChart } from '@/components/charts/PnlAreaChart'
 import { INR0, fmtTime } from '@/tokens'
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -33,10 +30,6 @@ function istMinutes() {
   return h * 60 + m
 }
 const OR_WINDOW_END = 9 * 60 + 30 // 09:30 IST
-
-// Rate-limit category config (mirrors App.jsx RATE_LIMIT_*)
-const RL_KEYS   = ['orders', 'data', 'quote', 'non_trading']
-const RL_LABELS = { orders: 'Orders', data: 'Data', quote: 'Quote', non_trading: 'Non-trading' }
 
 // ─── KPI: Today P&L ──────────────────────────────────────────────────────────
 
@@ -60,7 +53,6 @@ function KpiPnl({ risk }) {
   return (
     <StatCard
       label="Today P&L"
-      right={<span className="icn">↗</span>}
       value={<span className={isUp ? 'text-profit' : 'text-loss'}>{isUp ? '+' : ''}{INR0(total)}</span>}
       sub={sub}
     />
@@ -143,17 +135,15 @@ function KpiKronosGate({ trader, gate }) {
 
 function IntradaySparkline({ equity }) {
   // equity?.data?.intraday = [{t: "09:15", pnl: 0}, ...]
-  const pts  = equity?.data?.intraday ?? []
-  const last = pts[pts.length - 1]
-  const val  = last?.pnl ?? 0
+  const all = equity?.data?.intraday ?? []
+  // Reflect the trading session: clamp to 09:15–15:30 IST when those points exist.
+  const session = all.filter(p => p.t >= '09:15' && p.t <= '15:30')
+  const pts = (session.length >= 2 ? session : all).map(p => ({ t: p.t, v: p.pnl }))
+  const val  = pts.length ? pts[pts.length - 1].v : 0
   const isUp = val >= 0
 
-  const profitColor = 'hsl(var(--profit))'
-  const lossColor   = 'hsl(var(--loss))'
-  const lineColor   = isUp ? profitColor : lossColor
-
   const metaText = pts.length
-    ? `${isUp ? '+' : ''}${INR0(val)} · ${pts[0]?.t ?? '09:15'} → ${last?.t ?? '15:15'} IST`
+    ? `${isUp ? '+' : ''}${INR0(val)} · 09:15 → 15:30 IST`
     : 'No session data'
 
   return (
@@ -162,58 +152,8 @@ function IntradaySparkline({ equity }) {
         title="Intraday P&L"
         meta={<span className={`mono ${isUp ? 'text-profit' : 'text-loss'}`}>{metaText}</span>}
       />
-      <div className="px-4 pb-4 pt-3">
-        {pts.length < 2 ? (
-          <div className="flex h-24 items-center justify-center text-[11px] text-muted-foreground mono">
-            No session data yet — curve starts at 09:15 IST
-          </div>
-        ) : (
-          <>
-            <ResponsiveContainer width="100%" height={96}>
-              <AreaChart data={pts} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
-                <defs>
-                  <linearGradient id="pnlGrad" x1="0" x2="0" y1="0" y2="1">
-                    <stop offset="0%" stopColor={lineColor} stopOpacity={0.22} />
-                    <stop offset="100%" stopColor={lineColor} stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid
-                  stroke="hsl(var(--border))"
-                  strokeDasharray="2 4"
-                  vertical={false}
-                />
-                <XAxis
-                  dataKey="t"
-                  tick={{ fontFamily: 'var(--font-mono,monospace)', fontSize: 9, fill: 'hsl(var(--faint))' }}
-                  tickLine={false}
-                  axisLine={{ stroke: 'hsl(var(--border))' }}
-                  minTickGap={60}
-                />
-                <YAxis hide />
-                <Tooltip
-                  contentStyle={{
-                    background: 'hsl(var(--card))',
-                    border: '1px solid hsl(var(--border2))',
-                    fontFamily: 'var(--font-mono,monospace)',
-                    fontSize: 10,
-                    borderRadius: 6,
-                  }}
-                  labelStyle={{ color: 'hsl(var(--muted-foreground))' }}
-                  formatter={v => ['₹' + Number(v).toLocaleString('en-IN'), 'P&L']}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="pnl"
-                  stroke={lineColor}
-                  strokeWidth={1.6}
-                  fill="url(#pnlGrad)"
-                  dot={false}
-                  isAnimationActive={false}
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-          </>
-        )}
+      <div className="px-3 pb-3 pt-3">
+        <PnlAreaChart data={pts} height={240} />
       </div>
     </Panel>
   )
@@ -231,7 +171,7 @@ function RangeLadder({ s }) {
       : istMinutes() > OR_WINDOW_END ? 'no OR today' : 'building…'
     return (
       <div className="py-1">
-        <div className="relative h-[24px]">
+        <div className="relative h-[18px]">
           <div className="absolute inset-x-0 top-[11px] h-[3px] rounded-sm bg-border" />
           <span className="absolute right-0 top-0 mono text-[9px] text-faint">{note}</span>
         </div>
@@ -246,7 +186,7 @@ function RangeLadder({ s }) {
 
   return (
     <div className="py-1">
-      <div className="relative h-[24px]">
+      <div className="relative h-[18px]">
         {/* track */}
         <div
           className="absolute inset-x-0 top-[11px] h-[3px] rounded-sm"
@@ -306,7 +246,7 @@ function ORBSecCard({ s, gateDec, maxEntries }) {
   }
 
   return (
-    <div className="flex min-w-0 flex-col gap-[9px] bg-card p-[12px_13px] transition-colors hover:bg-panel">
+    <div className="flex min-w-0 flex-col gap-[6px] bg-card px-3 py-[9px] transition-colors hover:bg-panel">
       <div className="flex min-w-0 items-center justify-between gap-2">
         <span className="min-w-0 truncate text-[12.5px] font-semibold tracking-[-0.01em] text-foreground">
           {s.ticker ?? s.security_id}
@@ -360,7 +300,7 @@ function ORBCockpit({ data }) {
            column gap widened to gap-x-2 (8 px) so adjacent price numbers never touch */
         <div
           className="grid gap-x-2 gap-y-[1px] bg-border"
-          style={{ gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' }}
+          style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 215px), 1fr))' }}
         >
           {strategies.map(s => (
             <ORBSecCard
@@ -528,83 +468,6 @@ function GatePanel({ gate }) {
   )
 }
 
-// ─── API Spend mini panel ─────────────────────────────────────────────────────
-
-function ApiSpendMini({ rateLimitsData }) {
-  const categories = rateLimitsData?.data?.categories ?? null
-  const date       = rateLimitsData?.data?.date ?? 'today'
-  const hasData    = categories != null
-  const loading    = rateLimitsData?.loading ?? true
-
-  return (
-    <Panel>
-      <PanelHeader title="API Spend · today" meta={<span className="mono">{hasData ? `${date} · account-wide` : loading ? 'loading…' : 'endpoint error'}</span>} />
-      <div className="py-1 px-1">
-        {RL_KEYS.map(key => {
-          const cat    = categories?.[key] ?? {}
-          const total  = cat.total ?? null
-          const perDay = cat.per_day ?? null
-          const capped = perDay != null
-          const pct    = capped && total != null
-            ? Math.min((total / perDay) * 100, 100)
-            : 0
-          const barColor = pct > 80
-            ? 'hsl(var(--loss))'
-            : pct > 50
-              ? 'hsl(var(--amber))'
-              : 'hsl(var(--sky))'
-          const capLabel = capped
-            ? '/ ' + (perDay >= 1000 ? (perDay / 1000).toFixed(0) + 'k' : perDay)
-            : 'no cap'
-
-          return (
-            <div key={key} className="flex items-center gap-[11px] px-3 py-2">
-              <span className="mono w-[80px] flex-shrink-0 text-[11px] text-muted-foreground">
-                {RL_LABELS[key]}
-              </span>
-              <div className="flex-1">
-                <div className="h-[4px] overflow-hidden rounded-[3px] bg-border">
-                  <div
-                    className="h-full rounded-[3px] transition-[width] duration-500"
-                    style={{
-                      width: `${capped ? Math.max(3, pct) : 0}%`,
-                      background: barColor,
-                    }}
-                  />
-                </div>
-              </div>
-              <span className="mono w-[56px] text-right text-[11px] text-foreground">
-                {total != null ? total.toLocaleString('en-IN') : '—'}
-              </span>
-              <span className="mono w-[52px] text-right text-[10px] text-faint">
-                {hasData ? capLabel : '—'}
-              </span>
-            </div>
-          )
-        })}
-        {/* by-process breakdown */}
-        {hasData && (
-          <div className="mt-1 border-t border-border px-3 py-[8px] mono text-[10px] text-faint">
-            {RL_KEYS.map(key => {
-              const bp = categories?.[key]?.by_process
-              if (!bp || typeof bp !== 'object') return null
-              const parts = Object.entries(bp)
-                .filter(([, v]) => (v ?? 0) > 0)
-                .map(([k, v]) => `${k} ${Number(v).toLocaleString('en-IN')}`)
-                .join(' · ')
-              return parts ? (
-                <div key={key} className="leading-relaxed">
-                  <span className="text-muted-foreground">{RL_LABELS[key]}: </span>{parts}
-                </div>
-              ) : null
-            })}
-          </div>
-        )}
-      </div>
-    </Panel>
-  )
-}
-
 // ─── Root SignalsTab ───────────────────────────────────────────────────────────
 
 export default function SignalsTab({ data }) {
@@ -616,17 +479,13 @@ export default function SignalsTab({ data }) {
   const equity  = data.equity      // { data: { intraday: [{t, pnl}] } }
   const signals = data.signals     // { data: [...signal rows] }
   const tradelog = data.tradelog   // { data: { summary: { closed_today, wins_today, profit_factor } } }
-  const rateLimitsData = data.rateLimitsData  // { data: { date, categories: { orders, data, quote, non_trading } } }
 
   return (
-    <div className="px-[22px] pb-16 pt-[22px]">
+    <div className="px-4 pb-16 pt-5 sm:px-[22px]">
 
       {/* ── KPI row ── */}
-      <section
-        className="mb-[14px] grid gap-[14px]"
-        style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}
-      >
-        <KpiPnl     risk={risk}    limits={limits} />
+      <section className="mb-[14px] grid grid-cols-2 gap-[14px] lg:grid-cols-4">
+        <KpiPnl     risk={risk} />
         <KpiOpenRisk risk={risk}   limits={limits} />
         <KpiWinRate  tradelog={tradelog} />
         <KpiKronosGate trader={trader} gate={gate} />
@@ -641,11 +500,10 @@ export default function SignalsTab({ data }) {
           <ORBCockpit data={data} />
         </div>
 
-        {/* RIGHT: executions + gate + API spend */}
+        {/* RIGHT: executions + gate */}
         <div className="flex flex-col gap-[14px]">
           <ExecutionsFeed signals={signals} />
           <GatePanel gate={gate} />
-          <ApiSpendMini rateLimitsData={rateLimitsData} />
         </div>
 
       </div>

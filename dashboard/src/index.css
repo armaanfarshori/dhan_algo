@@ -108,3 +108,35 @@ html, body {
 @keyframes pulse  { 0%,100%{opacity:1} 50%{opacity:.35} }
 @keyframes spin   { to { transform: rotate(360deg); } }
 .animate-pulse-soft { animation: pulse 2s ease-in-out infinite; }
+
+/* ── react-day-picker theming (Calendar P&L) ── */
+.dhan-cal .rdp-root {
+  --rdp-accent-color: hsl(var(--profit));
+  --rdp-accent-background-color: hsl(var(--profit) / .12);
+  --rdp-font-family: 'Geist', system-ui, sans-serif;
+  margin: 0;
+}
+.dhan-cal .rdp-months, .dhan-cal .rdp-month { width: 100%; max-width: 100%; }
+.dhan-cal .rdp-month_grid { width: 100%; border-collapse: separate; border-spacing: 4px; }
+.dhan-cal .rdp-month_caption { display: flex; align-items: center; padding: 0 2px 12px; }
+.dhan-cal .rdp-caption_label { font-size: 13px; font-weight: 600; color: hsl(var(--foreground)); }
+.dhan-cal .rdp-dropdowns { display: flex; gap: 6px; }
+.dhan-cal .rdp-dropdown {
+  appearance: none; background: hsl(var(--card)); color: hsl(var(--foreground));
+  border: 1px solid hsl(var(--border2)); border-radius: 6px; font-size: 12px;
+  padding: 4px 8px; font-family: 'Geist', system-ui, sans-serif; cursor: pointer;
+}
+.dhan-cal .rdp-dropdown:hover { border-color: hsl(var(--faint)); }
+.dhan-cal .rdp-button_previous, .dhan-cal .rdp-button_next {
+  width: 28px; height: 28px; border-radius: 7px; border: 1px solid hsl(var(--border2));
+  color: hsl(var(--muted-foreground)); background: hsl(var(--card));
+}
+.dhan-cal .rdp-button_previous:hover, .dhan-cal .rdp-button_next:hover {
+  background: hsl(var(--panel)); color: hsl(var(--foreground));
+}
+.dhan-cal .rdp-chevron { fill: currentColor; }
+.dhan-cal .rdp-weekday {
+  font-size: 9.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em;
+  color: hsl(var(--faint)); padding-bottom: 6px;
+}
+.dhan-cal .rdp-day { padding: 0; vertical-align: top; }

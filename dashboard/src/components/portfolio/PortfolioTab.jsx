@@ -3,14 +3,15 @@
  * Single-file, all sub-components colocated.
  * Data wiring preserved 1-to-1 from the original App.jsx components.
  */
-import {
-  AreaChart, Area, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer,
-} from 'recharts'
+import { useState } from 'react'
+import { DayPicker } from 'react-day-picker'
+import { format } from 'date-fns'
+import 'react-day-picker/style.css'
 
 import { Panel, PanelHeader } from '@/components/ui'
 import { StatCard } from '@/components/ui'
 import { Pill, Tag } from '@/components/ui'
+import { PnlAreaChart } from '@/components/charts/PnlAreaChart'
 import { INR0, istDateKey } from '@/tokens'
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -23,11 +24,6 @@ function compact(v) {
 }
 
 /** IST weekday from an YYYY-MM-DD key. Returns 0=Sun … 6=Sat (same as Date.getDay). */
-function keyWeekday(key) {
-  const [y, mo, dy] = key.split('-').map(Number)
-  return new Date(Date.UTC(y, mo - 1, dy, 6, 30)).getDay()
-}
-
 // ─── KPI row ─────────────────────────────────────────────────────────────────
 
 function KpiRow({ tradelog }) {
@@ -155,240 +151,94 @@ function KpiRow({ tradelog }) {
 // ─── Equity Curve ─────────────────────────────────────────────────────────────
 
 function EquityCurve({ equity, tradelog }) {
-  // Primary: intraday P&L series from /api/equity (same as original PnlCurve)
-  const pts = equity?.data?.intraday ?? []
-  const last = pts[pts.length - 1]
-  const totalPnl = last?.pnl ?? 0
+  // Same series + same chart component as the Signals "Intraday P&L" so the two
+  // share one design.
+  const pts = (equity?.data?.intraday ?? []).map(p => ({ t: p.t, v: p.pnl }))
+  const last = pts.length ? pts[pts.length - 1].v : 0
 
-  // Meta for panel header
   const trades = tradelog?.data?.trades ?? []
-  const exits  = trades.filter(t => t.status === 'CLOSED' && t.pnl != null)
-  const byDate  = {}
-  exits.forEach(t => {
-    if (t.exit_ts) {
-      const d = istDateKey(t.exit_ts)
-      byDate[d] = (byDate[d] ?? 0) + (t.pnl ?? 0)
-    }
-  })
+  const exits  = trades.filter(t => t.status === 'CLOSED' && t.pnl != null && t.exit_ts)
+  const byDate = {}
+  exits.forEach(t => { const d = istDateKey(t.exit_ts); byDate[d] = (byDate[d] ?? 0) + (t.pnl ?? 0) })
   const tradingDays = Object.keys(byDate).length
-
-  const metaStr = totalPnl !== 0
-    ? `${totalPnl >= 0 ? '+' : ''}${INR0(totalPnl)} · ${tradingDays} day${tradingDays !== 1 ? 's' : ''}`
-    : `${tradingDays} day${tradingDays !== 1 ? 's' : ''}`
-
-  const isEmpty = pts.length < 2
+  const metaStr = `${last >= 0 ? '+' : ''}${INR0(last)} · ${tradingDays} day${tradingDays !== 1 ? 's' : ''}`
 
   return (
     <Panel>
       <PanelHeader
         title="Equity Curve"
-        meta={
-          <span className={`mono ${totalPnl >= 0 ? 'text-profit' : 'text-loss'}`}>
-            {metaStr}
-          </span>
-        }
+        meta={<span className={`mono ${last >= 0 ? 'text-profit' : 'text-loss'}`}>{metaStr}</span>}
       />
-      <div className="p-4 pb-2">
-        {isEmpty ? (
-          <div className="mono flex h-[132px] items-center justify-center text-[10px] text-faint">
-            No session data yet — curve starts at 09:15 IST
-          </div>
-        ) : (
-          <ResponsiveContainer width="100%" height={132}>
-            <AreaChart data={pts} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
-              <defs>
-                <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%"   stopColor="hsl(var(--profit))" stopOpacity={0.22} />
-                  <stop offset="100%" stopColor="hsl(var(--profit))" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid
-                stroke="hsl(var(--border))"
-                strokeDasharray="2 4"
-                vertical={false}
-              />
-              <XAxis
-                dataKey="t"
-                tick={{ fontFamily: 'var(--font-mono)', fontSize: 9, fill: 'hsl(var(--faint))' }}
-                tickLine={false}
-                axisLine={{ stroke: 'hsl(var(--border))' }}
-                minTickGap={50}
-              />
-              <YAxis
-                tick={{ fontFamily: 'var(--font-mono)', fontSize: 9, fill: 'hsl(var(--faint))' }}
-                tickLine={false}
-                axisLine={false}
-                width={58}
-                tickFormatter={v => '₹' + Number(v).toLocaleString('en-IN')}
-              />
-              <Tooltip
-                contentStyle={{
-                  background: 'hsl(var(--card))',
-                  border: '1px solid hsl(var(--border2))',
-                  borderRadius: 8,
-                  fontFamily: 'var(--font-mono)',
-                  fontSize: 10,
-                }}
-                labelStyle={{ color: 'hsl(var(--muted-foreground))' }}
-                formatter={v => ['₹' + Number(v).toLocaleString('en-IN'), 'P&L']}
-              />
-              <Area
-                type="stepAfter"
-                dataKey="pnl"
-                stroke="hsl(var(--profit))"
-                strokeWidth={1.6}
-                fill="url(#eqGrad)"
-                dot={false}
-                isAnimationActive={false}
-              />
-            </AreaChart>
-          </ResponsiveContainer>
-        )}
+      <div className="px-3 pb-3 pt-3">
+        <PnlAreaChart data={pts} height={240} />
       </div>
-      {/* Date spine — show first and last tick labels */}
-      {!isEmpty && (
-        <div className="mono flex justify-between px-4 pb-3 pt-1 text-[9.5px] text-faint">
-          <span>{pts[0]?.t}</span>
-          <span>{pts[Math.floor(pts.length / 2)]?.t}</span>
-          <span>{pts[pts.length - 1]?.t}</span>
-        </div>
-      )}
     </Panel>
   )
 }
 
-// ─── Calendar P&L ─────────────────────────────────────────────────────────────
-// Calendar logic preserved verbatim from the original CalendarPnL (IST-stable,
-// noon-UTC stabilisation, 4-week rolling grid ending on Sunday).
+
+// ─── Calendar P&L (react-day-picker) ─────────────────────────────────────────
 
 function CalendarPnL({ tradelog }) {
   const trades = tradelog?.data?.trades ?? []
   const exits  = trades.filter(t => t.status === 'CLOSED' && t.pnl != null && t.exit_ts)
-
   const byDate = {}
-  exits.forEach(t => {
-    if (t.exit_ts) {
-      const d = istDateKey(t.exit_ts)
-      byDate[d] = (byDate[d] ?? 0) + (t.pnl ?? 0)
-    }
-  })
-  const maxAbs = Math.max(...Object.values(byDate).map(Math.abs), 1)
-
-  // Anchor: roll to this week's Sunday (unchanged from original)
-  const todayKey  = istDateKey(new Date())
-  const todayWd   = keyWeekday(todayKey)
-  const daysToSun = todayWd === 0 ? 0 : 7 - todayWd
-  const [ty, tmo, tdy] = todayKey.split('-').map(Number)
-  const anchorDate = new Date(Date.UTC(ty, tmo - 1, tdy + daysToSun))
-  const anchorKey  = istDateKey(anchorDate)
-
-  const days = []
-  for (let i = 27; i >= 0; i--) {
-    const [ay, amo, ady] = anchorKey.split('-').map(Number)
-    const d = new Date(Date.UTC(ay, amo - 1, ady - i))
-    days.push(istDateKey(d))
-  }
+  exits.forEach(t => { const d = istDateKey(t.exit_ts); byDate[d] = (byDate[d] ?? 0) + (t.pnl ?? 0) })
 
   const tradingDays = Object.keys(byDate).length
+  const lastKey = Object.keys(byDate).sort().pop()
+  const [month, setMonth] = useState(() => {
+    if (lastKey) { const [y, m, d] = lastKey.split('-').map(Number); return new Date(y, m - 1, d) }
+    return new Date()
+  })
+  const todayKey = istDateKey(new Date())
+
+  // Custom cell: day number + realised P&L for that date (theme-tinted).
+  function DayCell({ day, modifiers, ...props }) {
+    const key = format(day.date, 'yyyy-MM-dd')
+    const pnl = byDate[key]
+    const has = pnl != null
+    const up  = has && pnl >= 0
+    const isToday = key === todayKey
+    return (
+      <td {...props}>
+        <div
+          className="flex h-full min-h-[44px] flex-col justify-between rounded-md border px-1.5 py-1"
+          style={{
+            borderColor: isToday ? 'hsl(var(--foreground))'
+              : has ? (up ? 'hsl(var(--profit) / .22)' : 'hsl(var(--loss) / .20)') : 'transparent',
+            background: has ? (up ? 'hsl(var(--profit) / .12)' : 'hsl(var(--loss) / .12)') : 'transparent',
+            opacity: modifiers?.outside ? 0.4 : 1,
+          }}
+        >
+          <span className="mono text-[9.5px] leading-none text-faint">{day.date.getDate()}</span>
+          {has && (
+            <span
+              className="mono text-[11px] font-medium leading-none"
+              style={{ color: up ? 'hsl(var(--profit))' : 'hsl(var(--loss))' }}
+            >
+              {compact(pnl)}
+            </span>
+          )}
+        </div>
+      </td>
+    )
+  }
 
   return (
     <Panel>
-      <PanelHeader
-        title="Calendar P&L"
-        meta={`${tradingDays} trading day${tradingDays !== 1 ? 's' : ''}`}
-      />
-
-      {/* Day-of-week headers */}
-      <div className="grid grid-cols-7 gap-1 px-3.5 pt-3.5">
-        {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(d => (
-          <div
-            key={d}
-            className="pb-1 text-center text-[9.5px] font-semibold uppercase tracking-[.07em] text-faint"
-          >
-            {d}
-          </div>
-        ))}
-      </div>
-
-      {/* Cells */}
-      <div className="grid grid-cols-7 gap-1 px-3.5 pb-3.5">
-        {days.map(key => {
-          const pnl     = byDate[key]
-          const dayNum  = Number(key.slice(8, 10))
-          const wd      = keyWeekday(key)
-          const weekend = wd === 0 || wd === 6
-          const future  = key > todayKey
-          const isToday = key === todayKey
-          const intensity = pnl != null ? Math.abs(pnl) / maxAbs : 0
-
-          // Cell background: use CSS-var tints (theme-safe)
-          let bgStyle = {}
-          let borderStyle = {}
-          if (pnl != null && !weekend) {
-            bgStyle = {
-              background: pnl > 0
-                ? `hsl(var(--profit) / ${0.08 + intensity * 0.22})`
-                : `hsl(var(--loss) / ${0.08 + intensity * 0.20})`,
-              borderColor: pnl > 0
-                ? `hsl(var(--profit) / ${0.14 + intensity * 0.22})`
-                : `hsl(var(--loss) / ${0.12 + intensity * 0.20})`,
-            }
-          } else if (weekend || future) {
-            bgStyle   = { background: 'transparent' }
-            borderStyle = { borderColor: 'transparent' }
-          }
-
-          const todayBorder = isToday ? { border: '1px solid hsl(var(--fg))' } : {}
-
-          return (
-            <div
-              key={key}
-              title={
-                pnl != null
-                  ? `${key}: ${pnl >= 0 ? '+' : ''}₹${Math.round(pnl).toLocaleString('en-IN')}`
-                  : key
-              }
-              style={{
-                borderRadius: 7,
-                minHeight: 44,
-                padding: '5px 6px',
-                display: 'flex',
-                flexDirection: 'column',
-                justifyContent: 'space-between',
-                border: '1px solid transparent',
-                background: 'hsl(var(--card))',
-                ...bgStyle,
-                ...borderStyle,
-                ...todayBorder,
-              }}
-            >
-              <span
-                style={{
-                  fontSize: 9.5,
-                  lineHeight: 1,
-                  color: weekend || future ? 'hsl(var(--faint) / .4)' : 'hsl(var(--faint))',
-                  fontFamily: 'var(--font-mono)',
-                }}
-              >
-                {dayNum}
-              </span>
-              {pnl != null && !weekend && (
-                <span
-                  className="mono"
-                  style={{
-                    fontSize: 11,
-                    fontWeight: 500,
-                    lineHeight: 1,
-                    marginTop: 4,
-                    color: pnl >= 0 ? 'hsl(var(--profit))' : 'hsl(var(--loss))',
-                  }}
-                >
-                  {compact(pnl)}
-                </span>
-              )}
-            </div>
-          )
-        })}
+      <PanelHeader title="Calendar P&L" meta={`${tradingDays} trading day${tradingDays !== 1 ? 's' : ''}`} />
+      <div className="dhan-cal px-3 py-3">
+        <DayPicker
+          month={month}
+          onMonthChange={setMonth}
+          captionLayout="dropdown"
+          startMonth={new Date(2025, 0)}
+          endMonth={new Date(2027, 11)}
+          weekStartsOn={1}
+          showOutsideDays
+          components={{ Day: DayCell }}
+        />
       </div>
     </Panel>
   )
