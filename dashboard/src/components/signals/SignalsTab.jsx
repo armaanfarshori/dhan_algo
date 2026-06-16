@@ -491,17 +491,18 @@ export default function SignalsTab({ data }) {
         <KpiKronosGate trader={trader} gate={gate} />
       </section>
 
-      {/* ── Two-column body ── */}
-      <div className="grid grid-cols-1 items-start gap-[14px] lg:grid-cols-[minmax(0,1fr)_372px] [&>*]:min-w-0">
+      {/* ── Two-column body — columns stretch to equal height; the last panel
+            in each column grows so both columns end on a clean aligned line. ── */}
+      <div className="grid grid-cols-1 items-stretch gap-[14px] lg:grid-cols-[minmax(0,1fr)_372px] [&>*]:min-w-0">
 
         {/* LEFT: sparkline + cockpit */}
-        <div className="flex flex-col gap-[14px]">
+        <div className="flex flex-col gap-[14px] [&>*:last-child]:flex-1">
           <IntradaySparkline equity={equity} />
           <ORBCockpit data={data} />
         </div>
 
         {/* RIGHT: executions + gate */}
-        <div className="flex flex-col gap-[14px]">
+        <div className="flex flex-col gap-[14px] [&>*:last-child]:flex-1">
           <ExecutionsFeed signals={signals} />
           <GatePanel gate={gate} />
         </div>

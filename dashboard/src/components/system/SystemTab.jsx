@@ -532,9 +532,10 @@ export default function SystemTab({ data }) {
       {/* KPI row */}
       <KpiRow data={data} />
 
-      {/* Services · Heartbeat · Infrastructure · Schema — one responsive row */}
+      {/* Services · Heartbeat · Infrastructure · Schema — one responsive row,
+          all cards stretched to equal height (clean aligned bottoms). */}
       <div
-        className="mb-3.5 grid items-start gap-3.5"
+        className="mb-3.5 grid items-stretch gap-3.5"
         style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 270px), 1fr))' }}
       >
         <ServicesPanel data={data} />

@@ -444,15 +444,15 @@ export default function PortfolioTab({ data }) {
       <KpiRow tradelog={data.tradelog} risk={data.risk} />
 
       {/* Two-column body */}
-      <div className="grid grid-cols-1 items-start gap-3.5 lg:grid-cols-[minmax(0,1fr)_372px] [&>*]:min-w-0">
+      <div className="grid grid-cols-1 items-stretch gap-3.5 lg:grid-cols-[minmax(0,1fr)_372px] [&>*]:min-w-0">
         {/* Left: Equity Curve + Calendar */}
-        <div className="flex flex-col gap-3.5">
+        <div className="flex flex-col gap-3.5 [&>*:last-child]:flex-1">
           <EquityCurve equity={data.equity} tradelog={data.tradelog} />
           <CalendarPnL tradelog={data.tradelog} />
         </div>
 
         {/* Right: Closed Trades + Performance */}
-        <div className="flex flex-col gap-3.5">
+        <div className="flex flex-col gap-3.5 [&>*:last-child]:flex-1">
           <ClosedTradesList tradelog={data.tradelog} />
           <PerformancePanel tradelog={data.tradelog} />
         </div>
