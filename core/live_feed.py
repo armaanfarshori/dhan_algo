@@ -18,7 +18,7 @@ Usage:
 import asyncio
 import logging
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional
 from zoneinfo import ZoneInfo
 
@@ -47,8 +47,8 @@ class CandleBuilder:
         self._volume = 0
         self._minute = -1
 
-    def on_tick(self, price: float, volume: int = 0):
-        now    = datetime.now(IST)
+    def on_tick(self, price: float, volume: int = 0, ts: Optional[datetime] = None):
+        now    = ts or datetime.now(IST)
         minute = now.hour * 60 + now.minute
 
         if minute != self._minute:
@@ -266,6 +266,39 @@ class LiveFeed:
                     raise
                 break
 
+    @staticmethod
+    def _parse_ltt(ltt_str: str) -> Optional[datetime]:
+        """Convert exchange LTT ("HH:MM:SS" UTC string from dhanhq Quote/Ticker
+        packet) to an IST-aware datetime anchored to today's UTC date.
+
+        The dhanhq marketfeed library decodes the LTT epoch via
+        ``datetime.utcfromtimestamp(epoch).strftime('%H:%M:%S')``, yielding a
+        plain ``"HH:MM:SS"`` string in UTC (the raw epoch integer is no longer
+        accessible from the parsed dict).  We reconstruct it by combining
+        today's UTC date with the time component and then converting to IST.
+
+        Edge case: if the UTC time crosses midnight (e.g. LTT "18:31" on a day
+        where IST is "00:01" next day) we use today's UTC date which is correct
+        because market hours are 09:15–15:30 IST = 03:45–10:00 UTC (always same
+        UTC date).
+
+        Returns None when the field is absent, empty, or unparsable so the
+        caller falls back to server-receive time.
+        """
+        if not ltt_str or not isinstance(ltt_str, str):
+            return None
+        try:
+            t = datetime.strptime(ltt_str, "%H:%M:%S")
+            today_utc = datetime.now(timezone.utc).date()
+            ltt_utc = datetime(
+                today_utc.year, today_utc.month, today_utc.day,
+                t.hour, t.minute, t.second,
+                tzinfo=timezone.utc,
+            )
+            return ltt_utc.astimezone(IST)
+        except ValueError:
+            return None
+
     def _on_data(self, data):
         """Process incoming WebSocket message."""
         if not isinstance(data, dict):
@@ -281,12 +314,21 @@ class LiveFeed:
 
         volume = int(data.get("volume") or data.get("vol") or 0)
 
+        # Extract exchange last-traded-time from the Quote/Ticker packet.
+        # dhanhq parses the binary LTT epoch into data["LTT"] as a UTC
+        # "HH:MM:SS" string.  Convert it to an IST-aware datetime so bars are
+        # bucketed by exchange time rather than server-receive time (the
+        # deviation is normally sub-second for liquid names, but under GC
+        # pauses or reconnects it can cross a minute boundary and mis-bucket).
+        # Fallback to server-receive time when the field is missing/zero.
+        tick_ts: Optional[datetime] = self._parse_ltt(data.get("LTT"))
+
         self._ticks[sid] = data
-        self._candles[sid].on_tick(ltp, volume)
+        self._candles[sid].on_tick(ltp, volume, ts=tick_ts)
 
         if self._on_tick_cb is not None:
             try:
-                self._on_tick_cb(sid, ltp, volume)
+                self._on_tick_cb(sid, ltp, volume, tick_ts)
             except Exception as exc:
                 logger.debug("LiveFeed on_tick callback error: %s", exc)
 

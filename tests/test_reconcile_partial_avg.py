@@ -37,9 +37,6 @@ def test_reconcile_uses_costprice_when_avgs_present(live_pf):
     assert live_pf.get("999").avg_price == 101.0
 
 
-@pytest.mark.xfail(strict=True,
-                   reason="M3: float(None) when a long row has no buyAvg "
-                          "(only sellAvg/costPrice) → reconcile aborts")
 def test_reconcile_survives_missing_buy_avg(live_pf):
     # Long position but buyAvg absent — broker reported only sellAvg + costPrice.
     broker = _FakeBroker([{"securityId": "999", "netQty": 10,

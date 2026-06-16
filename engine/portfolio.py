@@ -211,8 +211,13 @@ class Portfolio:
             sid = str(p.get("securityId") or p.get("security_id") or "")
             qty = int(p.get("netQty") or 0)
             if sid and qty != 0:
-                avg = float(p.get("buyAvg") if qty > 0 else p.get("sellAvg")) \
-                    if (p.get("buyAvg") or p.get("sellAvg")) else float(p.get("costPrice") or 0)
+                _primary = p.get("buyAvg") if qty > 0 else p.get("sellAvg")
+                _other   = p.get("sellAvg") if qty > 0 else p.get("buyAvg")
+                _cost    = p.get("costPrice")
+                avg = float(_primary if _primary is not None
+                            else _cost if _cost is not None
+                            else _other if _other is not None
+                            else 0)
                 broker_rows[sid] = (qty, avg)
 
         for sid in set(broker_rows) | {p.security_id for p in self.open_positions()}:

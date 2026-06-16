@@ -127,7 +127,18 @@ class BarBuilder:
         except Exception as exc:
             # Re-queue so a transient DB blip (backfill contention) loses nothing
             self._pending = batch + self._pending
-            logger.warning("BarBuilder: flush failed (%s) — %d bars re-queued", exc, len(batch))
+            # Cap the buffer so a prolonged DB outage cannot exhaust RAM.
+            # Oldest bars are dropped first — newest bars matter most for Kronos
+            # and the live strategy; this path only fires during a DB outage.
+            _MAX_PENDING = 500
+            if len(self._pending) > _MAX_PENDING:
+                dropped = len(self._pending) - _MAX_PENDING
+                self._pending = self._pending[-_MAX_PENDING:]
+                logger.warning(
+                    "BarBuilder: pending buffer exceeded %d — dropped %d oldest bars",
+                    _MAX_PENDING, dropped,
+                )
+            logger.warning("BarBuilder: flush failed (%s) — %d bars re-queued", exc, len(self._pending))
 
     def get_current(self, security_id: str) -> Optional[dict]:
         """Return the in-progress bar's intrabar OHLC, or None if no bar exists.

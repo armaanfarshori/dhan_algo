@@ -1,6 +1,9 @@
-"""System / ops handlers: log tail, backfill status, system health, postback."""
-import hashlib
-import hmac
+"""System / ops handlers: log tail, backfill status, system health.
+
+Note: postback_handler was intentionally moved to apps/api.py so that
+monkeypatching apps.api._reconcile_postback in tests takes effect at
+call time (the handler resolves it from the apps.api module namespace).
+"""
 import json
 import logging
 from datetime import datetime, timezone
@@ -121,36 +124,3 @@ async def system_health_handler(_r: web.Request) -> web.Response:
     return web.json_response(result)
 
 
-async def postback_handler(request: web.Request) -> web.Response:
-    from apps.api import cfg
-    # SEC-09: optional HMAC verification.  If DHAN_WEBHOOK_SECRET is set,
-    # read the raw body first, compute the expected signature, and
-    # constant-time compare against the X-Dhan-Signature header.
-    # When the secret is unset, behaviour is unchanged (back-compat).
-    secret = cfg.dhan_webhook_secret
-    if secret:
-        raw_body = await request.read()
-        expected = hmac.new(
-            secret.encode(), raw_body, hashlib.sha256
-        ).hexdigest()
-        provided = request.headers.get("X-Dhan-Signature", "")
-        if not provided or not hmac.compare_digest(expected, provided):
-            logger.warning("Postback rejected — invalid or missing X-Dhan-Signature")
-            return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
-        try:
-            payload = json.loads(raw_body)
-        except Exception:
-            return web.json_response({"ok": False, "error": "bad json"}, status=400)
-    else:
-        try:
-            payload = await request.json()
-        except Exception:
-            return web.json_response({"ok": False, "error": "bad json"}, status=400)
-    try:
-        logger.info("📬 Postback: %s order %s → %s",
-                    payload.get("tradingSymbol", "?"), payload.get("orderId"),
-                    payload.get("orderStatus"))
-        return web.json_response({"ack": "ok"})
-    except Exception:
-        logger.exception("postback_handler failed")
-        return web.json_response({"ok": False, "error": "internal error"}, status=400)
