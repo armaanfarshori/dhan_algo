@@ -61,3 +61,43 @@ def test_pending_is_bounded_on_repeated_flush_failure(monkeypatch):
     asyncio.run(go())
     # 600 bars accumulate today; a robust buffer would cap retained bars.
     assert len(bb._pending) <= 500, "pending bar buffer should be capped"
+
+
+# ── T6: out-of-order tick guard ─────────────────────────────────────────────────
+
+def test_out_of_order_tick_is_dropped():
+    """T6 — Regression: a stale WS packet (past-minute timestamp after reconnect)
+    must NOT roll the BarBuilder backwards or overwrite an already-closed bar.
+
+    Sequence:
+      1. Tick at minute T         → bar for T opens.
+      2. Tick at minute T+1       → bar for T is closed; bar for T+1 opens.
+      3. Stale tick at minute T   → must be silently dropped; current bar stays T+1.
+    """
+    from datetime import timedelta
+
+    bb = BarBuilder()
+    t0 = datetime(2026, 6, 16, 10, 5, 0, tzinfo=IST)   # minute T
+    t1 = t0 + timedelta(minutes=1)                       # minute T+1
+
+    # Step 1: open bar at T
+    bb.on_tick("NSE_EQ:1234", 200.0, cum_volume=1000, ts=t0)
+    assert bb._current["NSE_EQ:1234"].minute_start == t0
+
+    # Step 2: advance to T+1 — this closes the T bar and opens T+1
+    bb.on_tick("NSE_EQ:1234", 201.0, cum_volume=1100, ts=t1)
+    assert bb._current["NSE_EQ:1234"].minute_start == t1, \
+        "bar should have rolled forward to T+1"
+    assert len(bb._pending) == 1, "T bar should now be in pending"
+    t1_open = bb._current["NSE_EQ:1234"].open
+
+    # Step 3: stale tick at minute T — must be dropped
+    bb.on_tick("NSE_EQ:1234", 999.0, cum_volume=9999, ts=t0)
+
+    current = bb._current["NSE_EQ:1234"]
+    assert current.minute_start == t1, \
+        "current bar must still be anchored to T+1 after stale tick"
+    assert current.open == t1_open, \
+        "stale tick must not alter the open of the T+1 bar"
+    assert len(bb._pending) == 1, \
+        "no additional bar must have been closed by the stale tick"
