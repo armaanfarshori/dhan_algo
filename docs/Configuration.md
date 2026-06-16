@@ -87,8 +87,9 @@ There is deliberately **no static watchlist variable**. The screener output is v
 | Field | Default | Notes |
 |---|---|---|
 | `webhook_port` | `8765` | Port `dhan-api` binds on |
-| `api_bind_host` | `0.0.0.0` | Interface `dhan-api` binds to. Default keeps Tailscale-direct access (`100.x.x.x:8765`); set to `127.0.0.1` to restrict to loopback/SSH-tunnel only |
-| `dashboard_token` | `""` | Shared secret for mutating POST endpoints (`/api/killswitch`, `/api/watchlist/refresh`). Empty = unprotected (fail-open so a misconfigured secret never locks the operator out of the kill-switch) |
+| `api_bind_host` | `"0.0.0.0"` | Interface `dhan-api` binds to. Default keeps Tailscale-direct access (`100.x.x.x:8765`); set to `"127.0.0.1"` to restrict to loopback/SSH-tunnel only |
+| `dashboard_token` | `""` | Shared secret for mutating POST endpoints (`/api/killswitch`, `/api/watchlist/refresh`). Accepted as `X-Dashboard-Token: <token>` or `Authorization: Bearer <token>`. Empty = unprotected (fail-open so a misconfigured secret never locks the operator out of the kill-switch) |
+| `dhan_webhook_secret` | `""` | HMAC-SHA256 secret for the `/postback` Dhan webhook (SEC-09). When set, the handler verifies `X-Dhan-Signature: <hex>` on every incoming postback request. Empty = no verification (back-compat) |
 
 ## Telegram alerts
 
@@ -96,6 +97,15 @@ There is deliberately **no static watchlist variable**. The screener output is v
 |---|---|---|
 | `telegram_bot_token` | `""` | Plain bot-API token; empty disables alerts silently |
 | `telegram_chat_id` | `""` | Target chat / group ID |
+
+## Backfill paths
+
+| Field | Default | Notes |
+|---|---|---|
+| `backfill_checkpoint_path` | `"/opt/dhan-trading/backfill_ckpt_NSE_EQ.json"` | Absolute path to the JSON checkpoint file read by `/api/backfill/status` |
+| `backfill_log_path` | `"/tmp/backfill.log"` | Absolute path to the backfill log tailed by `/api/backfill/status` |
+
+Override these only when running backfill outside `/opt/dhan-trading` (e.g. local test runs).
 
 ## TimescaleDB
 

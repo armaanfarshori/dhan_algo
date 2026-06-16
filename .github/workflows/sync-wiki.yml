@@ -26,7 +26,11 @@ jobs:
             wiki
 
       - name: Copy docs into wiki
-        run: cp docs/*.md wiki/
+        run: |
+          cp docs/*.md wiki/
+          if [ -d docs/images ]; then
+            mkdir -p wiki/images && cp docs/images/* wiki/images/ 2>/dev/null || true
+          fi
 
       - name: Commit and push if changed
         run: |

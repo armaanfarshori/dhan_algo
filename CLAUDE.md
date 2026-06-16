@@ -1,7 +1,7 @@
 # DhanAIBot — Trading Platform (agent instructions)
 **Repo:** `github.com/armaanfarshori/dhan_algo` (PUBLIC — never commit IPs, account IDs, tokens, chat IDs)
-**Last updated:** 2026-06-12
-**Current phase:** ENGINE LIVE (paper) · BACKFILL RUNNING · GATE IN SHADOW
+**Last updated:** 2026-06-16
+**Current phase:** ENGINE LIVE (paper) · SDLC-HARDENED · BACKFILL ~67% · GATE IN SHADOW
 
 ---
 
@@ -26,19 +26,45 @@ bucket name), and `secrets.md`. **All real infrastructure values live there, not
 
 AWS CLI on the Mac: profile `dhan-terraform` (set via AWS_PROFILE in ~/.zshrc).
 
+**⚠️ Terraform state** lives in a SEPARATE clone at `~/Documents/codecode/DhanAIBot/infra`
+(holds `terraform.tfvars` + gitignored `backend.hcl`), NOT this repo. Since 2026-06-16 the
+state is in S3 (`s3://dhan-trading-tfstate-<acct>/dhan-trading/terraform.tfstate`, versioned)
++ DynamoDB lock `dhan-trading-tflock`; partial backend (bucket name in `backend.hcl`, see
+`infra/backend.hcl.example`). Run terraform from that clone: `terraform init -backend-config=backend.hcl`.
+ALWAYS `terraform plan` and verify NO `aws_instance`/`aws_eip` replace/destroy before `apply`
+(an `associate_public_ip_address` drift once tried to destroy the live agent — now in
+`ignore_changes`). See memory `terraform-state-and-apply`.
+
 ---
 
-## ⚡ TL;DR — Current state (2026-06-12 EOD)
+## ⚡ TL;DR — Current state (2026-06-16 EOD)
 
 ```
 TWO PROCESSES on the agent (systemd):
   dhan-trader  (apps/trader.py) — order flow only; heartbeat → run/trader_heartbeat.json
   dhan-api     (apps/api.py)    — dashboard :8765; reads DB + heartbeat only
-PAPER mode · Kronos gate in SHADOW (logs verdicts, never blocks) · 71 tests, CI green.
-Backfill RUNNING in screen `backfill` (~23%, ckpt backfill_ckpt_NSE_EQ.json, ETA ~Jun 16-17).
-First full paper session completed 2026-06-12: 6 trades, clean exits, ~flat after costs.
-Screener hardened: ₹50 price floor + 50K volume floor + scrip-master validation.
+       (handlers decomposed into apps/routes/{heartbeat,db,market,system}.py + _db_query helper)
+PAPER mode · Kronos gate SHADOW (logs verdicts, never blocks) · 192 tests, CI green.
+Backfill RUNNING in screen `backfill` (~67%, ckpt backfill_ckpt_NSE_EQ.json).
 main.py is GONE (Phase 1). Hermes LLM gateway RETIRED (plain Telegram via core/notify.py).
+
+2026-06-16 — FULL SDLC REMEDIATION shipped (64/65 checklist items, 11 PRs, backfill never
+disturbed). Highlights (see memory `terraform-state-and-apply`, `credential-scrub-2026-06-16`):
+  • Security: REAL Dhan creds were leaked in old git history → history REWRITTEN + force-pushed
+    (agent clone was hard-reset). Shared-secret auth on POST /api/killswitch + /watchlist/refresh
+    (DASHBOARD_TOKEN, X-Dashboard-Token/Bearer, fail-open if unset). /postback HMAC. /api/status
+    masks client_id. Deps pinned. *** SEC-2: rotate Dhan PIN/TOTP/token — STILL PENDING (yours). ***
+  • FEAT-01/02: dashboard System-tab API rate-limit spend panel, backed by cross-process accounting
+    (core/api_usage.py + api_usage table; trader/api/backfill flush deltas; GET /api/rate-limits).
+  • DATA: one DB engine/process; open_trade_id threaded entry→exit; BarBuilder is the single
+    tick→candle aggregator; get_adv uses a 30-day time bound (no ORDER BY on bars).
+  • Schema head 007 (006 = features_snapshot json→jsonb + GIN; 007 = api_usage).
+  • Infra: remote TF state in S3 + DynamoDB lock; daily EBS snapshots (DLM); systemd
+    StartLimitBurst + OnFailure=dhan-alert@; scripts/health_alert.py monitor cron (5-min);
+    logrotate; TimescaleDB image pinned 2.17.2-pg16.
+  • CI: Py3.11 + x86/ARM matrix + coverage gate + ruff + pre-commit; CodeQL + Dependabot CLEAN.
+  • Skipped: DATA-07 (equity_curve PK — risky hypertable change, ~zero value). OPS-03 SSH lockdown
+    SCOPED OUT (user decision).
 ```
 
 **Dev workflow:** Mac edit → `git push` → on agent `sudo git pull` (repo at `/opt/dhan-trading`)
@@ -53,7 +79,7 @@ main.py is GONE (Phase 1). Hermes LLM gateway RETIRED (plain Telegram via core/n
 |---|---|---|
 | M0 — AWS infrastructure | ✅ Done | VPC, EC2×2 (agent + DB), EIP, S3, SSM, IAM, Terraform |
 | M1 — Database schema | ✅ Done | 19 tables, 5 hypertables, alembic head **005** |
-| M2 — Data pipeline | ⏳ | Historical backfill ~23% (all NSE_EQ). **Live half DONE 2026-06-12**: LiveFeed→BarBuilder→bars works (string-SecurityId fix) |
+| M2 — Data pipeline | ⏳ | Historical backfill ~67% (all NSE_EQ). **Live half DONE 2026-06-12**: LiveFeed→BarBuilder→bars works (string-SecurityId fix) |
 | M2.5 — Clean data replica | ❌ Next | `scripts/build_clean_db.py` exists — review for survivorship, then run after backfill |
 | M3 — Backtester on real bars | ⚠️ Built, study pending | `research/backtest/` complete; the 2-year three-way study runs after M2.5 |
 | M4 — Execution engine DB writes | ✅ Done | Verified across a full live session |
@@ -177,7 +203,8 @@ dhan_algo/
 ├── backfill.py             Historical OHLCV CLI (checkpointed)
 ├── config.py               pydantic-settings Config — the only env reader
 ├── db.py                   SQLAlchemy engine/session
-└── tests/                  71 tests (pytest -q) + GitHub Actions CI
+├── tests/                  192 tests (pytest -q) + GitHub Actions CI (Py3.11, x86+ARM, cov, ruff)
+└── apps/routes/            decomposed dashboard handlers (heartbeat, db, market, system)
 ```
 
 ---
