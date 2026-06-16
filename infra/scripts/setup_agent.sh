@@ -36,7 +36,6 @@ DHAN_ACCESS_TOKEN=$(get_ssm dhan_access_token)
 DHAN_TOTP_SECRET=$(get_ssm dhan_totp_secret)
 DHAN_PIN=$(get_ssm dhan_pin)
 DB_PASSWORD=$(get_ssm db_password)
-GROQ_API_KEY=$(get_ssm groq_api_key)
 
 # ── Clone repo ────────────────────────────────────────────────────────────────
 APP_DIR=/opt/dhan-trading
@@ -54,7 +53,6 @@ printf '%s\n' \
   "CAPITAL=100000" \
   "RISK_PER_TRADE=0.01" \
   "ORB_RANGE_MINUTES=15" \
-  "WATCHLIST_SECURITY_IDS=2885,1333,1594,11536" \
   "WATCHLIST_EXCHANGE_SEGMENT=NSE_EQ" \
   "DB_HOST=$DB_HOST" \
   "DB_PORT=5432" \
@@ -67,8 +65,6 @@ printf '%s\n' \
   "KRONOS_PRED_LEN=30" \
   "KRONOS_SAMPLES=5" \
   "KRONOS_THRESH=0.001" \
-  "GROQ_API_KEY=$GROQ_API_KEY" \
-  "GROQ_MODEL=groq/llama-3.3-70b-versatile" \
   > "$APP_DIR/.env"
 
 chmod 600 "$APP_DIR/.env"

@@ -60,9 +60,3 @@ variable "dhan_pin" {
   type      = string
   sensitive = true
 }
-
-variable "groq_api_key" {
-  description = "Groq API key for Hermes LLM orchestrator (console.groq.com)"
-  type        = string
-  sensitive   = true
-}
