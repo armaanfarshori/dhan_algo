@@ -1,6 +1,6 @@
-# DhanAIBot — Overview
+# Tessera — Overview
 
-DhanAIBot is a self-hosted intraday trading platform for NSE equities, built on the DhanHQ v2 API. It pairs a rule-based Opening Range Breakout (ORB) strategy with Kronos, an OHLCV foundation model used as an AI signal gate, on top of TimescaleDB.
+Tessera is a self-hosted intraday trading platform for NSE equities, built on the DhanHQ v2 API. It pairs a rule-based Opening Range Breakout (ORB) strategy with Kronos, an OHLCV foundation model used as an AI signal gate, on top of TimescaleDB.
 
 The operating principle is **evidence before exposure**:
 

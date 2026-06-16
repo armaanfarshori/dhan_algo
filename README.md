@@ -1,4 +1,4 @@
-# DhanAIBot — Algorithmic Trading Platform for NSE
+# Tessera — Algorithmic Trading Platform for NSE
 
 *Status: paper trading live (2026-06-16) · Kronos gate in shadow mode · historical backfill ~67% · CI green*
 

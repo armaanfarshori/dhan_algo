@@ -282,14 +282,14 @@ State is stored in S3 (`dhan-trading/terraform.tfstate`, versioned + encrypted)
 with a DynamoDB lock table (`dhan-trading-tflock`). The bucket name embeds the
 AWS account ID and must not be committed to this public repo.
 
-**Working clone for Terraform:** `~/Documents/codecode/DhanAIBot/infra`
+**Working clone for Terraform:** `~/Documents/codecode/Tessera/infra`
 (holds `terraform.tfvars` + `backend.hcl`). Do **not** run Terraform from the
 Mac's `~/Desktop/dhan_algo/infra` — it lacks those private files.
 
 **Init:**
 
 ```bash
-cd ~/Documents/codecode/DhanAIBot/infra
+cd ~/Documents/codecode/Tessera/infra
 # First time (local → S3 migration):
 terraform init -migrate-state -backend-config=backend.hcl
 # Subsequent inits:

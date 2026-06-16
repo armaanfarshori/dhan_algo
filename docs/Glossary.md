@@ -1,4 +1,4 @@
-# Glossary — DhanAIBot (`dhan_algo`)
+# Glossary — Tessera (`dhan_algo`)
 
 Every abbreviation, acronym, and domain term used across the codebase and documentation, grouped by topic. Definitions are grounded in how *this project* uses each term. Entries are alphabetical within each section.
 

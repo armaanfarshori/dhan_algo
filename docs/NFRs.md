@@ -1,4 +1,4 @@
-# Non-Functional Requirements — DhanAIBot
+# Non-Functional Requirements — Tessera
 
 **Status:** Current (2026-06-16)
 **Scope:** Platform-wide; applies to both `dhan-trader` and `dhan-api` unless a domain column says otherwise.

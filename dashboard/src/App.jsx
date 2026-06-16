@@ -11,7 +11,7 @@ import SystemTab from '@/components/system/SystemTab'
 class ErrorBoundary extends Component {
   state = { error: null }
   static getDerivedStateFromError(e) { return { error: e } }
-  componentDidCatch(e, info) { console.error('DhanAI render error:', e, info) }
+  componentDidCatch(e, info) { console.error('Tessera render error:', e, info) }
   render() {
     if (this.state.error) {
       return (

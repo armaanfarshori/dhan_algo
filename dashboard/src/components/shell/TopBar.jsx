@@ -52,7 +52,7 @@ export function TopBar({ data }) {
               boxShadow: `0 0 0 3px hsl(var(--${alive ? 'profit' : 'loss'}) / .15)`,
             }}
           />
-          DhanAI
+          Tessera
         </div>
 
         <Badge variant={mode === 'LIVE' ? 'loss' : 'amber'}>{mode}</Badge>

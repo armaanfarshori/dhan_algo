@@ -1,4 +1,4 @@
-# QA Analysis Report — DhanAIBot (`dhan_algo`)
+# QA Analysis Report — Tessera (`dhan_algo`)
 
 **Date:** 2026-06-15
 **Scope:** Full codebase QA sweep (apps, engine, core, ml, strategies, research, tests)
@@ -24,7 +24,7 @@
 
 ## 1. Executive Summary
 
-DhanAIBot is a paper-mode-default intraday NSE trading platform with a genuinely clean post-rewrite architecture: pure strategy logic, a swappable executor abstraction, DB-persisted state, and disciplined separation between the trading process and the read-only dashboard. Engineering hygiene is above average for a solo trading project — 85 fast unit tests, pure-function stats, and strong safety defaults (paper-first, single kill-switch owner, fail-open gate).
+Tessera is a paper-mode-default intraday NSE trading platform with a genuinely clean post-rewrite architecture: pure strategy logic, a swappable executor abstraction, DB-persisted state, and disciplined separation between the trading process and the read-only dashboard. Engineering hygiene is above average for a solo trading project — 85 fast unit tests, pure-function stats, and strong safety defaults (paper-first, single kill-switch owner, fail-open gate).
 
 However, **the test suite covers the safe, pure parts of the system and almost none of the dangerous, side-effecting parts.** The modules that place real orders, refresh auth tokens, and write trade records — the ones that move money or corrupt state — have effectively zero direct tests, and two of them contain latent correctness bugs that would only fire in live mode or under multi-fill conditions. The system is well-built for the paths it exercises in paper mode and under-defended on the paths it will hit the first time real capital and network turbulence are involved.
 

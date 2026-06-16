@@ -77,12 +77,12 @@ research, pull curated Parquet extracts from S3 and query them with DuckDB.
 ### 1. Provision infrastructure
 
 Terraform state lives in S3 + DynamoDB — see the *Remote state* note below.
-The working Terraform clone is `~/Documents/codecode/DhanAIBot/infra` (holds
+The working Terraform clone is `~/Documents/codecode/Tessera/infra` (holds
 `terraform.tfvars` + the gitignored `backend.hcl`). Do **not** run Terraform
 from `~/Desktop/dhan_algo/infra` on the Mac — it lacks those private files.
 
 ```bash
-cd ~/Documents/codecode/DhanAIBot/infra
+cd ~/Documents/codecode/Tessera/infra
 
 # First time (or migrating local → S3 state):
 terraform init -migrate-state -backend-config=backend.hcl

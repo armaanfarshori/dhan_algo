@@ -11,7 +11,7 @@ export function useTheme() {
     setTheme((prev) => {
       const next = prev === 'dark' ? 'light' : 'dark'
       document.documentElement.classList.toggle('dark', next === 'dark')
-      try { localStorage.setItem('dhan-theme', next) } catch { /* private mode */ }
+      try { localStorage.setItem('tessera-theme', next) } catch { /* private mode */ }
       return next
     })
   }, [])
