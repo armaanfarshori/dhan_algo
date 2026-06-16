@@ -436,6 +436,12 @@ async def run_backfill(args, cfg):
 
         _chunk_counter = 0  # counts completed securities; flush usage every 50
         _FLUSH_EVERY = 50
+        # Full-history backfill is ~minutes PER security, so the 50-security gate
+        # could take a day to trip — and _chunk_counter resets on every restart,
+        # so usage was never persisted. Also flush on a wall-clock cadence so the
+        # spend panel reflects reality within ~2 min regardless of per-security pace.
+        _FLUSH_SECONDS = 120
+        _last_flush = _time.monotonic()
 
         try:
             idx = start_idx
@@ -480,8 +486,10 @@ async def run_backfill(args, cfg):
                 # Flush API usage every N securities — backfill is the heaviest
                 # consumer (100K data calls / day) so frequent flushing matters.
                 _chunk_counter += 1
-                if _chunk_counter % _FLUSH_EVERY == 0:
+                if (_chunk_counter % _FLUSH_EVERY == 0
+                        or _time.monotonic() - _last_flush >= _FLUSH_SECONDS):
                     await _usage_flusher.flush(client)
+                    _last_flush = _time.monotonic()
 
             logger.info("Segment %s complete — %d securities processed", args.exchange_segment, n_total - start_idx)
         finally:
