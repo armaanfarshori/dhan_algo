@@ -338,9 +338,9 @@ function ExecutionsFeed({ signals }) {
   const exits = feed.filter(s => s.action === 'EXIT').length
 
   return (
-    <Panel>
+    <Panel className="flex h-full flex-col">
       <PanelHeader title="Executions" meta={`today · ${exits} round trips`} />
-      <div className="overflow-y-auto" style={{ maxHeight: 320 }}>
+      <div className="min-h-0 flex-1 overflow-y-auto">
         {feed.length === 0 ? (
           <div className="p-4 mono text-[10px] text-muted-foreground">
             No executions today — entries appear here when ORB fires
@@ -395,7 +395,7 @@ function GatePanel({ gate }) {
   const isShadow  = decisions.some(d => d.shadow)
 
   return (
-    <Panel>
+    <Panel className="flex h-full flex-col">
       <PanelHeader
         title={
           <span className="flex items-center gap-2">
@@ -422,11 +422,11 @@ function GatePanel({ gate }) {
       )}
 
       {decisions.length === 0 ? (
-        <div className="p-4 mono text-[10px] text-muted-foreground">
+        <div className="min-h-0 flex-1 p-4 mono text-[10px] text-muted-foreground">
           No gate decisions today — they fire on ORB breakouts
         </div>
       ) : (
-        <div className="overflow-y-auto" style={{ maxHeight: 220 }}>
+        <div className="min-h-0 flex-1 overflow-y-auto">
           {decisions.map((d, i) => {
             const isAllow  = d.verdict === 'ALLOW'
             const verdictCls = isAllow
@@ -501,8 +501,9 @@ export default function SignalsTab({ data }) {
           <ORBCockpit data={data} />
         </div>
 
-        {/* RIGHT: executions + gate */}
-        <div className="flex flex-col gap-[14px] [&>*:last-child]:flex-1">
+        {/* RIGHT: executions + gate — equal halves, each scrolls, together
+              filling the column height to match the cockpit on the left. */}
+        <div className="flex flex-col gap-[14px] [&>*]:min-h-0 [&>*]:flex-1">
           <ExecutionsFeed signals={signals} />
           <GatePanel gate={gate} />
         </div>

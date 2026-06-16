@@ -158,19 +158,23 @@ function ServiceRow({ dot, name, sub, state, uptime }) {
     'default'
 
   return (
-    <div className="flex items-center justify-between border-b border-border px-4 py-[11px] last:border-b-0">
-      <div className="flex items-center gap-2.5">
+    <div
+      className="grid items-center gap-3 border-b border-border px-4 py-[11px] last:border-b-0"
+      style={{ gridTemplateColumns: 'minmax(0,1fr) auto 78px' }}
+    >
+      {/* name + dot — left */}
+      <div className="flex min-w-0 items-center gap-2.5">
         <span style={dotStyle} />
-        <div>
+        <div className="min-w-0">
           <div className="mono text-[12px] font-medium text-foreground">{name}</div>
           {sub && <div className="text-[9.5px] text-faint mt-[1px]">{sub}</div>}
         </div>
       </div>
-      <div className="flex items-center gap-2 shrink-0 ml-4">
+      {/* info text — middle */}
+      <span className="mono whitespace-nowrap text-right text-[10.5px] text-faint">{uptime || ''}</span>
+      {/* status — consistent right column */}
+      <div className="flex justify-end">
         <Badge variant={badgeVariant}>{state}</Badge>
-        {uptime && (
-          <span className="mono text-[10.5px] text-faint w-[64px] text-right">{uptime}</span>
-        )}
       </div>
     </div>
   )
@@ -535,7 +539,7 @@ export default function SystemTab({ data }) {
       {/* Services · Heartbeat · Infrastructure · Schema — one responsive row,
           all cards stretched to equal height (clean aligned bottoms). */}
       <div
-        className="mb-3.5 grid items-stretch gap-3.5"
+        className="mb-3.5 grid items-stretch gap-3.5 [&>*]:h-full"
         style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 270px), 1fr))' }}
       >
         <ServicesPanel data={data} />
