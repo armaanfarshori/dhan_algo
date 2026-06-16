@@ -139,7 +139,7 @@ class MasterTokenManager:
         logger.info("Generating new Dhan token via PIN + TOTP…")
         from dhanhq import DhanLogin   # lazy — only token GENERATION needs the SDK
         totp = pyotp.TOTP(self.totp_secret).now()
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _call():
             dl = DhanLogin(self.client_id)
@@ -163,7 +163,7 @@ class MasterTokenManager:
             return None
         try:
             from dhanhq import DhanLogin   # lazy — see _generate()
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             old  = self._token
 
             def _call():

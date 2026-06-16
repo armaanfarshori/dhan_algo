@@ -53,7 +53,7 @@ def send(text: str, timeout: int = 10) -> bool:
 
 async def send_async(text: str) -> bool:
     """Executor-wrapped send for use inside the trading event loop."""
-    return await asyncio.get_event_loop().run_in_executor(None, send, text)
+    return await asyncio.get_running_loop().run_in_executor(None, send, text)
 
 
 def main():

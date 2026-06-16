@@ -22,7 +22,6 @@ Usage:
 import argparse
 import asyncio
 import logging
-import re
 import time as _time
 from datetime import date, timedelta, datetime
 from pathlib import Path
@@ -40,7 +39,6 @@ from core.client import DhanClient
 
 _ENV_FILE = Path(__file__).parent / ".env"
 
-import time as _time
 
 class _ISTFormatter(logging.Formatter):
     """Log timestamps in IST (UTC+5:30) for readability."""
@@ -327,23 +325,6 @@ async def backfill_daily(
     if dry_run or df.empty:
         return len(df)
     return _upsert_bars(df, "1d")
-
-
-# ── Token refresh callback ────────────────────────────────────────────────────
-
-def _save_token_to_env(new_token: str):
-    """Persist refreshed access token to .env so restarts use the latest."""
-    if not _ENV_FILE.exists():
-        return
-    content = _ENV_FILE.read_text()
-    updated = re.sub(
-        r"^DHAN_ACCESS_TOKEN=.*$",
-        f"DHAN_ACCESS_TOKEN={new_token}",
-        content,
-        flags=re.MULTILINE,
-    )
-    _ENV_FILE.write_text(updated)
-    logger.info("Token refreshed and written to .env")
 
 
 # ── Orchestrator ───────────────────────────────────────────────────────────────

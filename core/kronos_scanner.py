@@ -127,7 +127,7 @@ class KronosScanner:
 
     async def _scan_once(self):
         from core.nse_screener import get_top_volatile
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         self.scanning = True
         # 1. Screener (sync — run in executor)

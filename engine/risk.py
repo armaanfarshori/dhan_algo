@@ -122,7 +122,7 @@ class RiskEngine:
                     FROM trades WHERE status = 'CLOSED'
                 """)).fetchone()
         try:
-            row = await asyncio.get_event_loop().run_in_executor(None, _query)
+            row = await asyncio.get_running_loop().run_in_executor(None, _query)
             self._realized_total = float(row[0])
             self._realized_today = float(row[1])
             self._realized_week = float(row[2])
@@ -221,7 +221,7 @@ class RiskEngine:
                     ) t
                 """), {"sid": security_id}).scalar()
         try:
-            adv = await asyncio.get_event_loop().run_in_executor(None, _query)
+            adv = await asyncio.get_running_loop().run_in_executor(None, _query)
             adv = float(adv) if adv else None
         except Exception as exc:
             logger.warning("Risk: ADV lookup failed for %s (%s) — no liquidity cap",

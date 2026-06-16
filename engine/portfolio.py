@@ -135,7 +135,7 @@ class Portfolio:
                     "strategy": pos.strategy,
                 })
         try:
-            await asyncio.get_event_loop().run_in_executor(None, _write)
+            await asyncio.get_running_loop().run_in_executor(None, _write)
         except Exception as exc:
             # Never let journalling failure block trading — but be loud:
             # losing this row means a restart loses the position.
@@ -154,7 +154,7 @@ class Portfolio:
                 """), {"mode": self.mode}).fetchall()
 
         try:
-            rows = await asyncio.get_event_loop().run_in_executor(None, _read)
+            rows = await asyncio.get_running_loop().run_in_executor(None, _read)
         except Exception as exc:
             logger.error("Portfolio reconcile failed (%s) — starting empty. "
                          "If a position was open, it is now UNTRACKED.", exc)

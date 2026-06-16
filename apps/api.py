@@ -157,7 +157,7 @@ async def kronos_gate_handler(_r: web.Request) -> web.Response:
         _cache_set("gate_calibration", cal)
         return cal
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         decisions = await loop.run_in_executor(None, _decisions)
     except Exception as exc:
@@ -201,7 +201,7 @@ async def equity_handler(_r: web.Request) -> web.Response:
             for r in rows]}
 
     try:
-        result = await asyncio.get_event_loop().run_in_executor(None, _query)
+        result = await asyncio.get_running_loop().run_in_executor(None, _query)
         _cache_set("equity_curve", result)
         return web.json_response(result)
     except Exception as exc:
@@ -344,7 +344,7 @@ async def logs_handler(request: web.Request) -> web.Response:
             })
         return out
 
-    logs = await asyncio.get_event_loop().run_in_executor(None, _tail)
+    logs = await asyncio.get_running_loop().run_in_executor(None, _tail)
     return web.json_response({"ok": True, "logs": logs})
 
 
@@ -367,7 +367,7 @@ async def signals_handler(_r: web.Request) -> web.Response:
                 ORDER BY t.entry_ts DESC LIMIT 100
             """)).fetchall()
     try:
-        rows = await asyncio.get_event_loop().run_in_executor(None, _query)
+        rows = await asyncio.get_running_loop().run_in_executor(None, _query)
     except Exception as exc:
         return web.json_response([])
     sigs = []
@@ -407,7 +407,7 @@ async def trades_handler(request: web.Request) -> web.Response:
         return rows, summary
 
     try:
-        rows, summary = await asyncio.get_event_loop().run_in_executor(None, _query)
+        rows, summary = await asyncio.get_running_loop().run_in_executor(None, _query)
     except Exception as exc:
         return web.json_response({"ok": False, "error": str(exc), "trades": []})
 
@@ -502,7 +502,7 @@ async def db_stats_handler(_r: web.Request) -> web.Response:
         }
 
     try:
-        result = await asyncio.get_event_loop().run_in_executor(None, _query)
+        result = await asyncio.get_running_loop().run_in_executor(None, _query)
         _cache_set("db_stats", result)
         return web.json_response(result)
     except Exception as exc:
@@ -531,7 +531,7 @@ async def kronos_signals_handler(request: web.Request) -> web.Response:
             """), {"lim": limit}).fetchall()
 
     try:
-        rows = await asyncio.get_event_loop().run_in_executor(None, _query)
+        rows = await asyncio.get_running_loop().run_in_executor(None, _query)
         return web.json_response({"ok": True, "signals": [
             {"security_id": r[0], "side": r[1], "score": float(r[2] or 0),
              "confidence": float(r[3] or 0), "strategy": r[4], "ts": str(r[5]),
@@ -567,7 +567,7 @@ async def kronos_screener_handler(request: web.Request) -> web.Response:
         return candidates
 
     try:
-        candidates = await asyncio.get_event_loop().run_in_executor(None, _query)
+        candidates = await asyncio.get_running_loop().run_in_executor(None, _query)
         result = {"ok": True, "candidates": candidates, "count": len(candidates)}
         if candidates:
             _cache_set(f"screener_{n}", result)
@@ -650,7 +650,7 @@ async def instrument_search_handler(request: web.Request) -> web.Response:
     if len(q) < 2:
         return web.json_response({"ok": False, "error": "Query must be at least 2 characters"},
                                  status=400)
-    results = await asyncio.get_event_loop().run_in_executor(
+    results = await asyncio.get_running_loop().run_in_executor(
         None, InstrumentMaster.search_instruments, q, segment)
     return web.json_response({"ok": True, "results": results})
 
@@ -759,7 +759,7 @@ async def system_health_handler(_r: web.Request) -> web.Response:
             "hermes": "retired 2026-06-11 — plain Telegram alerts via core/notify.py",
         }
 
-    result = await asyncio.get_event_loop().run_in_executor(None, _collect)
+    result = await asyncio.get_running_loop().run_in_executor(None, _collect)
     _cache_set("system_health", result)
     return web.json_response(result)
 
@@ -833,7 +833,7 @@ async def main():
     # JSON endpoints kept answering. Bigger dedicated pool = file serving
     # can never queue behind slow queries.
     from concurrent.futures import ThreadPoolExecutor
-    asyncio.get_event_loop().set_default_executor(
+    asyncio.get_running_loop().set_default_executor(
         ThreadPoolExecutor(max_workers=16, thread_name_prefix="api"))
 
     from db import init_db
