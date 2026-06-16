@@ -300,6 +300,72 @@ def _fetch_ohlcv_sync(security_id: str, exchange_segment: str, lookback: int) ->
     return df.sort_values("ts").reset_index(drop=True)
 
 
+def _directional_confidence(pred_close: np.ndarray, current_price: float) -> float:
+    """
+    Compute a [0, 1] confidence score from the spread of sampled close-price
+    forecasts relative to the current price.
+
+    Background
+    ----------
+    KronosPredictor runs Monte-Carlo sampling (sample_count N draws) over the
+    forecast horizon.  Each draw produces a sequence of predicted closes; we
+    receive ``pred_close`` — a 1-D array of length (N * pred_len) or (pred_len,)
+    depending on whether the predictor flattens samples.  When the model is
+    uncertain, the draws fan out widely; when it is confident, the draws cluster
+    tightly around a consensus trajectory.
+
+    Formula
+    -------
+    We measure dispersion as the *coefficient of variation* (std / price) — a
+    price-normalised standard deviation — then map it linearly into [0, 1] with
+    a fixed scale factor of 10, clamping to [0, 1]:
+
+        rel_std    = std(pred_close) / (current_price + 1e-9)
+        confidence = 1.0 - clamp(rel_std * 10, 0, 1)
+
+    The scale factor of 10 means:
+      • rel_std ≤ 0.0   → confidence = 1.0  (no spread at all — maximally certain)
+      • rel_std = 0.05  → confidence = 0.5  (5 % price spread across samples)
+      • rel_std = 0.10  → confidence = 0.0  (10 % price spread — maximally uncertain)
+      • rel_std > 0.10  → confidence = 0.0  (clamped)
+
+    For an NSE equity priced around ₹200–₹2000, a 5 % inter-sample spread in
+    the predicted horizon price (₹10–₹100 range) is a reasonable mid-point,
+    giving the gate its observed live values in the 0.85–0.99 region.
+
+    Inputs
+    ------
+    pred_close    : np.ndarray — all close-price predictions across samples and
+                    timesteps (flattened or 1-D horizon slice from pred_df).
+    current_price : float — last observed close price at scoring time, used only
+                    for price-normalisation (cannot be 0; guarded by + 1e-9).
+
+    Output
+    ------
+    float in [0, 1].  High value = samples agree tightly (act on signal).
+                      Low value  = samples diverge widely (noisy / ambiguous).
+
+    Calibration note
+    ----------------
+    This formula is baked into ``scorer_version()`` implicitly (the version
+    string does not yet encode the scale factor 10).  Any change to the numeric
+    output — including changing the 10× scale or the normalisation base — MUST
+    be accompanied by a ``scorer_version`` bump so in-flight calibration data
+    is not pooled with data produced under a different formula.
+
+    # REVIEW: The scale factor 10 is an arbitrary constant chosen so that
+    # typical NSE price spreads land in a useful part of [0, 1].  It was never
+    # empirically calibrated against realised accuracy.  A principled
+    # alternative would be to divide by the *expected move* implied by recent
+    # ATR (e.g. rel_std / atr_pct) so the constant becomes stock-agnostic.
+    # Implementing that requires passing ATR into this function and bumping
+    # scorer_version — do not do so until the current calibration run (≥30
+    # fresh verdicts) completes and provides a baseline to compare against.
+    """
+    rel_std = float(np.std(pred_close)) / (current_price + 1e-9)
+    return 1.0 - min(rel_std * 10, 1.0)
+
+
 def _compute_signal(x_df: pd.DataFrame, pred_df: pd.DataFrame, pred_len: int) -> dict:
     """Turn a forecast DataFrame into a BUY/SELL/HOLD signal with score/confidence."""
     current_price = float(x_df["close"].iloc[-1])
@@ -311,8 +377,7 @@ def _compute_signal(x_df: pd.DataFrame, pred_df: pd.DataFrame, pred_len: int) ->
     horizon_price = float(np.median(pred_close))
     forecasted_return = (horizon_price - current_price) / (current_price + 1e-9)
 
-    # Confidence from spread of close predictions across samples
-    confidence = 1.0 - min(float(np.std(pred_close)) / (current_price + 1e-9) * 10, 1.0)
+    confidence = _directional_confidence(pred_close, current_price)
     score = abs(forecasted_return)
 
     if forecasted_return > _SIGNAL_THRESH:
