@@ -532,22 +532,24 @@ export default function SystemTab({ data }) {
       {/* KPI row */}
       <KpiRow data={data} />
 
-      {/* Logs — the hero panel (most important, full width) */}
-      <div className="mb-3.5">
-        <LogsPanel logs={data.logs} />
-      </div>
-
-      {/* Everything else — uniform responsive grid that grows with content */}
+      {/* Services · Heartbeat · Infrastructure · Schema — one responsive row */}
       <div
-        className="grid items-start gap-3.5"
-        style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 300px), 1fr))' }}
+        className="mb-3.5 grid items-start gap-3.5"
+        style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 270px), 1fr))' }}
       >
         <ServicesPanel data={data} />
-        <RateLimitPanel rateLimitsData={data.rateLimitsData} />
         <HeartbeatPanel data={data} />
         <InfraPanel dbStats={data.dbStats} />
         <SchemaPanel dbStats={data.dbStats} />
       </div>
+
+      {/* API Spend — full width */}
+      <div className="mb-3.5">
+        <RateLimitPanel rateLimitsData={data.rateLimitsData} />
+      </div>
+
+      {/* Recent Logs — full width, at the bottom */}
+      <LogsPanel logs={data.logs} />
     </div>
   )
 }
