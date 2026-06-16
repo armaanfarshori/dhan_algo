@@ -147,6 +147,16 @@ async def main():
     logger.info("=" * 60)
     if not cfg.paper_trading:
         logger.warning("⚠️  LIVE TRADING MODE — real money at risk!")
+        # SEC-12: refuse to start in LIVE mode unless the operator has
+        # explicitly set ALLOW_LIVE_TOGGLE=true.  This prevents an accidental
+        # PAPER_TRADING=false flip from silently opening live positions.
+        if not cfg.allow_live_toggle:
+            logger.critical(
+                "LIVE mode requested but ALLOW_LIVE_TOGGLE is not set. "
+                "Set ALLOW_LIVE_TOGGLE=true in .env to confirm live intent, "
+                "then restart.  Refusing to start."
+            )
+            sys.exit(1)
 
     RUN_DIR.mkdir(exist_ok=True)
     start_time = time.time()

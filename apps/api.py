@@ -15,6 +15,7 @@ until M6, so nothing dangerous is one HTTP request away.
 This process can crash, hang, or redeploy without touching order flow.
 """
 import asyncio
+import hashlib
 import hmac
 import json
 import logging
@@ -842,13 +843,35 @@ async def dashboard_handler(_r: web.Request) -> web.Response:
 
 
 async def postback_handler(request: web.Request) -> web.Response:
+    # SEC-09: optional HMAC verification.  If DHAN_WEBHOOK_SECRET is set,
+    # read the raw body first, compute the expected signature, and
+    # constant-time compare against the X-Dhan-Signature header.
+    # When the secret is unset, behaviour is unchanged (back-compat).
+    secret = cfg.dhan_webhook_secret
+    if secret:
+        raw_body = await request.read()
+        expected = hmac.new(
+            secret.encode(), raw_body, hashlib.sha256
+        ).hexdigest()
+        provided = request.headers.get("X-Dhan-Signature", "")
+        if not provided or not hmac.compare_digest(expected, provided):
+            logger.warning("Postback rejected — invalid or missing X-Dhan-Signature")
+            return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
+        try:
+            payload = json.loads(raw_body)
+        except Exception:
+            return web.json_response({"ok": False, "error": "bad json"}, status=400)
+    else:
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "bad json"}, status=400)
     try:
-        payload = await request.json()
         logger.info("📬 Postback: %s order %s → %s",
                     payload.get("tradingSymbol", "?"), payload.get("orderId"),
                     payload.get("orderStatus"))
         return web.json_response({"ack": "ok"})
-    except Exception as e:
+    except Exception:
         logger.exception("postback_handler failed")
         return web.json_response({"ok": False, "error": "internal error"}, status=400)
 

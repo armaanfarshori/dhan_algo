@@ -55,7 +55,10 @@ def point_in_time_universe(
     window_start = as_of - timedelta(days=lookback_days * 2)   # calendar → trading days
 
     with get_session() as s:
-        s.execute(text(f"SET LOCAL statement_timeout = '{statement_timeout_ms}'"))
+        # Cast to int before inlining: PostgreSQL rejects bind params in SET
+        # statements, but coercing to int eliminates any injection surface.
+        ms = int(statement_timeout_ms)
+        s.execute(text(f"SET LOCAL statement_timeout = {ms}"))
         rows = s.execute(_SQL, {
             "window_start": window_start, "as_of": as_of, "seg": segment,
             "min_days": max(5, lookback_days // 3), "min_vol": min_avg_volume, "n": n,

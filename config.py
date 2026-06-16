@@ -6,10 +6,14 @@ codebase may call os.getenv(). Values come from the environment / .env file
 and are validated at first access — a typo'd numeric env var fails loudly at
 startup instead of deep inside a trading session.
 """
+import logging
 from functools import lru_cache
 from urllib.parse import quote_plus
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_cfg_logger = logging.getLogger("dhan.config")
 
 
 class Config(BaseSettings):
@@ -98,6 +102,10 @@ class Config(BaseSettings):
     kronos_shadow_mode: bool = True
 
     # ── Web / dashboard ─────────────────────────────────────────────────────
+    # SEC-09: HMAC secret for Dhan postback webhook. Empty = back-compat (no
+    # verification). Set to a random hex string in production to authenticate
+    # the X-Dhan-Signature header on incoming postback requests.
+    dhan_webhook_secret: str = ""
     webhook_port: int = 8765
     # Bind address for the aiohttp TCPSite.  Default 0.0.0.0 preserves
     # Tailscale-direct access (dashboard is reached on the Tailscale interface
@@ -127,6 +135,19 @@ class Config(BaseSettings):
             f"postgresql+psycopg2://{quote_plus(self.db_user)}:{quote_plus(self.db_password)}"
             f"@{self.db_host}:{self.db_port}/{self.db_name}"
         )
+
+    # SEC-10: warn loudly when the known-weak default DB password is used in
+    # LIVE mode.  The default is intentionally kept so local dev / tests
+    # continue to work unchanged — this is a runtime guard, not a removal.
+    @model_validator(mode="after")
+    def _warn_weak_db_password(self) -> "Config":
+        if self.db_password == "trader123" and not self.paper_trading:
+            _cfg_logger.critical(
+                "SEC-10: DB password is the known default 'trader123' while "
+                "PAPER_TRADING=false.  Set a strong DB_PASSWORD in .env before "
+                "running live."
+            )
+        return self
 
     # Back-compat alias: older modules referenced cfg.totp_secret
     @property
