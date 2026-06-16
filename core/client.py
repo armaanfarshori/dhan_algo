@@ -8,13 +8,16 @@ import asyncio
 import logging
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, date
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional
 from collections import deque
 
 import aiohttp
 
 logger = logging.getLogger("dhan.client")
+
+_IST = ZoneInfo("Asia/Kolkata")   # daily spend counters reset at IST midnight
 
 
 class RateLimitExceeded(Exception):
@@ -67,6 +70,11 @@ class RateLimiter:
         self._min_window:    deque = deque()
         self._hour_window:   deque = deque()
         self._day_window:    deque = deque()
+        # Reporting counters for the dashboard spend panel (cheap; cover even
+        # uncapped categories, unlike the enforcement windows). Reset at IST
+        # midnight so "calls today" matches the trading day.
+        self.calls_today: int = 0
+        self._today: Optional[date] = None
 
     async def acquire(self):
         for attr, span, limit_key, is_long in self._WINDOWS:
@@ -104,6 +112,26 @@ class RateLimiter:
         for attr, _span, limit_key, _is_long in self._WINDOWS:
             if getattr(self, limit_key) is not None:
                 getattr(self, attr).append(now)
+
+        # Daily reporting counter — covers every category (capped or not) and
+        # resets at IST midnight. This is what the dashboard spend panel shows.
+        today = datetime.now(_IST).date()
+        if today != self._today:
+            self._today, self.calls_today = today, 0
+        self.calls_today += 1
+
+    def usage(self) -> Dict[str, Any]:
+        """Snapshot of current spend for the dashboard (this process only)."""
+        now = time.monotonic()
+        sw = self._second_window
+        while sw and now - sw[0] > 1.0:
+            sw.popleft()
+        return {
+            "calls_today":  self.calls_today,
+            "per_sec_used": len(sw),
+            "per_sec":      self.per_sec,
+            "per_day":      self.per_day,   # None = no daily cap
+        }
 
 
 class DhanAPIError(Exception):
@@ -184,6 +212,12 @@ class DhanClient:
     async def __aexit__(self, *args):
         if self._session:
             await self._session.close()
+
+    def rate_limit_usage(self) -> Dict[str, Dict]:
+        """Per-category API spend (this process) for the dashboard panel.
+        Note: the backfill runs in a separate process with its own client,
+        so its calls are not reflected here."""
+        return {cat: rl.usage() for cat, rl in self._rate_limiters.items()}
 
     async def _request(
         self,
