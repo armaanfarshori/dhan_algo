@@ -355,6 +355,9 @@ async def run_backfill(args, cfg):
     refresh_task = None
 
     async with DhanClient(cfg.dhan_client_id, access_token, auth_manager=auth_mgr) as client:
+        from core.api_usage import ApiUsageFlusher
+        _usage_flusher = ApiUsageFlusher(process="backfill")
+
         if auth_mgr:
             # Background loop checks every 10 min and refreshes 30 min before expiry
             refresh_task = asyncio.create_task(auth_mgr.run())
@@ -431,6 +434,9 @@ async def run_backfill(args, cfg):
                 logger.warning("DB seeding failed (%s) — starting from index 0", exc)
                 start_idx = 0
 
+        _chunk_counter = 0  # counts completed securities; flush usage every 50
+        _FLUSH_EVERY = 50
+
         try:
             idx = start_idx
             while idx < n_total:
@@ -471,10 +477,18 @@ async def run_backfill(args, cfg):
                     _save_checkpoint(idx, sid)
                 idx += 1
 
+                # Flush API usage every N securities — backfill is the heaviest
+                # consumer (100K data calls / day) so frequent flushing matters.
+                _chunk_counter += 1
+                if _chunk_counter % _FLUSH_EVERY == 0:
+                    await _usage_flusher.flush(client)
+
             logger.info("Segment %s complete — %d securities processed", args.exchange_segment, n_total - start_idx)
         finally:
             if refresh_task:
                 refresh_task.cancel()
+            # Final flush captures the tail calls that didn't hit the 50-chunk threshold
+            await _usage_flusher.flush(client)
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────

@@ -789,6 +789,28 @@ async def backfill_status_handler(_r: web.Request) -> web.Response:
                               "checkpoint": ckpt, "log_tail": lines})
 
 
+async def rate_limits_handler(_r: web.Request) -> web.Response:
+    """Today's API call counts aggregated across all processes, with per-day caps.
+
+    Data comes from the api_usage table (flushed by trader + backfill every
+    ~60s / 50 chunks).  The api process itself has a trivially small footprint
+    (read-only data calls) and does not flush, so its calls_today from the
+    in-process RateLimiter are NOT included here — they appear in the heartbeat
+    rate_limits field for the trader, and the api process has no client that
+    tracks calls in the same structure.
+    """
+    def _query():
+        from core.api_usage import query_today_totals
+        return query_today_totals()
+
+    try:
+        result = await asyncio.get_running_loop().run_in_executor(None, _query)
+        return web.json_response({"ok": True, **result})
+    except Exception:
+        logger.exception("rate_limits_handler failed")
+        return web.json_response({"ok": False, "error": "internal error"}, status=500)
+
+
 async def system_health_handler(_r: web.Request) -> web.Response:
     """Automation health: cron schedule, alert channel, recent error count.
     Replaces the Hermes panel — the gateway was retired 2026-06-11."""
@@ -908,6 +930,7 @@ def build_app() -> web.Application:
     app.router.add_get("/api/kronos/signals", kronos_signals_handler)
     app.router.add_get("/api/kronos/screener", kronos_screener_handler)
     app.router.add_get("/api/kronos/live", kronos_live_handler)
+    app.router.add_get("/api/rate-limits", rate_limits_handler)
     app.router.add_get("/api/backfill/status", backfill_status_handler)
     app.router.add_get("/api/system/health", system_health_handler)
     app.router.add_post("/postback", postback_handler)

@@ -1305,7 +1305,7 @@ function AutomationPanel({ systemHealth }) {
   )
 }
 
-// Display labels for each rate-limit category key from the heartbeat.
+// Display labels for each rate-limit category key.
 const RATE_LIMIT_LABELS = {
   orders:      'Orders',
   data:        'Data (charts)',
@@ -1313,12 +1313,25 @@ const RATE_LIMIT_LABELS = {
   non_trading: 'Non-trading',
 }
 
-// Ordered display sequence (matches the heartbeat key order).
+// Ordered display sequence.
 const RATE_LIMIT_KEYS = ['orders', 'data', 'quote', 'non_trading']
 
-function ApiRateLimitPanel({ rateLimits }) {
-  const rl = rateLimits ?? {}
-  const hasData = Object.keys(rl).length > 0
+// Format a process breakdown object like {trader: 20, backfill: 4800, api: 3}
+// into a muted inline string: "trader 20 · backfill 4,800 · api 3"
+function fmtByProcess(byProcess) {
+  if (!byProcess || typeof byProcess !== 'object') return null
+  const entries = Object.entries(byProcess).filter(([, v]) => (v ?? 0) > 0)
+  if (entries.length === 0) return null
+  return entries.map(([k, v]) => `${k} ${Number(v).toLocaleString('en-IN')}`).join(' · ')
+}
+
+function ApiRateLimitPanel({ rateLimitsData }) {
+  // rateLimitsData is the raw usePoller result: { data, loading, error }
+  // data shape: { date, categories: { orders: { total, per_day, by_process }, ... } }
+  const loading    = rateLimitsData?.loading ?? true
+  const hasError   = !!rateLimitsData?.error
+  const categories = rateLimitsData?.data?.categories ?? null
+  const hasData    = categories != null
 
   const thStyle = {
     fontFamily: T.mono, fontSize: 8, color: T.ink3,
@@ -1328,28 +1341,35 @@ function ApiRateLimitPanel({ rateLimits }) {
   const tdStyle = (highlight) => ({
     fontFamily: T.mono, fontSize: 10, color: highlight ? T.ink0 : T.ink2,
     padding: '5px 8px', borderBottom: `1px solid ${T.line}`,
+    verticalAlign: 'top',
   })
 
   // Compute the highest usage % across capped categories for the panel accent.
   let maxUsagePct = 0
-  RATE_LIMIT_KEYS.forEach(key => {
-    const cat = rl[key]
-    if (cat && cat.per_day != null && cat.per_day > 0) {
-      const pct = (cat.calls_today ?? 0) / cat.per_day * 100
-      if (pct > maxUsagePct) maxUsagePct = pct
-    }
-  })
+  if (hasData) {
+    RATE_LIMIT_KEYS.forEach(key => {
+      const cat = categories[key]
+      if (cat && cat.per_day != null && cat.per_day > 0) {
+        const pct = (cat.total ?? 0) / cat.per_day * 100
+        if (pct > maxUsagePct) maxUsagePct = pct
+      }
+    })
+  }
   const accent = maxUsagePct >= 80 ? T.red : maxUsagePct >= 50 ? T.amber : T.cyan
+
+  const rightLabel = hasData
+    ? `${rateLimitsData?.data?.date ?? 'today'} · resets IST midnight`
+    : hasError ? 'endpoint error' : 'loading…'
 
   return (
     <SysPanel
       title="API Rate-Limit Spend"
-      right={hasData ? 'live · resets IST midnight' : 'waiting for trader…'}
-      accent={accent}
+      right={rightLabel}
+      accent={hasData ? accent : T.line}
     >
       {!hasData && (
         <div style={{ fontFamily: T.mono, fontSize: 9, color: T.ink3, marginBottom: 10, lineHeight: 1.6 }}>
-          waiting for trader…
+          {hasError ? `Error: ${rateLimitsData?.error?.message ?? 'failed to fetch /api/rate-limits'}` : 'loading…'}
         </div>
       )}
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -1359,38 +1379,46 @@ function ApiRateLimitPanel({ rateLimits }) {
             <th style={{ ...thStyle, textAlign: 'right' }}>Spent today</th>
             <th style={{ ...thStyle, textAlign: 'right' }}>Daily cap</th>
             <th style={{ ...thStyle, textAlign: 'right', minWidth: 90 }}>Usage</th>
-            <th style={{ ...thStyle, textAlign: 'right' }}>/s used · cap</th>
           </tr>
         </thead>
         <tbody>
           {RATE_LIMIT_KEYS.map(key => {
-            const cat = rl[key] ?? {}
-            const label      = RATE_LIMIT_LABELS[key] ?? key
-            const callsToday = cat.calls_today ?? null
-            const perDay     = cat.per_day ?? null
-            const perSecUsed = cat.per_sec_used ?? null
-            const perSec     = cat.per_sec ?? null
-            const capped     = perDay != null
-            const usagePct   = capped && callsToday != null
-              ? Math.min((callsToday / perDay) * 100, 100)
+            const cat       = categories?.[key] ?? {}
+            const label     = RATE_LIMIT_LABELS[key] ?? key
+            const total     = cat.total ?? null
+            const perDay    = cat.per_day ?? null      // null = no cap
+            const byProcess = cat.by_process ?? null
+            const capped    = perDay != null
+            const usagePct  = capped && total != null
+              ? Math.min((total / perDay) * 100, 100)
               : null
-            const barColor   = usagePct == null ? T.line
+            const barColor  = usagePct == null ? T.line
               : usagePct >= 80 ? T.red
               : usagePct >= 50 ? T.amber
               : T.green
+            const processSummary = fmtByProcess(byProcess)
 
             return (
               <tr key={key}>
                 <td style={tdStyle(true)}>{label}</td>
 
-                {/* Spent today */}
+                {/* Spent today — total across all processes */}
                 <td style={{ ...tdStyle(false), textAlign: 'right', color: T.ink1 }}>
-                  {callsToday != null ? callsToday.toLocaleString('en-IN') : '—'}
+                  {total != null ? (
+                    <div>
+                      <div>{total.toLocaleString('en-IN')}</div>
+                      {processSummary && (
+                        <div style={{ fontFamily: T.mono, fontSize: 8, color: T.ink3, marginTop: 2 }}>
+                          {processSummary}
+                        </div>
+                      )}
+                    </div>
+                  ) : '—'}
                 </td>
 
                 {/* Daily cap */}
                 <td style={{ ...tdStyle(false), textAlign: 'right', color: T.ink2 }}>
-                  {capped ? perDay.toLocaleString('en-IN') : 'no cap'}
+                  {hasData ? (capped ? perDay.toLocaleString('en-IN') : 'no cap') : '—'}
                 </td>
 
                 {/* Usage bar + % for capped; dash for uncapped */}
@@ -1405,17 +1433,10 @@ function ApiRateLimitPanel({ rateLimits }) {
                       </span>
                     </div>
                   ) : (
-                    <span style={{ color: T.ink3 }}>—</span>
+                    <span style={{ color: T.ink3 }}>
+                      {!hasData ? '—' : (capped ? '0.0%' : '—')}
+                    </span>
                   )}
-                </td>
-
-                {/* /s used vs cap */}
-                <td style={{ ...tdStyle(false), textAlign: 'right', color: T.ink2 }}>
-                  {perSecUsed != null && perSec != null
-                    ? `${perSecUsed} / ${perSec}`
-                    : perSec != null
-                      ? `— / ${perSec}`
-                      : '—'}
                 </td>
               </tr>
             )
@@ -1423,7 +1444,7 @@ function ApiRateLimitPanel({ rateLimits }) {
         </tbody>
       </table>
       <div style={{ marginTop: 10, fontFamily: T.mono, fontSize: 8.5, color: T.ink3, lineHeight: 1.6 }}>
-        Counts are for the trading process; the backfill uses a separate quota.
+        Account-wide across trader · api · backfill (resets IST midnight).
       </div>
     </SysPanel>
   )
@@ -1479,7 +1500,7 @@ function SystemTab({ data }) {
         <DBPanel            dbStats={data.dbStats} />
         <BackfillPanel      backfill={data.backfill} />
         <AutomationPanel    systemHealth={data.systemHealth} />
-        <ApiRateLimitPanel rateLimits={data.trader?.rate_limits} />
+        <ApiRateLimitPanel rateLimitsData={data.rateLimitsData} />
       </div>
       <div style={{ height: 420 }}>
         <FullLogPanel logs={data.logs} />
