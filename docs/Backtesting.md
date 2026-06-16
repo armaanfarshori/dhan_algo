@@ -1,5 +1,7 @@
 # Backtesting
 
+*Last updated: 2026-06-16*
+
 `research/backtest/` is an event-driven backtester built for one purpose: producing evidence trustworthy enough to justify (or veto) live trading. Its design choices are all anti-self-deception measures.
 
 ## Design principles
@@ -7,58 +9,73 @@
 | Principle | Implementation |
 |---|---|
 | **Same strategy code** | The backtester instantiates the identical `strategies/orb.py` class the live engine runs — there is no "backtest version" to drift |
-| **No lookahead** | Decisions made on bar *t* fill at bar *t+1*'s **open**. A test with a spy asserts the engine never reads a future bar |
-| **Real costs** | Full Indian intraday stack per round trip (see below) — an earlier backtester with zero costs and same-bar fills produced beautiful, useless equity curves |
-| **Point-in-time universe** | The screener is replayed *as of each historical date* (`time < as_of`), using daily bars — today's watchlist is never projected into the past |
-| **Survivorship-safe** | Delisted/suspended instruments stay in the universe; the raw DB keeps everything |
-| **Honest Sharpe** | Computed from **daily** returns × √252 — never from per-minute returns, which inflates it absurdly |
+| **No lookahead** | A decision made on bar *i* (using its close/high/low) executes at bar *i+1*'s **open**, plus adverse slippage. A decision on the session's last bar fills at that bar's close (square-off approximation). |
+| **Real costs** | Full Indian intraday cost stack per round trip (`research/backtest/costs.py`) — an earlier backtester with zero costs and same-bar fills produced beautiful, useless equity curves |
+| **Point-in-time universe** | `research/backtest/universe.py` reruns the ATR% screener with a hard `time < as_of` cutoff — today's watchlist is never projected into the past |
+| **Survivorship-safe** | The universe query draws from the `bars` table, which keeps delisted and suspended instruments — names that later died stay in the historical universe |
+| **Honest Sharpe** | Computed from **daily** net P&L / starting equity × √252 — never from per-minute equity points, which inflated the old backtester's number ~20× |
+| **Identical risk math** | `replay_security_day` reuses `engine.risk.RiskEngine.size_position` — the same stop-distance sizing as the live trader, so backtest P&L is denominated in the same units |
 
 ## Cost model (`research/backtest/costs.py`)
 
-Per executed order / round trip on NSE intraday equity:
+Full NSE intraday cost stack per round trip (Dhan rates, 2025-26):
 
-| Charge | Rate |
-|---|---|
-| Brokerage | min(₹20, 0.03%) per order |
-| STT | 0.025% on the sell side |
-| Exchange transaction | 0.00297% |
-| SEBI turnover | 0.0001% |
-| Stamp duty | 0.003% on the buy side |
-| GST | 18% on brokerage + exchange |
-| Slippage | Configurable bps, applied adversely |
+| Charge | Rate | Side |
+|---|---|---|
+| Brokerage | min(₹20, 0.03% of turnover) | per executed order |
+| STT | 0.025% | sell side only |
+| NSE transaction fee | 0.00297% | both sides |
+| SEBI turnover fee | 0.0001% (₹10/crore) | both sides |
+| Stamp duty | 0.003% | buy side only |
+| GST | 18% | on brokerage + exchange + SEBI fees |
+| Slippage | configurable bps (default 2 bps) | applied adversely on fill |
 
-On thin names, costs routinely consume ~20% of gross P&L — which is precisely the information a costless backtest hides. A known limitation queued for hardening: flat-bps slippage still understates low-priced names (tick-aware slippage is on the roadmap).
+On thin names, costs routinely consume a large fraction of gross P&L — which is precisely the information a costless backtest hides. Known limitation: flat-bps slippage understates low-priced names (tick-aware slippage is on the roadmap).
 
 ## Usage
 
 ```bash
-# ORB alone, screener-picked top-5, one month
+# ORB standalone, point-in-time screener universe (top 5), one month
 python -m research.backtest --from 2026-05-01 --to 2026-06-01 --n 5
 
-# Fixed security ids
+# Fixed security IDs (skips the screener)
 python -m research.backtest --from 2026-05-01 --to 2026-06-01 --ids 1333,11536
 
-# With the Kronos zero-shot gate in the loop
+# Run 2 of the three-way comparison: ORB + Kronos zero-shot gate
 python -m research.backtest --from 2026-05-01 --to 2026-06-01 --gate kronos
 
-# Machine-readable output
-python -m research.backtest --from 2026-05-01 --to 2026-06-01 --json
+# JSON output for comparing runs
+python -m research.backtest --from 2026-05-01 --to 2026-06-01 --json out.json
+
+# Adjust starting equity or slippage
+python -m research.backtest --from 2026-05-01 --to 2026-06-01 --equity 500000 --slippage-bps 3.0
 ```
 
-The report includes: total/annualized return, daily-return Sharpe, max drawdown, win rate, profit factor, gross-vs-net P&L (cost drag made explicit), and per-security breakdown.
+The report (`research/backtest/report.py`) includes: total/annualized return, daily-return Sharpe (√252), max drawdown (over the daily equity curve), win rate, profit factor, gross-vs-net P&L (cost drag made explicit), and a per-security breakdown. The JSON output additionally includes the full trade list and gate decisions.
+
+## Universe construction (`research/backtest/universe.py`)
+
+Each backtest day its own `point_in_time_universe(as_of=day)` call: ATR%-ranked NSE equities using only daily bars with `time < as_of`. The query joins `bars` with `instruments` to filter EQUITY segment — same validation the live screener runs. A `min_avg_volume` floor (default 10,000 shares/day in the backtest, 50,000 in the live screener) prevents illiquid junk.
+
+Note: the universe query runs on `1d` bars, not 1-minute — rolling up 1-minute bars for every candidate × 60 days blew the statement timeout while the backfill was writing. Semantics are identical.
 
 ## The decision study (M3)
 
 The go/no-go experiment, run over the same 2-year window with identical costs:
 
-| Run | Config | Question it answers |
+| Run | CLI flag | Question it answers |
 |---|---|---|
-| 1 | ORB standalone | Does the rule-based strategy have an edge at all? |
-| 2 | ORB + Kronos zero-shot | Does a pre-trained model add value on NSE? |
-| 3 | ORB + Kronos fine-tuned | Does NSE-specific training improve it further? |
+| 1 | `--gate none` (default) | Does the rule-based strategy have an edge at all? |
+| 2 | `--gate kronos` | Does the Kronos zero-shot model add value on NSE? |
+| 3 | `--gate kronos` + fine-tuned checkpoint | Does NSE-specific fine-tuning improve it further? |
 
-Decision rules: no live trading unless Run 1 or 2 clears the bar; promote the fine-tuned model only if Run 3 shows a meaningfully better Sharpe than Run 2.
+Decision rules: no live trading unless Run 1 or 2 clears a credible Sharpe/drawdown bar; promote the fine-tuned model only if Run 3 shows a meaningfully better Sharpe than Run 2.
+
+The Kronos gate in the backtester (`research/backtest/kronos_gate.py`) is a thin adapter wrapping the same `KronosSignalEngine.score_from_db()` the live gate uses, so the scoring logic is identical across paper, backtest, and live.
 
 ## Data prerequisites
 
-The study needs the full historical backfill (5 years × ~9,470 NSE equities of 1-minute bars) and the clean replica (M2.5: liquid-only, corporate-action-adjusted — training or testing on split gaps and circuit-breaker days corrupts both models and conclusions).
+The study needs:
+
+1. **Full historical backfill** — `~9,470 NSE equities × 5 years of 1-minute bars` (in progress as of 2026-06-16, ~23% complete, ETA ~2026-06-17)
+2. **Clean replica (M2.5)** — `scripts/build_clean_db.py`: liquid names only, corporate-action-adjusted, circuit-breaker days excluded. Training or testing on split gaps and circuit-breaker days corrupts both model accuracy measurements and strategy conclusions.
