@@ -21,7 +21,27 @@ docker compose up -d          # throwaway local TimescaleDB on :5432
 alembic upgrade head          # expect head: 005
 
 python backfill.py --instruments     # scrip master, ~224K instruments
-python backfill.py                   # bars for a starter watchlist
+
+# Backfill runtime: the full NSE_EQ history (--nse-eq --all) takes DAYS and
+# is rate-limited to Dhan's 100K API calls/day quota. For a local smoke test,
+# fetch a single security — it completes in seconds:
+#   python backfill.py --ids 2885
+# Run python backfill.py --help to see all flags (--nse-eq, --from, --all, etc.)
+python backfill.py --ids 2885        # quick single-security smoke test
+
+# Kronos model cache: KRONOS_OFFLINE=true by default — the model is loaded
+# from the local HuggingFace cache only. On a fresh machine with no cache,
+# the model will fail to load. Prime the cache with one download:
+#
+#   KRONOS_OFFLINE=false python -m apps.trader
+#
+# This downloads NeoQuasar/Kronos-small and NeoQuasar/Kronos-Tokenizer-base
+# (~100 MB total) from HuggingFace. Subsequent starts use the cache and never
+# call the network. Alternatively, pre-download on another machine and copy
+# ~/.cache/huggingface/ across.
+#
+# The gate is fail-open: a missing model never blocks trades, but Kronos
+# scoring won't work until the cache is primed.
 
 # Run (two terminals)
 python -m apps.trader                # paper mode by default
@@ -86,7 +106,11 @@ python backfill.py --nse-eq --all --from 2021-06-01    # ~days; checkpointed,
                                                        # safe to kill + resume
 ```
 
-The backfill respects Dhan's 100K calls/day quota and writes a checkpoint file; a cron watchdog can restart it if the screen dies.
+The backfill respects Dhan's 100K calls/day quota and writes a checkpoint file (`backfill_ckpt_NSE_EQ.json`); a cron watchdog can restart it if the screen dies.
+
+> **Runtime warning:** `--nse-eq --all` covers ~22K securities across multiple 90-day intraday chunks each. Expect **several days** at the API rate limit — this is normal. The process is checkpointed and safe to kill and resume. For a quick connectivity check, fetch a single security first: `python backfill.py --ids 2885`. Run `python backfill.py --help` for all available flags.
+
+> **Kronos model cache:** `KRONOS_OFFLINE=true` is the default. A fresh agent box has no HuggingFace cache, so `apps.trader` will log a model-load failure on first start. Prime the cache once before starting the service: `KRONOS_OFFLINE=false python -m apps.trader` (downloads `NeoQuasar/Kronos-small` + `NeoQuasar/Kronos-Tokenizer-base`, ~100 MB). The gate is fail-open — a missing model never blocks trades — but Kronos scoring won't function until the cache exists.
 
 ### 6. Dashboard access
 

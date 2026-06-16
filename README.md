@@ -115,8 +115,22 @@ docker compose up -d            # throwaway local TimescaleDB
 alembic upgrade head
 
 python backfill.py --instruments        # scrip master (~224K instruments)
-python backfill.py                      # bars for a starter watchlist
 
+# Backfill note: the full NSE_EQ history (--nse-eq --all --from 2021-06-01)
+# takes DAYS and is rate-limited to Dhan's 100K calls/day quota.
+# For a quick smoke test, fetch one security — takes seconds:
+#   python backfill.py --ids 2885
+# Run python backfill.py --help for all options.
+python backfill.py --ids 2885           # single security, fast smoke test
+
+# Kronos model cache note: KRONOS_OFFLINE=true by default (reads local
+# HuggingFace cache only — no network). On a fresh machine with no cache
+# the model will fail to load. Prime the cache once:
+#   KRONOS_OFFLINE=false python -m apps.trader   (downloads ~100 MB from HF)
+# Models: NeoQuasar/Kronos-small + NeoQuasar/Kronos-Tokenizer-base
+# After the first run the cache is used automatically on subsequent starts.
+# The gate is fail-open — a missing model never blocks trades, but Kronos
+# scoring will not work until the cache is primed.
 python -m apps.trader                   # paper mode by default
 python -m apps.api                      # dashboard → http://localhost:8765
 pytest -q                               # 71 tests
