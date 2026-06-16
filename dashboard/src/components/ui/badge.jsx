@@ -25,6 +25,23 @@ export function Badge({ variant = 'default', className, children, ...props }) {
   )
 }
 
+/** Soft pill chip for stat-card corners (smaller than Badge). tone: up | down | neu */
+export function Pill({ tone = 'neu', className, children, ...props }) {
+  const tones = {
+    up:   'bg-profit/10 text-profit',
+    down: 'bg-loss/10 text-loss',
+    neu:  'bg-border text-muted-foreground',
+  }
+  return (
+    <span
+      className={cn('rounded-full px-2 py-0.5 text-[10.5px] font-semibold', tones[tone] ?? tones.neu, className)}
+      {...props}
+    >
+      {children}
+    </span>
+  )
+}
+
 /** Small square-ish chip used inline (e.g. position/gate tags on cockpit cards). */
 export function Tag({ tone = 'default', className, children, ...props }) {
   const tones = {

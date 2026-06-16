@@ -12,6 +12,8 @@
       // apply persisted theme before paint to avoid a flash
       try {
         var t = localStorage.getItem('dhan-theme') || 'dark';
+        var q = new URLSearchParams(location.search).get('theme');
+        if (q === 'light' || q === 'dark') t = q;
         document.documentElement.classList.toggle('dark', t !== 'light');
       } catch (e) {}
     </script>

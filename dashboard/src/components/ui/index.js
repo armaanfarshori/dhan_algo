@@ -1,5 +1,6 @@
 export { Card, Panel, PanelHeader, Label } from './card'
-export { Badge, Tag } from './badge'
+export { StatCard } from './stat'
+export { Badge, Pill, Tag } from './badge'
 export { Button } from './button'
 export { Tabs } from './tabs'
 export { Progress } from './progress'
