@@ -2,6 +2,9 @@
 Description=DhanAIBot dashboard API (reads DB + trader heartbeat — no order flow)
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+OnFailure=dhan-alert@%n.service
 
 [Service]
 Type=simple

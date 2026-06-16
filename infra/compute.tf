@@ -26,10 +26,10 @@ resource "aws_instance" "db" {
   tags = { Name = "${local.name_prefix}-db", Role = "timescaledb" }
 
   user_data = base64encode(templatefile("${path.module}/scripts/setup_db.sh", {
-    project      = var.project
-    aws_region   = var.aws_region
-    s3_bucket    = aws_s3_bucket.data.bucket
-    ssm_prefix   = "/${var.project}"
+    project    = var.project
+    aws_region = var.aws_region
+    s3_bucket  = aws_s3_bucket.data.bucket
+    ssm_prefix = "/${var.project}"
   }))
 
   lifecycle {
@@ -46,7 +46,10 @@ resource "aws_ebs_volume" "db_data" {
   throughput        = 125
   encrypted         = true
 
-  tags = { Name = "${local.name_prefix}-db-data" }
+  tags = {
+    Name   = "${local.name_prefix}-db-data"
+    Backup = "dlm" # targeted by aws_dlm_lifecycle_policy in storage.tf (OPS-09)
+  }
 }
 
 resource "aws_volume_attachment" "db_data" {
@@ -65,7 +68,7 @@ resource "aws_instance" "agent" {
   key_name               = aws_key_pair.operator.key_name
   iam_instance_profile   = aws_iam_instance_profile.ec2.name
 
-  associate_public_ip_address = false  # Elastic IP handles this
+  associate_public_ip_address = false # Elastic IP handles this
 
   root_block_device {
     volume_type           = "gp3"
@@ -77,11 +80,11 @@ resource "aws_instance" "agent" {
   tags = { Name = "${local.name_prefix}-agent", Role = "trading-agent" }
 
   user_data = base64encode(templatefile("${path.module}/scripts/setup_agent.sh", {
-    project      = var.project
-    aws_region   = var.aws_region
-    s3_bucket    = aws_s3_bucket.data.bucket
-    ssm_prefix   = "/${var.project}"
-    db_host      = aws_instance.db.private_ip
+    project    = var.project
+    aws_region = var.aws_region
+    s3_bucket  = aws_s3_bucket.data.bucket
+    ssm_prefix = "/${var.project}"
+    db_host    = aws_instance.db.private_ip
   }))
 
   lifecycle {

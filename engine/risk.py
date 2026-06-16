@@ -122,7 +122,7 @@ class RiskEngine:
                     FROM trades WHERE status = 'CLOSED'
                 """)).fetchone()
         try:
-            row = await asyncio.get_event_loop().run_in_executor(None, _query)
+            row = await asyncio.get_running_loop().run_in_executor(None, _query)
             self._realized_total = float(row[0])
             self._realized_today = float(row[1])
             self._realized_week = float(row[2])
@@ -146,10 +146,11 @@ class RiskEngine:
             hf.unlink(missing_ok=True)
             return
         today = date.today()
+        y, w = today.isocalendar()[:2]
         in_scope = (
             (data.get("scope") == "day" and data.get("date") == today.isoformat())
             or (data.get("scope") == "week"
-                and data.get("week") == today.isocalendar()[:2].__repr__())
+                and data.get("week") == f"{y}-W{w:02d}")
         )
         if in_scope:
             self.state.halted = True
@@ -167,10 +168,11 @@ class RiskEngine:
             return
         try:
             today = date.today()
+            y, w = today.isocalendar()[:2]
             hf.write_text(json.dumps({
                 "scope": scope, "reason": reason,
                 "date": today.isoformat(),
-                "week": today.isocalendar()[:2].__repr__(),
+                "week": f"{y}-W{w:02d}",
                 "ts": datetime.now().isoformat(),
             }))
         except Exception as exc:
@@ -221,7 +223,7 @@ class RiskEngine:
                     ) t
                 """), {"sid": security_id}).scalar()
         try:
-            adv = await asyncio.get_event_loop().run_in_executor(None, _query)
+            adv = await asyncio.get_running_loop().run_in_executor(None, _query)
             adv = float(adv) if adv else None
         except Exception as exc:
             logger.warning("Risk: ADV lookup failed for %s (%s) — no liquidity cap",

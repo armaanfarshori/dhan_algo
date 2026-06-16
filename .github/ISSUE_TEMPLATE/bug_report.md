@@ -1,38 +1,70 @@
 ---
 name: Bug report
-about: Create a report to help us improve
-title: ''
-labels: ''
+about: Report a bug in the trading platform or dashboard
+title: '[BUG] '
+labels: bug
 assignees: ''
 
 ---
 
-**Describe the bug**
+> **Safety reminder:** If real capital is at risk right now, use the kill-switch first (`POST /api/killswitch` or write the file `run/killswitch`) and deal with the issue before filing a bug report.
+
+## Description
+
 A clear and concise description of what the bug is.
 
-**To Reproduce**
-Steps to reproduce the behavior:
-1. Go to '...'
-2. Click on '....'
-3. Scroll down to '....'
-4. See error
+## Trading context
 
-**Expected behavior**
-A clear and concise description of what you expected to happen.
+- **Trading mode:** PAPER / LIVE
+- **`PAPER_TRADING` flag in `.env`:** `true` / `false`
+- **Real capital at risk right now:** Yes / No
+- **Kill-switch already activated:** Yes / No / N/A
 
-**Screenshots**
-If applicable, add screenshots to help explain your problem.
+## Component
 
-**Desktop (please complete the following information):**
- - OS: [e.g. iOS]
- - Browser [e.g. chrome, safari]
- - Version [e.g. 22]
+Which part of the platform is affected?
 
-**Smartphone (please complete the following information):**
- - Device: [e.g. iPhone6]
- - OS: [e.g. iOS8.1]
- - Browser [e.g. stock browser, safari]
- - Version [e.g. 22]
+- [ ] `dhan-trader` (order flow / strategy / feed)
+- [ ] `dhan-api` (dashboard / REST endpoints)
+- [ ] Kronos gate / calibration
+- [ ] Backfill
+- [ ] Database / schema
+- [ ] Dashboard (React frontend)
+- [ ] Other: ___
 
-**Additional context**
-Add any other context about the problem here.
+## Steps to reproduce
+
+1. ...
+2. ...
+3. ...
+
+## Expected behaviour
+
+What you expected to happen.
+
+## Actual behaviour
+
+What actually happened.
+
+## Relevant log excerpt
+
+Paste from `/var/log/dhan/trader.log` or `/var/log/dhan/api.log`. Include the timestamp range around the event.
+
+```
+# paste log lines here
+```
+
+## Heartbeat state
+
+If the trader is running, paste the output of:
+```bash
+cat /opt/dhan-trading/run/trader_heartbeat.json | python3 -m json.tool
+```
+
+```json
+# paste heartbeat here
+```
+
+## Additional context
+
+Any other relevant information (DB state, recent deployments, config changes, etc.).

@@ -111,3 +111,46 @@ The DB EC2 runs with a swapfile and bounded `maintenance_work_mem` — history s
 3. Gate verdicts arriving with small `data_age_min`
 4. Equity curve drawing on the Portfolio tab
 5. Telegram silent (alerts fire on halt/watchdog events — silence is good)
+
+---
+
+## WARNING — Elastic IP and the 7-day Dhan whitelist lock
+
+The agent EC2's Elastic IP is whitelisted at Dhan for **order placement**. Dhan enforces a **7-day change lock** — once you register an IP, you cannot change it for 7 days.
+
+**Releasing or replacing the EIP (e.g. via `terraform destroy`, instance teardown, or accidental EIP detach) means zero live order capability for up to 7 days** while you wait for re-whitelisting.
+
+Rules:
+
+- **Never release the EIP while in live trading mode** (or while planning to be in live mode within the next 7 days).
+- Data APIs, historical REST calls, and the WebSocket feed are **not** affected — the IP whitelist applies to order placement only.
+- If the EIP must change (e.g. planned migration), budget the full 7-day re-whitelisting window before any live orders can be placed. Submit the new IP via the Dhan DevPortal immediately after the change.
+- Paper trading is unaffected by IP changes — only live order routing requires the whitelisted IP.
+
+---
+
+## PLAN-02 — Gap-scan and repair pass after backfill completes
+
+The historical backfill skips chunks that time out (asyncio.TimeoutError) rather than hanging indefinitely. Approximately **13.5K chunks were skipped** during the initial NSE_EQ run, leaving 90-day gaps in the raw `bars` layer for affected securities. These gaps must be repaired before running M2.5 (clean DB build) and M3 (2-year backtest), as missing bars distort indicator calculations and produce misleading Sharpe numbers.
+
+### Procedure
+
+1. **Run the gap scan** after the backfill checkpoint reaches 100%:
+
+   ```bash
+   python hermes_skills/dhan/gap_scan/scripts/scan_gaps.py
+   ```
+
+   The script queries the `bars` hypertable chunk catalog (never `COUNT(*)`) and outputs a list of `(security_id, missing_date_range)` pairs for each gap.
+
+2. **Re-fetch missing chunks** using backfill with the specific security IDs and narrowed date range:
+
+   ```bash
+   python backfill.py --ids <comma-separated-security-ids> --from <gap-start> --to <gap-end>
+   ```
+
+   Repeat in batches if the gap list is long. The backfill is idempotent — re-fetching already-present data is a safe upsert.
+
+3. **Verify** by re-running the gap scan and confirming the output is empty (or within acceptable bounds for suspended/delisted securities that genuinely have no data).
+
+4. **Proceed to M2.5** (`scripts/build_clean_db.py`) only after the gap scan is clean. The M3 backtest validity depends on data completeness — an incomplete raw layer produces survivorship-biased and truncated equity curves.

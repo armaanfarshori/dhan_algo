@@ -15,6 +15,8 @@ until M6, so nothing dangerous is one HTTP request away.
 This process can crash, hang, or redeploy without touching order flow.
 """
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import sys
@@ -66,11 +68,62 @@ def read_heartbeat() -> tuple[dict, bool]:
 
 @web.middleware
 async def cors_middleware(request, handler):
+    # OPTIONS preflight must return 200 before the real handler runs.
+    if request.method == "OPTIONS":
+        return web.Response(status=200, headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, X-Dashboard-Token, Authorization",
+        })
     resp = await handler(request)
     resp.headers["Access-Control-Allow-Origin"] = "*"
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Dashboard-Token, Authorization"
     return resp
+
+
+# ── Auth guard for mutating POST endpoints ────────────────────────────────────
+
+_unprotected_warned = False  # log the warning once per process lifetime
+
+
+def _check_auth(request: web.Request):
+    """Return a 401 Response if the request fails the shared-secret check,
+    or None if the request is allowed.
+
+    Behaviour:
+    - Token unset (empty string): ALLOW but log a one-time WARNING so the
+      operator knows the control surface is open.  This preserves current
+      behaviour so a misconfigured secret never locks anyone out of the
+      kill-switch.
+    - Token set: require either
+        X-Dashboard-Token: <token>
+      or
+        Authorization: Bearer <token>
+      Any mismatch → 401.
+    """
+    global _unprotected_warned
+    token = cfg.dashboard_token
+    if not token:
+        if not _unprotected_warned:
+            logger.warning(
+                "Control endpoints are UNPROTECTED — set DASHBOARD_TOKEN in .env"
+            )
+            _unprotected_warned = True
+        return None  # fail-open
+
+    # Check X-Dashboard-Token header first, then Authorization: Bearer …
+    provided = request.headers.get("X-Dashboard-Token", "")
+    if not provided:
+        auth_hdr = request.headers.get("Authorization", "")
+        if auth_hdr.startswith("Bearer "):
+            provided = auth_hdr[len("Bearer "):]
+
+    if not hmac.compare_digest(provided, token):
+        return web.json_response(
+            {"ok": False, "error": "unauthorized"}, status=401
+        )
+    return None
 
 
 # ── Heartbeat-backed handlers ─────────────────────────────────────────────────
@@ -157,7 +210,7 @@ async def kronos_gate_handler(_r: web.Request) -> web.Response:
         _cache_set("gate_calibration", cal)
         return cal
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         decisions = await loop.run_in_executor(None, _decisions)
     except Exception as exc:
@@ -201,11 +254,12 @@ async def equity_handler(_r: web.Request) -> web.Response:
             for r in rows]}
 
     try:
-        result = await asyncio.get_event_loop().run_in_executor(None, _query)
+        result = await asyncio.get_running_loop().run_in_executor(None, _query)
         _cache_set("equity_curve", result)
         return web.json_response(result)
     except Exception as exc:
-        return web.json_response({"ok": False, "error": str(exc), "intraday": []})
+        logger.exception("equity_handler failed")
+        return web.json_response({"ok": False, "error": "internal error", "intraday": []})
 
 
 async def status_handler(request: web.Request) -> web.Response:
@@ -214,7 +268,7 @@ async def status_handler(request: web.Request) -> web.Response:
     first = strategies[0] if strategies else {}
     return web.json_response({
         "mode": hb.get("mode", "PAPER" if cfg.paper_trading else "LIVE"),
-        "client_id": cfg.dhan_client_id,
+        "client_id": "****" + str(cfg.dhan_client_id)[-4:],
         "uptime_seconds": hb.get("uptime_seconds", 0),
         "trader_alive": alive,
         "strategy_name": f"ORB_{first.get('security_id')}" if first else "none",
@@ -291,6 +345,8 @@ async def trading_mode_handler(request: web.Request) -> web.Response:
 
 
 async def killswitch_handler(request: web.Request) -> web.Response:
+    if (denial := _check_auth(request)) is not None:
+        return denial
     RUN_DIR.mkdir(exist_ok=True)
     KILLSWITCH_FILE.write_text(f"dashboard @ {datetime.now(timezone.utc).isoformat()}")
     logger.critical("⛔ KILL SWITCH requested via dashboard — flag written for trader")
@@ -311,6 +367,7 @@ async def kronos_live_handler(_r: web.Request) -> web.Response:
 
 async def logs_handler(request: web.Request) -> web.Response:
     limit = int(request.rel_url.query.get("limit", 50))
+    limit = max(1, min(limit, 500))
 
     def _tail():
         import re
@@ -344,7 +401,7 @@ async def logs_handler(request: web.Request) -> web.Response:
             })
         return out
 
-    logs = await asyncio.get_event_loop().run_in_executor(None, _tail)
+    logs = await asyncio.get_running_loop().run_in_executor(None, _tail)
     return web.json_response({"ok": True, "logs": logs})
 
 
@@ -367,7 +424,7 @@ async def signals_handler(_r: web.Request) -> web.Response:
                 ORDER BY t.entry_ts DESC LIMIT 100
             """)).fetchall()
     try:
-        rows = await asyncio.get_event_loop().run_in_executor(None, _query)
+        rows = await asyncio.get_running_loop().run_in_executor(None, _query)
     except Exception as exc:
         return web.json_response([])
     sigs = []
@@ -385,6 +442,7 @@ async def signals_handler(_r: web.Request) -> web.Response:
 
 async def trades_handler(request: web.Request) -> web.Response:
     limit = int(request.rel_url.query.get("limit", 200))
+    limit = max(1, min(limit, 500))
 
     def _query():
         from db import get_engine
@@ -407,9 +465,10 @@ async def trades_handler(request: web.Request) -> web.Response:
         return rows, summary
 
     try:
-        rows, summary = await asyncio.get_event_loop().run_in_executor(None, _query)
+        rows, summary = await asyncio.get_running_loop().run_in_executor(None, _query)
     except Exception as exc:
-        return web.json_response({"ok": False, "error": str(exc), "trades": []})
+        logger.exception("trades_handler failed")
+        return web.json_response({"ok": False, "error": "internal error", "trades": []})
 
     closed, pnl_sum, wins = summary or (0, 0, 0)
     return web.json_response({
@@ -502,15 +561,17 @@ async def db_stats_handler(_r: web.Request) -> web.Response:
         }
 
     try:
-        result = await asyncio.get_event_loop().run_in_executor(None, _query)
+        result = await asyncio.get_running_loop().run_in_executor(None, _query)
         _cache_set("db_stats", result)
         return web.json_response(result)
     except Exception as exc:
-        return web.json_response({"ok": False, "up": False, "error": str(exc)})
+        logger.exception("db_stats_handler failed")
+        return web.json_response({"ok": False, "up": False, "error": "internal error"})
 
 
 async def kronos_signals_handler(request: web.Request) -> web.Response:
     limit = int(request.rel_url.query.get("limit", 50))
+    limit = max(1, min(limit, 500))
 
     def _query():
         from db import get_engine
@@ -531,18 +592,20 @@ async def kronos_signals_handler(request: web.Request) -> web.Response:
             """), {"lim": limit}).fetchall()
 
     try:
-        rows = await asyncio.get_event_loop().run_in_executor(None, _query)
+        rows = await asyncio.get_running_loop().run_in_executor(None, _query)
         return web.json_response({"ok": True, "signals": [
             {"security_id": r[0], "side": r[1], "score": float(r[2] or 0),
              "confidence": float(r[3] or 0), "strategy": r[4], "ts": str(r[5]),
              "features": r[6], "ticker": r[7] or r[0], "name": r[8] or ""}
             for r in rows]})
     except Exception as exc:
-        return web.json_response({"ok": False, "error": str(exc), "signals": []})
+        logger.exception("kronos_signals_handler failed")
+        return web.json_response({"ok": False, "error": "internal error", "signals": []})
 
 
 async def kronos_screener_handler(request: web.Request) -> web.Response:
     n = int(request.rel_url.query.get("n", 20))
+    n = max(1, min(n, 100))
     cached = _cache_get(f"screener_{n}", 300)   # ATR ranking barely moves intraday
     if cached:
         return web.json_response(cached)
@@ -567,13 +630,14 @@ async def kronos_screener_handler(request: web.Request) -> web.Response:
         return candidates
 
     try:
-        candidates = await asyncio.get_event_loop().run_in_executor(None, _query)
+        candidates = await asyncio.get_running_loop().run_in_executor(None, _query)
         result = {"ok": True, "candidates": candidates, "count": len(candidates)}
         if candidates:
             _cache_set(f"screener_{n}", result)
         return web.json_response(result)
     except Exception as exc:
-        return web.json_response({"ok": False, "error": str(exc), "candidates": []})
+        logger.exception("kronos_screener_handler failed")
+        return web.json_response({"ok": False, "error": "internal error", "candidates": []})
 
 
 # ── Dhan read-only client (funds / positions / LTP) ───────────────────────────
@@ -616,7 +680,8 @@ async def funds_handler(_r: web.Request) -> web.Response:
         data = await _dhan_ro.call("get_funds")
         return web.json_response({"ok": True, "data": data})
     except Exception as e:
-        return web.json_response({"ok": False, "error": str(e)}, status=503)
+        logger.exception("funds_handler failed")
+        return web.json_response({"ok": False, "error": "internal error"}, status=503)
 
 
 async def positions_handler(_r: web.Request) -> web.Response:
@@ -624,7 +689,8 @@ async def positions_handler(_r: web.Request) -> web.Response:
         data = await _dhan_ro.call("get_positions")
         return web.json_response({"ok": True, "data": data})
     except Exception as e:
-        return web.json_response({"ok": False, "error": str(e)}, status=503)
+        logger.exception("positions_handler failed")
+        return web.json_response({"ok": False, "error": "internal error"}, status=503)
 
 
 async def instrument_price_handler(request: web.Request) -> web.Response:
@@ -640,7 +706,8 @@ async def instrument_price_handler(request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "security_id": sid, "price": price,
                                   "segment": segment})
     except Exception as e:
-        return web.json_response({"ok": False, "error": str(e)}, status=503)
+        logger.exception("instrument_price_handler failed")
+        return web.json_response({"ok": False, "error": "internal error"}, status=503)
 
 
 async def instrument_search_handler(request: web.Request) -> web.Response:
@@ -650,7 +717,7 @@ async def instrument_search_handler(request: web.Request) -> web.Response:
     if len(q) < 2:
         return web.json_response({"ok": False, "error": "Query must be at least 2 characters"},
                                  status=400)
-    results = await asyncio.get_event_loop().run_in_executor(
+    results = await asyncio.get_running_loop().run_in_executor(
         None, InstrumentMaster.search_instruments, q, segment)
     return web.json_response({"ok": True, "results": results})
 
@@ -686,6 +753,8 @@ async def watchlist_handler(request: web.Request) -> web.Response:
 
 
 async def watchlist_refresh_handler(request: web.Request) -> web.Response:
+    if (denial := _check_auth(request)) is not None:
+        return denial
     wl = request.app.get("watchlist")
     if not wl:
         return web.json_response({"ok": False, "error": "Watchlist not initialised"}, status=503)
@@ -694,7 +763,8 @@ async def watchlist_refresh_handler(request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "count": len(wl.get()),
                                   "stocks": [s.symbol for s in wl.get()]})
     except Exception as e:
-        return web.json_response({"ok": False, "error": str(e)}, status=500)
+        logger.exception("watchlist_refresh_handler failed")
+        return web.json_response({"ok": False, "error": "internal error"}, status=500)
 
 
 async def backfill_status_handler(_r: web.Request) -> web.Response:
@@ -702,13 +772,13 @@ async def backfill_status_handler(_r: web.Request) -> web.Response:
     import subprocess
     ckpt = {}
     try:
-        ckpt = json.loads(Path("/opt/dhan-trading/backfill_ckpt_NSE_EQ.json").read_text())
+        ckpt = json.loads(Path(cfg.backfill_checkpoint_path).read_text())
         ckpt["pct"] = round(ckpt["index"] / max(ckpt["total"], 1) * 100, 1)
     except Exception:
         pass
     lines: list[str] = []
     try:
-        result = subprocess.run(["tail", "-30", "/tmp/backfill.log"],
+        result = subprocess.run(["tail", "-30", cfg.backfill_log_path],
                                 capture_output=True, text=True, timeout=3)
         lines = [l for l in result.stdout.strip().split("\n") if l]
     except Exception:
@@ -759,7 +829,7 @@ async def system_health_handler(_r: web.Request) -> web.Response:
             "hermes": "retired 2026-06-11 — plain Telegram alerts via core/notify.py",
         }
 
-    result = await asyncio.get_event_loop().run_in_executor(None, _collect)
+    result = await asyncio.get_running_loop().run_in_executor(None, _collect)
     _cache_set("system_health", result)
     return web.json_response(result)
 
@@ -773,14 +843,37 @@ async def dashboard_handler(_r: web.Request) -> web.Response:
 
 
 async def postback_handler(request: web.Request) -> web.Response:
+    # SEC-09: optional HMAC verification.  If DHAN_WEBHOOK_SECRET is set,
+    # read the raw body first, compute the expected signature, and
+    # constant-time compare against the X-Dhan-Signature header.
+    # When the secret is unset, behaviour is unchanged (back-compat).
+    secret = cfg.dhan_webhook_secret
+    if secret:
+        raw_body = await request.read()
+        expected = hmac.new(
+            secret.encode(), raw_body, hashlib.sha256
+        ).hexdigest()
+        provided = request.headers.get("X-Dhan-Signature", "")
+        if not provided or not hmac.compare_digest(expected, provided):
+            logger.warning("Postback rejected — invalid or missing X-Dhan-Signature")
+            return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
+        try:
+            payload = json.loads(raw_body)
+        except Exception:
+            return web.json_response({"ok": False, "error": "bad json"}, status=400)
+    else:
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "bad json"}, status=400)
     try:
-        payload = await request.json()
         logger.info("📬 Postback: %s order %s → %s",
                     payload.get("tradingSymbol", "?"), payload.get("orderId"),
                     payload.get("orderStatus"))
         return web.json_response({"ack": "ok"})
-    except Exception as e:
-        return web.json_response({"error": str(e)}, status=400)
+    except Exception:
+        logger.exception("postback_handler failed")
+        return web.json_response({"ok": False, "error": "internal error"}, status=400)
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -833,7 +926,7 @@ async def main():
     # JSON endpoints kept answering. Bigger dedicated pool = file serving
     # can never queue behind slow queries.
     from concurrent.futures import ThreadPoolExecutor
-    asyncio.get_event_loop().set_default_executor(
+    asyncio.get_running_loop().set_default_executor(
         ThreadPoolExecutor(max_workers=16, thread_name_prefix="api"))
 
     from db import init_db
@@ -844,7 +937,7 @@ async def main():
     # access lines would bury real log content (~500KB per 5 min observed)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", cfg.webhook_port)
+    site = web.TCPSite(runner, cfg.api_bind_host, cfg.webhook_port)
     await site.start()
     logger.info("🌐 Dashboard: http://localhost:%d", cfg.webhook_port)
 

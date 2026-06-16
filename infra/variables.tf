@@ -34,6 +34,15 @@ variable "db_disk_gb" {
 }
 
 # ── DB credentials ────────────────────────────────────────────────────────────
+# OPS-03: SSH ingress CIDR — MUST be overridden to your operator IP in terraform.tfvars.
+# Leaving the default "0.0.0.0/0" exposes SSH to the entire internet; restrict to your
+# static IP or VPN egress (e.g. "1.2.3.4/32") before running terraform apply.
+variable "ssh_allowed_cidr" {
+  description = "CIDR allowed to reach SSH port 22 on both security groups. Override this to your operator IP (e.g. '1.2.3.4/32'). Default is open — INSECURE, must be tightened in tfvars."
+  type        = string
+  default     = "0.0.0.0/0" # WARNING: open to world — override in terraform.tfvars
+}
+
 variable "db_password" {
   description = "TimescaleDB postgres password — stored in SSM, not in state"
   type        = string
@@ -59,10 +68,4 @@ variable "dhan_totp_secret" {
 variable "dhan_pin" {
   type      = string
   sensitive = true
-}
-
-variable "groq_api_key" {
-  description = "Groq API key for Hermes LLM orchestrator (console.groq.com)"
-  type        = string
-  sensitive   = true
 }

@@ -1,0 +1,13 @@
+[Unit]
+Description=DhanAIBot failure alert for %i
+DefaultDependencies=no
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/opt/dhan-trading
+# %i is the failed unit name (e.g. dhan-trader.service).
+# load_dotenv() inside core.notify picks up /opt/dhan-trading/.env for
+# TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID automatically.
+ExecStart=/opt/dhan-trading/.venv/bin/python -m core.notify "ALERT: %i entered failed state on %H"

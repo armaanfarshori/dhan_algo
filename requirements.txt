@@ -4,8 +4,8 @@
 # Core async HTTP
 aiohttp>=3.9.0
 
-# Official DhanHQ SDK
-dhanhq>=2.2.0
+# Official DhanHQ SDK — pinned exactly; order placement SDK must not drift silently
+dhanhq>=2.2.0,<3
 
 # Data & analytics
 pandas>=2.1.0
@@ -37,8 +37,8 @@ alembic>=1.13
 pytz>=2024.1
 
 # Kronos foundation model (vendored in kronos/ — MIT License)
-torch>=2.0.0
+torch>=2.0.0,<3
 einops==0.8.1
-huggingface_hub>=0.33.1
+huggingface_hub>=0.33.1,<1
 safetensors>=0.4.0
 tqdm>=4.67.1

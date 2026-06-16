@@ -1,0 +1,31 @@
+[tool.ruff]
+target-version = "py311"
+# Exclude vendored, generated, and build artefacts
+exclude = [
+    ".venv",
+    "kronos",       # vendored Kronos model (MIT)
+    "dashboard",    # React/Node — not Python
+    "alembic",      # generated migrations
+    "hermes_skills",# retired LLM gateway scripts
+    "scripts",      # one-off utility scripts
+]
+
+[tool.ruff.lint]
+# F = Pyflakes only: real bugs (undefined names, unused imports/variables)
+# Deliberately NOT enabling style rules (E/W) or opinionated rules to avoid noise.
+select = ["F"]
+
+# Per-file suppressions for pre-existing issues in production source files.
+# Each entry notes WHY rather than just silencing blindly.
+[tool.ruff.lint.per-file-ignores]
+# api.py: `except Exception as exc:` pattern — exc intentionally unused (logger.exception
+# captures the traceback; naming it avoids a bare `except Exception:` lint from other tools)
+"apps/api.py" = ["F841"]
+# Unused imports in core modules — left for future use or type-annotation purposes
+"core/client.py" = ["F401"]
+"core/instruments.py" = ["F401"]
+"core/kronos_signal.py" = ["F401"]
+# live_feed.py: both an unused import and a bare-except variable (same pattern as api.py)
+"core/live_feed.py" = ["F401", "F841"]
+"engine/portfolio.py" = ["F401"]
+"ml/kronos_gate.py" = ["F401"]

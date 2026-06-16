@@ -20,8 +20,11 @@ export default function FloatingKillSwitch({ onKill }) {
     if (!armed) { setArmed(true); return }
     setBusy(true)
     try {
+      const headers = { 'Content-Type': 'application/json' }
+      const tok = localStorage.getItem('dashboard_token')
+      if (tok) headers['X-Dashboard-Token'] = tok
       const r = await fetch('/api/killswitch', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+        method: 'POST', headers, body: '{}'
       })
       const d = await r.json()
       if (d.ok) { setFired(true); onKill?.() }

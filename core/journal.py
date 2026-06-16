@@ -1,19 +1,14 @@
 """
 Journal — unified logging layer for DhanAIBot
 ==============================================
-Consolidates three previous modules into one clear API:
+Consolidates previous modules into one clear API:
 
-  TradeLogger   — persistent JSON-lines trade log (.logs/trades.jsonl)
   AsyncDBBackend— async TimescaleDB sink for signals + trades
   LogBuffer     — rolling in-memory buffer for /api/logs endpoint
 
 Usage:
     # Singletons
-    from core.journal import get_trade_logger, get_log_buffer, install_log_buffer
-
-    logger = get_trade_logger()
-    logger.log_entry(...)
-    logger.log_exit(...)
+    from core.journal import get_log_buffer, install_log_buffer
 
     install_log_buffer()   # call once at startup to capture all logs
     logs = get_log_buffer().get_logs(50)
@@ -24,121 +19,9 @@ import json
 import logging
 from collections import deque
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 _log = logging.getLogger("dhan.journal")
-
-# ── File paths ─────────────────────────────────────────────────────────────────
-_LOG_DIR  = Path(__file__).parent.parent / ".logs"
-_LOG_FILE = _LOG_DIR / "trades.jsonl"
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TradeLogger — JSON-lines persistent trade journal
-# ══════════════════════════════════════════════════════════════════════════════
-
-class TradeLogger:
-    """Persists every entry/exit to .logs/trades.jsonl. Survives restarts."""
-
-    def __init__(self):
-        _LOG_DIR.mkdir(exist_ok=True)
-        self._session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        _log.info("Trade log: %s  (session %s)", _LOG_FILE, self._session_id)
-
-    def _write(self, record: dict):
-        record["session_id"] = self._session_id
-        with open(_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-    def log_entry(
-        self,
-        engine:   str,
-        symbol:   str,
-        action:   str,
-        price:    float,
-        qty:      int,
-        mode:     str,
-        lot_size: int   = 1,
-        num_lots: int   = 1,
-        bep:      float = 0.0,
-        target:   float = 0.0,
-        stop:     float = 0.0,
-        rsi:      float = 0.0,
-        segment:  str   = "",
-        strategy: str   = "",
-        reason:   str   = "",
-    ):
-        record = {
-            "ts": datetime.now(timezone.utc).isoformat(), "type": "ENTRY",
-            "engine": engine, "symbol": symbol, "segment": segment,
-            "strategy": strategy, "action": action,
-            "price": round(price, 2), "qty": qty,
-            "lot_size": lot_size, "num_lots": num_lots,
-            "bep": round(bep, 2), "target": round(target, 2),
-            "stop": round(stop, 2), "rsi": round(rsi, 2),
-            "notional": round(price * qty, 2), "pnl": None,
-            "mode": mode, "reason": reason,
-        }
-        self._write(record)
-        _log.info(
-            "[TRADE] %s %s %s | ₹%.2f × %d = ₹%,.0f | BEP ₹%.2f | T ₹%.2f | S ₹%.2f",
-            mode, action, symbol, price, qty, price * qty, bep, target, stop,
-        )
-
-    def log_exit(
-        self,
-        engine:      str,
-        symbol:      str,
-        action:      str,
-        price:       float,
-        qty:         int,
-        mode:        str,
-        entry_price: float = 0.0,
-        pnl:         float = 0.0,
-        reason:      str   = "",
-        segment:     str   = "",
-        strategy:    str   = "",
-    ):
-        record = {
-            "ts": datetime.now(timezone.utc).isoformat(), "type": "EXIT",
-            "engine": engine, "symbol": symbol, "segment": segment,
-            "strategy": strategy, "action": action,
-            "price": round(price, 2), "qty": qty,
-            "entry_price": round(entry_price, 2),
-            "notional": round(price * qty, 2),
-            "pnl": round(pnl, 2),
-            "pnl_pct": round((pnl / (entry_price * qty) * 100) if entry_price and qty else 0, 2),
-            "mode": mode, "reason": reason,
-        }
-        self._write(record)
-        sign = "+" if pnl >= 0 else ""
-        _log.info("[TRADE] %s EXIT %s | ₹%.2f × %d | PnL %s₹%,.2f", mode, symbol, price, qty, sign, pnl)
-
-    def get_trades(self, limit: int = 200) -> list:
-        if not _LOG_FILE.exists():
-            return []
-        try:
-            lines = _LOG_FILE.read_text(encoding="utf-8").strip().split("\n")
-            return [json.loads(l) for l in lines if l.strip()][-limit:]
-        except Exception as exc:
-            _log.warning("Trade log read error: %s", exc)
-            return []
-
-    def get_session_summary(self) -> dict:
-        trades   = self.get_trades(500)
-        session  = [t for t in trades if t.get("session_id") == self._session_id]
-        entries  = [t for t in session if t["type"] == "ENTRY"]
-        exits    = [t for t in session if t["type"] == "EXIT"]
-        realized = sum(t.get("pnl", 0) or 0 for t in exits)
-        return {
-            "session_id":    self._session_id,
-            "total_entries": len(entries),
-            "total_exits":   len(exits),
-            "open_trades":   len(entries) - len(exits),
-            "realized_pnl":  round(realized, 2),
-            "log_file":      str(_LOG_FILE),
-        }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -153,10 +36,12 @@ class AsyncDBBackend:
     """
 
     def __init__(self):
-        import os
-        # DB_HOST presence (not value) decides whether journalling is on —
-        # local dev without a DB should run with the backend disabled.
-        self._enabled = bool(os.getenv("DB_HOST"))
+        from config import get_config
+        # DB_HOST presence (not default value) decides whether journalling is
+        # on — local dev without a DB should run with the backend disabled.
+        # "localhost" is the pydantic-settings default; treat it (and "")
+        # the same as an unset variable so CI / dev boxes stay disabled.
+        self._enabled = get_config().db_host not in ("", "localhost")
         self._engine  = None
         self._Session = None
 
@@ -171,7 +56,7 @@ class AsyncDBBackend:
             url = get_config().db_url
             self._engine  = create_engine(url, pool_pre_ping=True, pool_size=3, max_overflow=5)
             self._Session = sessionmaker(bind=self._engine)
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self._ping)
             _log.info("AsyncDBBackend: connected to TimescaleDB")
         except Exception as exc:
@@ -199,7 +84,7 @@ class AsyncDBBackend:
         if not self._enabled:
             return
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self._exec, sql, params)
         except Exception as exc:
             _log.warning("AsyncDBBackend write error: %s", exc)
@@ -383,7 +268,7 @@ class AsyncDBBackend:
         """Create a new run record. Returns run_id for linking orders/signals."""
         if not self._enabled:
             return None
-        import hashlib, subprocess
+        import subprocess
         try:
             git_sha = subprocess.check_output(
                 ["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL
@@ -411,7 +296,7 @@ class AsyncDBBackend:
             finally:
                 session.close()
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _insert)
         _log.info("Run %s started — mode=%s strategy=%s version=%s", run_id[0], mode, strategy, git_sha)
         return run_id[0]
@@ -468,16 +353,8 @@ class LogBuffer:
 
 # ── Singletons ─────────────────────────────────────────────────────────────────
 
-_trade_logger: Optional[TradeLogger]  = None
 _db_backend:   Optional[AsyncDBBackend] = None
 _log_buffer:   Optional[LogBuffer]    = None
-
-
-def get_trade_logger() -> TradeLogger:
-    global _trade_logger
-    if _trade_logger is None:
-        _trade_logger = TradeLogger()
-    return _trade_logger
 
 
 def get_db_backend() -> AsyncDBBackend:
@@ -500,10 +377,6 @@ def install_log_buffer():
 
 
 # ── Backwards-compat shims (so existing imports don't break) ──────────────────
-
-# core.trade_log compatibility
-def get_trade_logger_compat() -> TradeLogger:
-    return get_trade_logger()
 
 # core.log_buffer compatibility
 def install():

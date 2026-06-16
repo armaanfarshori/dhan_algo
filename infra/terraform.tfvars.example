@@ -16,6 +16,11 @@ agent_instance_type = "t4g.micro"      # t4g.small during free trial
 # Storage
 db_disk_gb          = 200
 
+# OPS-03: SSH access restriction — REQUIRED, do not leave open to the internet.
+# Set to your operator's static IP or VPN egress CIDR (e.g. home/office IP).
+# Find your current IP: curl -s https://checkip.amazonaws.com
+ssh_allowed_cidr    = "1.2.3.4/32"  # your operator IP — REQUIRED, do not leave open
+
 # Credentials — also stored in SSM. NEVER put real values here; this file is
 # committed. Fill the real values only in terraform.tfvars (gitignored).
 db_password         = "change-me-strong-password"

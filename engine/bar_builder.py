@@ -120,7 +120,7 @@ class BarBuilder:
                 s.execute(_BARS_SQL, batch)
 
         try:
-            await asyncio.get_event_loop().run_in_executor(None, _write)
+            await asyncio.get_running_loop().run_in_executor(None, _write)
             self.bars_written += len(batch)
             self.last_flush_ts = datetime.now(IST)
             logger.debug("BarBuilder: flushed %d bars (total %d)", len(batch), self.bars_written)

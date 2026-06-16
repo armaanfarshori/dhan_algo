@@ -147,6 +147,16 @@ async def main():
     logger.info("=" * 60)
     if not cfg.paper_trading:
         logger.warning("⚠️  LIVE TRADING MODE — real money at risk!")
+        # SEC-12: refuse to start in LIVE mode unless the operator has
+        # explicitly set ALLOW_LIVE_TOGGLE=true.  This prevents an accidental
+        # PAPER_TRADING=false flip from silently opening live positions.
+        if not cfg.allow_live_toggle:
+            logger.critical(
+                "LIVE mode requested but ALLOW_LIVE_TOGGLE is not set. "
+                "Set ALLOW_LIVE_TOGGLE=true in .env to confirm live intent, "
+                "then restart.  Refusing to start."
+            )
+            sys.exit(1)
 
     RUN_DIR.mkdir(exist_ok=True)
     start_time = time.time()
@@ -191,7 +201,7 @@ async def main():
         from core.nse_screener import get_top_volatile
         from core.watchlist import WatchlistManager
         watchlist = await WatchlistManager.build()
-        screener_results = await asyncio.get_event_loop().run_in_executor(
+        screener_results = await asyncio.get_running_loop().run_in_executor(
             None, lambda: get_top_volatile(
                 n=cfg.watchlist_n,
                 min_avg_volume=cfg.screener_min_avg_volume,
@@ -217,7 +227,7 @@ async def main():
                     {"ids": ids, "seg": cfg.watchlist_exchange_segment}).fetchall()
             return {r[0] for r in rows}
 
-        valid = await asyncio.get_event_loop().run_in_executor(
+        valid = await asyncio.get_running_loop().run_in_executor(
             None, _validate_watchlist, list(watchlist_ids))
         for sid in [s for s in watchlist_ids if s not in valid]:
             watchlist_ids.remove(sid)
@@ -248,7 +258,7 @@ async def main():
                 ), {"ids": watchlist_ids}).fetchall()
             return {r[0]: r[1] for r in rows}
         try:
-            names = await asyncio.get_event_loop().run_in_executor(None, _resolve_names)
+            names = await asyncio.get_running_loop().run_in_executor(None, _resolve_names)
         except Exception as exc:
             logger.warning("Name resolution failed (%s) — showing ids", exc)
             names = {}
@@ -361,7 +371,7 @@ async def main():
 
         # ── Launch ────────────────────────────────────────────────────────────
         stop_event = asyncio.Event()
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _shutdown(sig_, _frame=None):
             logger.info("Signal %s — shutting down…", getattr(sig_, "name", sig_))

@@ -106,7 +106,7 @@ class KronosSignalEngine:
         async with self._lock:
             if self._predictor is not None:
                 return
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             logger.info("Loading Kronos (%s / %s, offline=%s)…",
                         self._tokenizer_id, self._model_id, self._offline)
             self._predictor = await loop.run_in_executor(None, self._load_sync, device)
@@ -173,7 +173,7 @@ class KronosSignalEngine:
         step = pd.Timedelta(self._timeframe)
         y_ts = pd.date_range(start=last_ts + step, periods=pred_len, freq=self._timeframe)
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         pred_df = await loop.run_in_executor(
             None,
             self._predict_sync,
@@ -218,7 +218,7 @@ class KronosSignalEngine:
         # to fill those buckets (+1 for the dropped in-progress bucket).
         raw_rows = ((lookback or self._lookback) + 1) * self._bucket_min
         try:
-            df = await asyncio.get_event_loop().run_in_executor(
+            df = await asyncio.get_running_loop().run_in_executor(
                 None, _fetch_ohlcv_sync, security_id, exchange_segment, raw_rows
             )
         except Exception as exc:
@@ -236,8 +236,8 @@ class KronosSignalEngine:
             result["last_bar_ts"] = last_ts.isoformat()
             result["data_age_min"] = round(
                 (datetime.now(timezone.utc) - last_ts).total_seconds() / 60, 1)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("kronos: failed to compute data_age_min (%s)", exc)
         return result
 
     # ------------------------------------------------------------------

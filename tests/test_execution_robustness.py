@@ -9,8 +9,6 @@ H4 (High): when an order never confirms within the poll budget, LiveExecutor
 """
 import asyncio
 
-import pytest
-
 from engine.execution import LiveExecutor
 from engine.types import OrderIntent
 

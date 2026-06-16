@@ -1,10 +1,9 @@
 """Backtest replay — next-bar fills, no lookahead, costs deducted, gating."""
 import asyncio
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-import pytest
 
 from research.backtest.engine import BacktestParams, replay_security_day
 from strategies.orb import ORBParams

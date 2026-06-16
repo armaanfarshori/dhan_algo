@@ -1,6 +1,4 @@
 """Config sanity — typed settings load with safe defaults and parse env vars."""
-import os
-
 from config import Config
 
 
