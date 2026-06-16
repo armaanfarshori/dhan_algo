@@ -82,7 +82,11 @@
   --radius-sm: 6px;
 }
 
-* { box-sizing: border-box; margin: 0; padding: 0; }
+/* NOTE: do NOT add an unlayered "* { margin:0; padding:0 }" reset here.
+   Tailwind v4 emits all utilities inside a cascade @layer, and unlayered
+   rules beat layered ones regardless of specificity, so such a reset
+   silently kills every padding/margin utility (no card padding, no
+   centering via mx-auto). Tailwind preflight already handles the reset. */
 
 html, body {
   background: hsl(var(--background));

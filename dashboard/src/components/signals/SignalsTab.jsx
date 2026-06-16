@@ -224,16 +224,17 @@ function IntradaySparkline({ equity }) {
 function RangeLadder({ s }) {
   const lo = s.or_low, hi = s.or_high, px = s.last_price
   if (!lo || !hi || hi <= lo) {
-    const windowOver = istMinutes() > OR_WINDOW_END
+    // No opening range yet (pre-09:30, or after-hours when engine state resets).
+    // Render a tidy flat track so the cockpit grid stays uniform, not text-cluttered.
+    const note = s.or_locked
+      ? 'no range'
+      : istMinutes() > OR_WINDOW_END ? 'no OR today' : 'building…'
     return (
-      <div className="flex h-[24px] items-center">
-        <span className="text-[9.5px] text-muted-foreground mono">
-          {s.or_locked
-            ? 'zero-width range — no trade'
-            : windowOver
-              ? 'no opening range today'
-              : 'building opening range…'}
-        </span>
+      <div className="py-1">
+        <div className="relative h-[24px]">
+          <div className="absolute inset-x-0 top-[11px] h-[3px] rounded-sm bg-border" />
+          <span className="absolute right-0 top-0 mono text-[9px] text-faint">{note}</span>
+        </div>
       </div>
     )
   }
@@ -377,62 +378,65 @@ function ORBCockpit({ data }) {
 
 // ─── Executions feed ──────────────────────────────────────────────────────────
 
+// The /api/signals rows look like:
+//   { action:'EXIT', price:436.56, reason:'ORB exit  PnL ₹+48.00',
+//     timestamp:'...+00:00', source:'ORB APOLLO' }
+// The symbol lives in `source` and the realised P&L is embedded in `reason`.
+function parseExec(s) {
+  const symbol = (s.source || '').replace(/^ORB\s+/i, '').trim() || null
+  let pnl = null
+  if (s.reason) {
+    const m = s.reason.match(/PnL\s*₹?\s*([+-]?[\d,]+(?:\.\d+)?)/i)
+    if (m) pnl = parseFloat(m[1].replace(/,/g, ''))
+  }
+  return { symbol, pnl }
+}
+
 function ExecutionsFeed({ signals }) {
   const raw  = signals?.data
-  const feed = (Array.isArray(raw) ? raw : []).slice(0, 20)
-
-  // Count round trips for the meta label
+  const feed = (Array.isArray(raw) ? raw : []).slice(0, 30)
   const exits = feed.filter(s => s.action === 'EXIT').length
 
   return (
     <Panel>
       <PanelHeader title="Executions" meta={`today · ${exits} round trips`} />
-      <div className="overflow-y-auto" style={{ maxHeight: 260 }}>
+      <div className="overflow-y-auto" style={{ maxHeight: 320 }}>
         {feed.length === 0 ? (
           <div className="p-4 mono text-[10px] text-muted-foreground">
             No executions today — entries appear here when ORB fires
           </div>
         ) : (
           feed.map((s, i) => {
-            const pnlColor = s.pnl != null
-              ? (s.pnl >= 0 ? 'text-profit' : 'text-loss')
-              : 'text-muted-foreground'
+            const { symbol, pnl } = parseExec(s)
+            const isExit = s.action === 'EXIT'
             const actCls = s.action === 'BUY'
               ? 'text-profit bg-profit/10'
-              : s.action === 'SELL' || s.action === 'EXIT'
+              : (s.action === 'SELL' || isExit)
                 ? 'text-loss bg-loss/10'
                 : 'text-muted-foreground bg-border'
+            const pnlColor = pnl != null
+              ? (pnl >= 0 ? 'text-profit' : 'text-loss')
+              : 'text-muted-foreground'
 
             return (
               <div
                 key={i}
                 className="grid items-center gap-[10px] border-b border-border px-4 py-[10px] last:border-0"
-                style={{ gridTemplateColumns: 'auto 1fr auto' }}
+                style={{ gridTemplateColumns: 'auto minmax(0,1fr) auto' }}
               >
-                {/* action chip */}
-                <span
-                  className={`mono w-[42px] rounded-[5px] py-0.5 text-center text-[9.5px] font-bold tracking-[.05em] ${actCls}`}
-                >
+                <span className={`mono w-[42px] rounded-[5px] py-0.5 text-center text-[9.5px] font-bold tracking-[.05em] ${actCls}`}>
                   {s.action}
                 </span>
-                {/* ticker + time */}
-                <div>
-                  <div className="text-[12px] font-medium text-foreground">
-                    {(s.ticker || s.security_id)
-                      ? (s.ticker ?? s.security_id)
-                      : <span className="text-faint">Unknown</span>}
+                <div className="min-w-0">
+                  <div className="truncate text-[12px] font-medium text-foreground">
+                    {symbol ?? <span className="text-faint">—</span>}
                   </div>
-                  <div className="mono text-[10px] text-faint">
-                    {fmtTime(s.timestamp)} IST
-                  </div>
+                  <div className="mono text-[10px] text-faint">{fmtTime(s.timestamp)} IST</div>
                 </div>
-                {/* price / pnl */}
                 <span className={`mono text-right text-[12.5px] font-semibold ${pnlColor}`}>
-                  {s.pnl != null
-                    ? (s.pnl >= 0 ? '+' : '') + INR0(s.pnl)
-                    : s.price
-                      ? `x${s.qty ?? ''}`
-                      : ''}
+                  {pnl != null
+                    ? (pnl >= 0 ? '+' : '') + INR0(pnl)
+                    : (s.price ? '₹' + s.price.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '')}
                 </span>
               </div>
             )
