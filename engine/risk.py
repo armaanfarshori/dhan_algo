@@ -25,7 +25,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -173,7 +173,7 @@ class RiskEngine:
                 "scope": scope, "reason": reason,
                 "date": today.isoformat(),
                 "week": f"{y}-W{w:02d}",
-                "ts": datetime.now().isoformat(),
+                "ts": datetime.now(timezone.utc).isoformat(),  # T5: tz-aware
             }))
         except Exception as exc:
             logger.error("Risk: failed to persist halt state: %s", exc)
@@ -318,7 +318,7 @@ class RiskEngine:
         unrealized = self._portfolio.unrealized_pnl(self._ltp)
         day_total = self._realized_today + unrealized
         week_total = self._realized_week + unrealized
-        self.state.last_checked = datetime.now()
+        self.state.last_checked = datetime.now(timezone.utc)  # T5: tz-aware
 
         violations, scope = [], "day"
         if day_total < -self.daily_loss_budget:

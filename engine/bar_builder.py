@@ -75,6 +75,16 @@ class BarBuilder:
             self._current[security_id] = _Bar(minute_start, price)
             self._current[security_id].volume = vol_delta
             return
+        if minute_start < bar.minute_start:
+            # Out-of-order tick: time went backwards (stale WS packet after reconnect).
+            # Drop it — never roll the bar back or overwrite a closed historical bar.
+            delta_s = int((bar.minute_start - minute_start).total_seconds())
+            logger.warning(
+                "BarBuilder: out-of-order tick for %s — tick minute %s is %ds before "
+                "current bar %s; dropping",
+                security_id, minute_start, delta_s, bar.minute_start,
+            )
+            return
         if bar.minute_start != minute_start:
             self._close_bar(security_id, bar)
             nb = _Bar(minute_start, price)

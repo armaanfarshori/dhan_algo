@@ -32,6 +32,9 @@ logging.basicConfig(
     # dashboard, and the browser needs a parseable timestamp
     datefmt="%Y-%m-%dT%H:%M:%S+00:00",
 )
+# T4: emit UTC timestamps regardless of host OS timezone, so the literal "+00:00"
+# offset above is always honest (and the api log-tail date matching stays correct).
+logging.Formatter.converter = time.gmtime
 logger = logging.getLogger("dhan.trader")
 
 from config import get_config

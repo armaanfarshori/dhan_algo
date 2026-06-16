@@ -33,6 +33,8 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%S+00:00",
 )
+# T4: always emit UTC timestamps regardless of host OS timezone.
+logging.Formatter.converter = time.gmtime
 logger = logging.getLogger("dhan.api")
 
 from config import get_config
