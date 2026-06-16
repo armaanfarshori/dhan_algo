@@ -13,13 +13,13 @@ resource "aws_security_group" "db" {
     security_groups = [aws_security_group.agent.id]
   }
 
-  # SSH for operator maintenance (restrict to your IP in tfvars if needed)
+  # SSH for operator maintenance — set ssh_allowed_cidr in tfvars to restrict to your IP
   ingress {
     description = "SSH operator"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]  # tighten to your IP if desired
+    cidr_blocks = [var.ssh_allowed_cidr]
   }
 
   # All outbound (apt, Docker pulls, S3 backups)
@@ -39,13 +39,13 @@ resource "aws_security_group" "agent" {
   description = "Trading agent: SSH + dashboard (VPN-only) + Dhan API egress"
   vpc_id      = aws_vpc.main.id
 
-  # SSH
+  # SSH — set ssh_allowed_cidr in tfvars to restrict to your operator IP
   ingress {
     description = "SSH operator"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [var.ssh_allowed_cidr]
   }
 
   # Dashboard port — bind to localhost on the box; reach via SSH tunnel or Tailscale
@@ -54,7 +54,7 @@ resource "aws_security_group" "agent" {
     from_port   = 8765
     to_port     = 8765
     protocol    = "tcp"
-    cidr_blocks = ["10.0.0.0/8"]  # VPC-internal only
+    cidr_blocks = ["10.0.0.0/8"] # VPC-internal only
   }
 
   # All outbound — Dhan API (api.dhan.co), package updates, S3

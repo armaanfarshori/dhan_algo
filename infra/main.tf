@@ -8,16 +8,28 @@ terraform {
     }
   }
 
-  # After first apply, migrate state to S3 with:
-  #   uncomment the backend block, run: terraform init -migrate-state
-  # backend "s3" {
-  #   bucket         = "dhan-trading-tfstate-<ACCOUNT_ID>"
-  #   key            = "prod/terraform.tfstate"
-  #   region         = "ap-south-1"
-  #   dynamodb_table = "dhan-trading-tflock"
-  #   encrypt        = true
-  #   profile        = "dhan-terraform"
-  # }
+  # OPS-02: Remote state — S3 + DynamoDB locking.
+  # OPERATOR SETUP (one-time, before running terraform init -migrate-state):
+  #   1. aws s3api create-bucket --bucket dhan-trading-tfstate-<ACCOUNT_ID> \
+  #         --region ap-south-1 \
+  #         --create-bucket-configuration LocationConstraint=ap-south-1
+  #   2. aws s3api put-bucket-versioning --bucket dhan-trading-tfstate-<ACCOUNT_ID> \
+  #         --versioning-configuration Status=Enabled
+  #   3. aws dynamodb create-table --table-name dhan-trading-tflock \
+  #         --attribute-definitions AttributeName=LockID,AttributeType=S \
+  #         --key-schema AttributeName=LockID,KeyType=HASH \
+  #         --billing-mode PAY_PER_REQUEST --region ap-south-1
+  #   4. Replace <ACCOUNT_ID> below with your real AWS account ID, then run:
+  #         terraform init -migrate-state
+  # Backend blocks cannot use variables — fill the literal values here.
+  backend "s3" {
+    bucket         = "dhan-trading-tfstate-<ACCOUNT_ID>" # replace <ACCOUNT_ID>
+    key            = "dhan-trading/terraform.tfstate"
+    region         = "ap-south-1"
+    dynamodb_table = "dhan-trading-tflock"
+    encrypt        = true
+    profile        = "dhan-terraform"
+  }
 }
 
 provider "aws" {
