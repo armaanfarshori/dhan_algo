@@ -34,7 +34,11 @@ export function TopBar({ data }) {
   // Signals "Today P&L" KPI. trader.portfolio.total_pnl can read 0 after EOD.
   const pnl = t?.risk?.total_pnl ?? t?.portfolio?.total_pnl ?? 0
   const halted = !!t?.risk?.halted
-  const backfillPct = data.backfill?.data?.checkpoint?.pct
+  const bfck = data.backfill?.data?.checkpoint
+  // Compute pct from index/total (API rounds to 0.1% → looks frozen for minutes)
+  const backfillPct = (bfck?.index != null && bfck?.total)
+    ? (bfck.index / bfck.total * 100)
+    : bfck?.pct
   const { theme, toggle } = useTheme()
 
   return (
@@ -67,7 +71,12 @@ export function TopBar({ data }) {
           <div className="hidden items-center gap-[18px] md:flex">
             <Stat k={`Feed · ${subs} WS`} v="●" vClass={feedOk ? 'text-profit' : 'text-faint'} />
             <Stat k="Uptime" v={alive ? fmtUptime(t?.uptime_seconds ?? 0) : '—'} />
-            {backfillPct != null && <Stat k="Backfill" v={`${backfillPct}%`} />}
+            {backfillPct != null && (
+              <Stat
+                k={bfck?.index != null ? `Backfill · ${bfck.index.toLocaleString('en-IN')}/${bfck.total.toLocaleString('en-IN')}` : 'Backfill'}
+                v={`${Number(backfillPct).toFixed(2)}%`}
+              />
+            )}
           </div>
         </div>
 

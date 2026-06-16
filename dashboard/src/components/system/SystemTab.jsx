@@ -70,7 +70,9 @@ function KpiRow({ data }) {
   const db  = data.dbStats?.data
   const bf  = data.backfill?.data
   const ck  = bf?.checkpoint ?? {}
-  const pct = ck.pct ?? 0
+  // Compute pct client-side from index/total — the API rounds pct to 0.1%
+  // (~9 securities), so it only ticks every few minutes; 2-decimal here moves visibly.
+  const pct = (ck.index != null && ck.total) ? (ck.index / ck.total * 100) : (ck.pct ?? 0)
 
   // API calls today: sum total across all capped + uncapped categories
   const cats = data.rateLimitsData?.data?.categories ?? {}
@@ -99,12 +101,12 @@ function KpiRow({ data }) {
     <div className="grid grid-cols-2 gap-3.5 sm:grid-cols-4 mb-3.5">
       <StatCard
         label="Backfill"
-        value={pct > 0 ? `${Number(pct).toFixed(1)}%` : '—'}
+        value={pct > 0 ? `${Number(pct).toFixed(2)}%` : '—'}
         valueClassName="text-foreground"
         right={<Pill tone="neu">NSE_EQ</Pill>}
         sub={
           ck.index != null
-            ? `${ck.index}/${ck.total} · ~${Number(100 - pct).toFixed(1)}% left`
+            ? `${ck.index?.toLocaleString('en-IN')}/${ck.total?.toLocaleString('en-IN')} · ~${Number(100 - pct).toFixed(2)}% left`
             : 'no checkpoint'
         }
         bar={{ value: pct, color: 'hsl(var(--sky))' }}
