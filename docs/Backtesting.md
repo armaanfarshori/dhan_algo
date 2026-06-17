@@ -12,7 +12,7 @@
 | **No lookahead** | A decision made on bar *i* (using its close/high/low) executes at bar *i+1*'s **open**, plus adverse slippage. A decision on the session's last bar fills at that bar's close (square-off approximation). |
 | **Real costs** | Full Indian intraday cost stack per round trip (`research/backtest/costs.py`) — an earlier backtester with zero costs and same-bar fills produced beautiful, useless equity curves |
 | **Point-in-time universe** | `research/backtest/universe.py` reruns the ATR% screener with a hard `time < as_of` cutoff — today's watchlist is never projected into the past |
-| **Survivorship-safe** | The universe query draws from the `bars` table, which keeps delisted and suspended instruments — names that later died stay in the historical universe |
+| **Survivorship CEILING (NOT safe)** | ⚠️ The universe derives from the **current** scrip master (`dhan_clean.clean_universe`) — delisted/suspended names are **absent**. So results are an **optimistic upper bound**, not survivorship-safe. A point-in-time master needs historical scrip masters + delisted OHLCV we don't have from the feed; every result is labelled a ceiling instead (report output + `M3-RESULTS-TEMPLATE.md` §1.3). |
 | **Honest Sharpe** | Computed from **daily** net P&L / starting equity × √252 — never from per-minute equity points, which inflated the old backtester's number ~20× |
 | **Identical risk math** | `replay_security_day` reuses `engine.risk.RiskEngine.size_position` — the same stop-distance sizing as the live trader, so backtest P&L is denominated in the same units |
 
@@ -55,7 +55,9 @@ The report (`research/backtest/report.py`) includes: total/annualized return, da
 
 ## Universe construction (`research/backtest/universe.py`)
 
-Each backtest day its own `point_in_time_universe(as_of=day)` call: ATR%-ranked NSE equities using only daily bars with `time < as_of`. The query joins `bars` with `instruments` to filter EQUITY segment — same validation the live screener runs. A `min_avg_volume` floor (default 10,000 shares/day in the backtest, 50,000 in the live screener) prevents illiquid junk.
+Each backtest day its own `point_in_time_universe(as_of=day)` call: ATR%-ranked NSE equities using only bars with `time < as_of`. Since M3 runs on `dhan_clean` (which holds only 1m bars + the `clean_universe` table — no `instruments`, no `1d` rollup), the query derives daily high/low/close/volume **from the 1m bars on the fly** and uses **`clean_universe` membership** in place of the old `instruments` EQUITY join (it is already the validated NSE_EQ liquid set). The `min_avg_volume` floor **defaults to the live 50,000** shares/day (was 10,000) so the backtest never trades names you'd never trade live; `dhan_clean` is itself built at ≥50k, so the pool is already pre-filtered.
+
+> The backtester reads `dhan_clean` via `config.backtest_db_url`, and the **portfolio-level** runner (`research/backtest/portfolio_engine.py`) replays all names against one shared `RiskEngine`+book — finite capital, concurrent-position cap, and the daily-loss kill-switch — see `docs/Backtesting-Framework.md`.
 
 Note: the universe query runs on `1d` bars, not 1-minute — rolling up 1-minute bars for every candidate × 60 days blew the statement timeout while the backfill was writing. Semantics are identical.
 
