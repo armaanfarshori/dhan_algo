@@ -114,50 +114,52 @@ class KronosWindowDataset(Dataset):
 
 def compute_loss(tokenizer, model, batch, device):
     """
-    Forward pass + cross-entropy loss over predicted tokens.
+    Next-token cross-entropy over the full window — mirrors the OFFICIAL Kronos
+    trainer (shiyu-coder/Kronos `finetune/train_predictor.py`):
 
-    Pipeline:
-      raw x → tokenizer.encode() → [s1_ids, s2_ids]
-      context tokens → model → predicted logits for next token
-      loss = CE(predicted s1, target s1) + CE(predicted s2, target s2)
+        s1_ids, s2_ids = tokenizer.encode(window, half=True)
+        token_in  = tokens[:, :-1]      token_out = tokens[:, 1:]   # next-token
+        s1_logits, s2_logits = model(token_in_s1, token_in_s2, stamp_in)
+        loss = model.head.compute_loss(s1_logits, s2_logits, out_s1, out_s2)
+
+    Three things this deliberately does NOT do (the previous version did, wrongly):
+      • No `use_teacher_forcing=True`. The default forward path conditions the s2
+        head on the model's OWN sampled s1 — exactly what `auto_regressive_inference`
+        does at serving time. Teacher forcing here would create a train/inference
+        mismatch on the s2 (sibling) head.
+      • No `s1_targets=s1_input`. That conditioned s2 on the *current* s1 token,
+        but s2 must be conditioned on the s1 of the position it is predicting
+        (off-by-one). The official recipe sidesteps this entirely (no TF).
+      • No "last pred_len positions only" slice. Loss is next-token over the WHOLE
+        window (how the base model was pre-trained), and via the head's own
+        averaged CE — not a manual summed CE.
+
+    The input window is already per-window z-scored + clipped in
+    KronosWindowDataset (matching KronosPredictor.predict), so no normalisation here.
     """
     x       = batch["x"].to(device)       # (B, ctx, 6)
     y       = batch["y"].to(device)       # (B, pred, 6)
     x_stamp = batch["x_stamp"].to(device) # (B, ctx, 5)
     y_stamp = batch["y_stamp"].to(device) # (B, pred, 5)
 
-    # Concatenate context + target for full sequence tokenisation
-    full_x     = torch.cat([x, y], dim=1)                          # (B, ctx+pred, 6)
-    full_stamp = torch.cat([x_stamp, y_stamp], dim=1)              # (B, ctx+pred, 5)
+    # Tokenise the full context+target window (the model predicts next-token across it)
+    full_x     = torch.cat([x, y], dim=1)             # (B, ctx+pred, 6)
+    full_stamp = torch.cat([x_stamp, y_stamp], dim=1) # (B, ctx+pred, 5)
 
     with torch.no_grad():
-        z_indices = tokenizer.encode(full_x, half=True)            # tuple of (B, ctx+pred)
+        s1_ids, s2_ids = tokenizer.encode(full_x, half=True)  # each (B, T)
 
-    s1_ids = z_indices[0]  # (B, T)
-    s2_ids = z_indices[1]  # (B, T)
-
-    # Teacher-forced prediction: input is [0..T-2], target is [1..T-1]
-    s1_input  = s1_ids[:, :-1]
-    s2_input  = s2_ids[:, :-1]
-    s1_target = s1_ids[:, 1:]
-    s2_target = s2_ids[:, 1:]
+    token_in  = [s1_ids[:, :-1], s2_ids[:, :-1]]
+    token_out = [s1_ids[:, 1:],  s2_ids[:, 1:]]
     stamp_in  = full_stamp[:, :-1]
 
-    s1_logits, s2_logits = model(
-        s1_input, s2_input, stamp=stamp_in,
-        use_teacher_forcing=True, s1_targets=s1_input,
-    )
+    # Default forward (use_teacher_forcing=False): s2 head conditions on the model's
+    # own sampled s1 — train/inference consistent.
+    s1_logits, s2_logits = model(token_in[0], token_in[1], stamp=stamp_in)
 
-    # Only compute loss on the prediction segment (last pred_len-1 positions)
-    pred_len = y.shape[1]
-    s1_logits_pred = s1_logits[:, -pred_len:].reshape(-1, s1_logits.shape[-1])
-    s2_logits_pred = s2_logits[:, -pred_len:].reshape(-1, s2_logits.shape[-1])
-    s1_target_pred = s1_target[:, -pred_len:].reshape(-1)
-    s2_target_pred = s2_target[:, -pred_len:].reshape(-1)
-
-    loss_s1 = nn.functional.cross_entropy(s1_logits_pred, s1_target_pred)
-    loss_s2 = nn.functional.cross_entropy(s2_logits_pred, s2_target_pred)
-    return loss_s1 + loss_s2
+    loss, _s1_loss, _s2_loss = model.head.compute_loss(
+        s1_logits, s2_logits, token_out[0], token_out[1])
+    return loss
 
 
 # ── Training loop ─────────────────────────────────────────────────────────────
