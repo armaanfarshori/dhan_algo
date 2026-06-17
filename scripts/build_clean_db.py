@@ -247,12 +247,14 @@ def identify_universe(dry_run=True):
     )
     conn = raw_conn()
     cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    # Guard against long-running queries holding locks or OOM-ing the DB while
-    # the backfill is active.  10 min is generous for the aggregation but will
-    # abort any accidental full-table scan before it destabilises the instance.
+    # Guard against runaway queries holding locks / destabilising the instance.
+    # 30 min: the identify aggregates ALL 1m bars (~7.5 min) PLUS the daily_cov
+    # 1d scan for the completeness filter; on the (idle, large) DB box this stays
+    # well under 30 min, but the cap still aborts an accidental pathological plan.
+    # (Was 10 min — too tight once the completeness CTE was added.)
     # lock_timeout prevents the session from queuing behind a long exclusive
     # lock (e.g. autovacuum on a chunk) indefinitely.
-    cur.execute("SET statement_timeout = '600000'")   # 10 minutes
+    cur.execute("SET statement_timeout = '1800000'")  # 30 minutes
     cur.execute("SET lock_timeout      = '5000'")     # 5 seconds
     cur.execute(IDENTIFY_SQL, {
         "min_days":         MIN_TRADING_DAYS,
