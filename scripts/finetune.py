@@ -91,9 +91,14 @@ class KronosWindowDataset(Dataset):
         x     = x_arr[start:end].copy().astype(np.float32)     # (window_len, 6)
         stamp = stamp_arr[start:end].copy().astype(np.float32)  # (window_len, 5)
 
-        # Per-window z-score normalisation (same as KronosPredictor.predict)
-        x_mean = x.mean(axis=0, keepdims=True)
-        x_std  = x.std(axis=0,  keepdims=True)
+        # Z-score using CONTEXT-ONLY stats, then apply to the whole window. This
+        # matches KronosPredictor.predict (kronos/kronos.py), which at inference can
+        # only see the context: it computes mean/std over the lookback and predicts
+        # in that frame. Normalising over the full window (incl. the target bars)
+        # would leak future information — a train/inference distribution mismatch.
+        x_ctx  = x[:self.context_len]
+        x_mean = x_ctx.mean(axis=0, keepdims=True)
+        x_std  = x_ctx.std(axis=0,  keepdims=True)
         x_norm = (x - x_mean) / (x_std + 1e-5)
         x_norm = np.clip(x_norm, -self.clip, self.clip)
 

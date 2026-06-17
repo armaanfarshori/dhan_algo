@@ -44,7 +44,7 @@ export function ResumeButton() {
         <span className="sm:hidden">RESUME</span>
         <span className="hidden sm:inline">RESUME TRADING</span>
       </Button>
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={(v) => { if (!busy) setOpen(v) }}>
         <DialogContent>
           <DialogTitle>Resume trading</DialogTitle>
           <DialogBody>

@@ -72,6 +72,41 @@ def test_resume_token_set_no_header_rejected(monkeypatch):
     assert resp.status == 401
 
 
+def test_resume_token_set_correct_header_allowed(tmp_path, monkeypatch):
+    """Token set + correct X-Dashboard-Token → 200 and resume flag written."""
+    monkeypatch.setattr(api, "RUN_DIR", tmp_path)
+    monkeypatch.setattr(api, "KILLSWITCH_FILE", tmp_path / "killswitch")
+    monkeypatch.setattr(api, "RESUME_FILE", tmp_path / "resume")
+    monkeypatch.setattr(api, "cfg", _make_cfg(dashboard_token="secret123"))
+    monkeypatch.setattr(api, "_unprotected_warned", False)
+    req = _FakeRequest(method="POST", headers={"X-Dashboard-Token": "secret123"})
+    resp = asyncio.run(api.resume_handler(req))
+    assert resp.status == 200
+    assert (tmp_path / "resume").exists()
+
+
+def test_resume_bearer_token_accepted(tmp_path, monkeypatch):
+    """Authorization: Bearer <token> is accepted for resume, like the kill switch."""
+    monkeypatch.setattr(api, "RUN_DIR", tmp_path)
+    monkeypatch.setattr(api, "KILLSWITCH_FILE", tmp_path / "killswitch")
+    monkeypatch.setattr(api, "RESUME_FILE", tmp_path / "resume")
+    monkeypatch.setattr(api, "cfg", _make_cfg(dashboard_token="secret123"))
+    monkeypatch.setattr(api, "_unprotected_warned", False)
+    req = _FakeRequest(method="POST", headers={"Authorization": "Bearer secret123"})
+    resp = asyncio.run(api.resume_handler(req))
+    assert resp.status != 401
+
+
+def test_resume_works_when_no_killswitch_file(tmp_path, monkeypatch):
+    """Resume from a loss-halt (no killswitch file present) must not error."""
+    monkeypatch.setattr(api, "RUN_DIR", tmp_path)
+    monkeypatch.setattr(api, "KILLSWITCH_FILE", tmp_path / "killswitch")
+    monkeypatch.setattr(api, "RESUME_FILE", tmp_path / "resume")
+    resp = asyncio.run(api.resume_handler(_FakeRequest(method="POST")))
+    assert resp.status == 200
+    assert (tmp_path / "resume").exists()
+
+
 def test_postback_acks(monkeypatch):
     """Characterization of M6: the postback endpoint returns an ack and does not
     raise — but note it performs NO fill persistence or reconciliation."""

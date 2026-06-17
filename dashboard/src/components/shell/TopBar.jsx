@@ -99,7 +99,7 @@ export function TopBar({ data }) {
           >
             {theme === 'dark' ? '☾' : '☀'}
           </button>
-          {halted ? <ResumeButton /> : <KillSwitch />}
+          {halted && alive ? <ResumeButton /> : <KillSwitch />}
         </div>
       </div>
     </header>
