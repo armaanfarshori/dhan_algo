@@ -6,7 +6,6 @@ These cover the pure-logic links that don't need a GPU/torch or live S3:
   - GAP A: prepare_kronos_dataset timeframe presets + 1m→5m aggregation.
 """
 import pandas as pd
-import pytest
 
 
 # ── GAP E: backtester reads the clean replica ──────────────────────────────────

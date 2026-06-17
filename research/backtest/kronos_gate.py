@@ -20,8 +20,19 @@ logger = logging.getLogger("dhan.backtest.kronos")
 
 
 class KronosBacktestGate:
-    def __init__(self, min_confidence: float = 0.4, min_history: int = 100):
+    def __init__(self, min_confidence: float = 0.4, min_history: int = 100, seed: int = 0):
         from core.kronos_signal import get_kronos_engine
+        # REPRODUCIBILITY: Kronos sampling (torch.multinomial, T=0.6, N=10) is
+        # stochastic. Seed torch + numpy so a backtest run is byte-reproducible —
+        # the M3 three-way comparison must be deterministic given fixed inputs.
+        try:
+            import torch
+            import numpy as np
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+        except Exception as exc:
+            logger.warning("Kronos gate: could not seed RNG (%s) — runs may not be reproducible", exc)
+        self.seed = seed
         self._engine = get_kronos_engine()
         self.min_confidence = min_confidence
         self.min_history = min_history

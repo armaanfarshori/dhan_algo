@@ -59,7 +59,7 @@ Each backtest day its own `point_in_time_universe(as_of=day)` call: ATR%-ranked 
 
 > The backtester reads `dhan_clean` via `config.backtest_db_url`, and the **portfolio-level** runner (`research/backtest/portfolio_engine.py`) replays all names against one shared `RiskEngine`+book — finite capital, concurrent-position cap, and the daily-loss kill-switch — see `docs/Backtesting-Framework.md`.
 
-Note: the universe query runs on `1d` bars, not 1-minute — rolling up 1-minute bars for every candidate × 60 days blew the statement timeout while the backfill was writing. Semantics are identical.
+Note: the universe query now aggregates **from 1m bars** (the `dhan_clean` replica has no `1d` table). The old 1m-rollup-blows-the-timeout concern is gone — `dhan_clean` is small and the backfill is no longer writing — and a `SET LOCAL statement_timeout` guards the query.
 
 ## The decision study (M3)
 

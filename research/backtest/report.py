@@ -180,6 +180,9 @@ def m3_panel(trades: list[BTTrade], starting_equity: float,
         out["is"] = is_r.summary()
         out["oos"] = oos_r.summary()
         out["split_date"] = str(split_date)
+        # Degradation ratio: compute for any NON-ZERO IS Sharpe (including a
+        # negative one — that's informative). Only a true-zero IS Sharpe
+        # (<2 IS days / flat returns) makes the ratio undefined → None.
         out["oos_is_sharpe_ratio"] = (
-            round(oos_r.sharpe / is_r.sharpe, 2) if is_r.sharpe > 0 else None)
+            None if is_r.sharpe == 0 else round(oos_r.sharpe / is_r.sharpe, 2))
     return out

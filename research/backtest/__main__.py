@@ -66,7 +66,8 @@ async def run(args) -> int:
     gate = None
     if args.gate == "kronos":
         from research.backtest.kronos_gate import KronosBacktestGate
-        gate = KronosBacktestGate(min_confidence=cfg.kronos_min_confidence)
+        gate = KronosBacktestGate(min_confidence=cfg.kronos_min_confidence,
+                                  seed=args.kronos_seed)
         gate_fn = gate
 
     days = trading_days(args.from_date, args.to_date)
@@ -113,11 +114,20 @@ async def run(args) -> int:
     if args.json:
         payload = {
             "provenance": provenance({
-                "from": str(args.from_date), "to": str(args.to_date),
-                "split_date": str(args.split_date) if args.split_date else None,
-                "equity": args.equity, "slippage_bps": args.slippage_bps,
-                "gate": args.gate, "n": args.n, "min_volume": args.min_volume,
-                "ids": fixed_ids, "db": cfg.backtest_db_name,
+                "cli": {
+                    "from": str(args.from_date), "to": str(args.to_date),
+                    "split_date": str(args.split_date) if args.split_date else None,
+                    "equity": args.equity, "slippage_bps": args.slippage_bps,
+                    "gate": args.gate, "n": args.n, "min_volume": args.min_volume,
+                    "ids": fixed_ids,
+                },
+                # Full PortfolioParams (sizing, caps, tick, partial-fill, ORB) so
+                # the result is fully reproducible from the JSON alone.
+                "portfolio_params": asdict(pparams),
+                "kronos_min_confidence": (cfg.kronos_min_confidence
+                                          if args.gate == "kronos" else None),
+                "kronos_seed": gate.seed if gate else None,
+                "db": cfg.backtest_db_name,
             }),
             "label": label,
             "survivorship": "CEILING — universe from current scrip master; results are an upper bound",
@@ -151,6 +161,8 @@ def main():
                    help="First OOS day (date-split): trades before = IS, on/after = OOS")
     p.add_argument("--min-volume", dest="min_volume", type=int, default=50_000,
                    help="Universe avg-volume floor (default 50k = live screener)")
+    p.add_argument("--kronos-seed", dest="kronos_seed", type=int, default=0,
+                   help="Seed for Kronos sampling (reproducible gate runs; default 0)")
     p.add_argument("--json", help="Write full results to this JSON file")
     args = p.parse_args()
     raise SystemExit(asyncio.run(run(args)))

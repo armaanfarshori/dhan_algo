@@ -170,6 +170,9 @@ async def replay_portfolio(universe_by_day: dict[date, list[str]],
                             "qty": qty, "entry_px": fill_px, "entry_ts": ts, "stop": d.stop}
                         risk.register_risk(sid, risk.position_risk(fill_px, d.stop, qty))
                         orb.notify_fill(d.side, qty, fill_px)
+                        # Count the entry only when it ACTUALLY fills — a dropped/
+                        # zero-volume fill must not burn a per-session entry slot.
+                        entries_today[sid] += 1
                 elif kind == "EXIT" and sid in book.positions:
                     _close(book, trades, sid, day, float(bar["open"]), ts, d.reason,
                            params.slippage_bps, orb, params.tick_size)
@@ -206,10 +209,13 @@ async def replay_portfolio(universe_by_day: dict[date, list[str]],
                 if qty <= 0:
                     continue
                 new_risk = risk.position_risk(float(bar["close"]), decision.stop, qty)
-                if risk.committed_risk + new_risk > risk.daily_loss_budget:
+                # Match live RiskEngine.check_intent: realized losses already
+                # booked today ALSO consume the daily budget (the backtest was
+                # optimistic vs live in drawn-down sessions without this term).
+                consumed = risk.committed_risk + max(0.0, -book.realized_today)
+                if consumed + new_risk > risk.daily_loss_budget:
                     continue                       # would exceed daily risk budget
                 pending[sid] = ("ENTER", decision, qty)
-                entries_today[sid] += 1
 
             elif decision.action == "EXIT" and sid in book.positions:
                 if idx == last_idx[sid]:
@@ -218,9 +224,17 @@ async def replay_portfolio(universe_by_day: dict[date, list[str]],
                 else:
                     pending[sid] = ("EXIT", decision, 0)
 
-        # EOD: force-close anything still open at its last bar's close.
+        # EOD: force-close anything still open at its last bar's close. Guard
+        # against a position whose bars aren't in today's set (only possible if a
+        # prior day aborted mid-replay and leaked a position) — drop it safely
+        # rather than KeyError-cascade.
         for sid in list(book.positions):
-            df = bars[sid]
+            df = bars.get(sid)
+            if df is None or df.empty or sid not in orbs:
+                logger.warning("[%s] EOD: leaked position %s has no bars today — dropping", day, sid)
+                book.positions.pop(sid, None)
+                risk.release_risk(sid)
+                continue
             last = df.iloc[-1]
             _close(book, trades, sid, day, float(last["close"]),
                    last["time"].to_pydatetime(), "forced EOD close",

@@ -53,30 +53,32 @@
 | Starting equity (₹) | `____` | |
 | Risk per trade | `____` | default 0.01 |
 | Max notional % per trade | `____` | default 0.20 |
-| Backtest min avg volume floor | `____` | **Align to live screener (50,000)** — default 10,000 understates thin-name cost |
+| Backtest min avg volume floor | `____` | CLI `--min-volume` default is **50,000** (matches live screener); `dhan_clean` pre-filtered ≥50k |
 | Cost stack version | `research/backtest/costs.py` @ `__________` | Dhan rates 2025–26 |
 
 ### 1.3 Fidelity acknowledgments (operator must check each)
 
 These are the known biases from the fidelity audit. Confirm each is addressed or explicitly accepted before trusting results.
 
-- [ ] **Survivorship:** universe derives from current `instruments` scrip master → results are an **optimistic upper bound**. Either point-in-time instrument master reconstructed, OR ceiling explicitly accepted and reflected in expectations. State which: `__________`
-- [ ] **Slippage understatement:** flat-bps understates low-priced/thin names. Stress pass at ≥4 bps completed (Section 3.5): `yes / no`
-- [ ] **Volume floor:** backtest floor raised to match live (50k), OR mismatch explicitly accepted: `__________`
-- [ ] **Partial fills:** not modelled → size optimism accepted as a known ceiling: `yes`
+- [ ] **Survivorship:** universe derives from the current `clean_universe` table (dhan_clean replica) → delisted names absent → results are an **optimistic upper bound**. Ceiling accepted (point-in-time master not reconstructable from the feed). Confirm: `__________`
+- [ ] **Slippage understatement:** flat-bps understates low-priced/thin names; `_slip` floors at half-tick (₹0.05). Stress pass at ≥4 bps completed (Section 3.5): `yes / no`
+- [ ] **Volume floor:** CLI `--min-volume` default is **50,000** (matches live screener); `dhan_clean` is pre-filtered ≥50k. Confirm value used: `__________`
+- [ ] **Partial fills:** MODELLED — fill qty capped at `partial_fill_pct` (default 10%) of the fill-bar volume. Confirm pct used: `__________`
 - [ ] **No look-ahead:** confirmed by `test_gate_receives_only_past_bars` passing on this commit: `yes / no`
 
 ### 1.4 Commands run (paste exact invocations)
 
 ```
 # Run 1 — ORB standalone (does the rule-based edge exist at all?)
-python -m research.backtest --from <IS_start> --to <OOS_end> --gate none --json run1.json --slippage-bps <X> --equity <E>
+python -m research.backtest --from <IS_start> --to <OOS_end> --split-date <OOS_start> --gate none --json run1.json --slippage-bps <X> --equity <E>
 
 # Run 2 — ORB + Kronos zero-shot gate
-python -m research.backtest --from <IS_start> --to <OOS_end> --gate kronos --json run2.json --slippage-bps <X> --equity <E>
+python -m research.backtest --from <IS_start> --to <OOS_end> --split-date <OOS_start> --gate kronos --json run2.json --slippage-bps <X> --equity <E>
 
 # Run 3 — ORB + Kronos fine-tuned checkpoint (KRONOS_CHECKPOINT=s3://…)
-KRONOS_CHECKPOINT=<s3-uri> python -m research.backtest --from <IS_start> --to <OOS_end> --gate kronos --json run3.json --slippage-bps <X> --equity <E>
+KRONOS_CHECKPOINT=<s3-uri> python -m research.backtest --from <IS_start> --to <OOS_end> --split-date <OOS_start> --gate kronos --json run3.json --slippage-bps <X> --equity <E>
+
+# (--split-date produces IS/OOS panels in ONE run; no need to run each twice)
 ```
 
 > Each run must be executed twice (IS-only and OOS-only windows) OR with a split-aware report, so IS and OOS KPIs can be reported separately in Section 3.
