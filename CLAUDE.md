@@ -41,11 +41,21 @@ NEVER auto-destroy when state already has live resources. See memory `terraform-
 
 ---
 
-## 🤝 Two-Claude collaboration ("cowork") — lanes
+## 🤝 Multi-Claude collaboration — lanes
 
-This repo is **PUBLIC**, so a second Claude (e.g. Claude Code on the web via the Claude GitHub
-App on `armaanfarshori/dhan_algo`) can clone it and be fully productive on the **CODE lane**
-with NO secrets or AWS access:
+This repo is **PUBLIC**, so other Claude surfaces can read it and contribute, each in its lane,
+with NO secrets or AWS access. The repo (this `CLAUDE.md` included) is the shared, always-in-sync
+context — keep it current and they stay current.
+
+**ADVISORY lane — Claude Projects (claude.ai).** Connect the repo as a Project knowledge source
+(GitHub connector on `armaanfarshori/dhan_algo`); the Project reasons over the synced codebase —
+plans, reviews diffs, drafts code + tests, answers architecture questions. It does NOT execute
+code, run tests, or open PRs by itself. It hands off **PR-ready diffs on feature branches** for
+Claude Code or the trusted machine to test + deploy. Set the Project's custom instructions to
+point at this `CLAUDE.md` as source-of-truth + the rules below.
+
+**CODE lane — Claude Code (web/CLI via the Claude GitHub App).** Clones the repo and is fully
+productive without secrets:
 - Edit code, run `pytest -q` (235 tests) + `ruff`, build the dashboard, run **local** backtests,
   open **branches + PRs**. CI (Py3.11, x86+ARM, coverage, ruff) gates every PR.
 - It CANNOT (and should not) touch live infra: no SSH key, no AWS creds, no Tailscale.
@@ -53,9 +63,9 @@ with NO secrets or AWS access:
 The **LIVE / INFRA lane** stays on the trusted machine that holds `~/Desktop/dhan_aws_access/`
 (SSH key, AWS profile `dhan-terraform`, Tailscale) — deploys (`sudo git pull` + restart on the
 agent), terraform applies, DB work. Order placement is locked to the agent's whitelisted EIP, so
-live ops MUST run from there. A cowork Claude proposes via PR; the trusted machine reviews,
-merges, and deploys.
-- If a coworker genuinely needs AWS/DB (e.g. heavy backtests on `dhan_clean`), share the access
+live ops MUST run from there. The Project/Code Claude proposes via PR; the trusted machine
+reviews, merges, and deploys.
+- If a contributor genuinely needs AWS/DB (e.g. heavy backtests on `dhan_clean`), share the access
   package **out of band** (never in the repo) + Tailscale-join their box; pull TF secrets with
   `infra/secrets-sync.sh pull`. Default to NOT doing this — the PR lane covers most work.
 
