@@ -241,6 +241,66 @@ def test_evaluate_killswitch_file_triggers_halt(tmp_path, monkeypatch):
     assert len(halt_fired) >= 1, "on_halt callback must fire when kill switch trips"
 
 
+def test_evaluate_resume_file_clears_killswitch_halt(tmp_path, monkeypatch):
+    """Dropping the resume file clears a kill-switch halt and deletes both markers."""
+    ks = tmp_path / "killswitch"
+    rf = tmp_path / "resume"
+    rm = make_engine(killswitch_file=ks, resume_file=rf)
+    _stub_refresh(rm, monkeypatch)
+    rm._ltp = lambda sid: 0.0
+
+    # Trip the kill switch via the file-watch path.
+    ks.write_text("operator test")
+    asyncio.run(rm._evaluate())
+    assert rm.state.halted and rm.state.kill_switch
+
+    # Operator clears it from the dashboard: resume file appears (api also unlinks
+    # the killswitch file, mirror that here).
+    ks.unlink()
+    rf.write_text("dashboard")
+    resumed = []
+    rm.on_resume(lambda: resumed.append(True))
+    asyncio.run(rm._evaluate())
+
+    assert not rm.state.halted and not rm.state.kill_switch
+    assert not rf.exists(), "resume file must be consumed"
+    assert len(resumed) == 1, "on_resume callback must fire once"
+
+
+def test_evaluate_resume_does_not_clear_breached_loss(tmp_path, monkeypatch):
+    """Resume can't override a still-breached daily loss — it re-halts same tick."""
+    rf = tmp_path / "resume"
+    rm = make_engine(resume_file=rf)
+    _stub_refresh(rm, monkeypatch)
+    # day_total = -11k < -10k budget (same setup as the daily-loss halt test)
+    rm._realized_today = -8_000
+    rm._portfolio.positions["999"] = Position(security_id="999", qty=100, avg_price=100)
+    rm._ltp = lambda sid: 70.0
+    asyncio.run(rm._evaluate())
+    assert rm.state.halted
+
+    rf.write_text("dashboard")
+    asyncio.run(rm._evaluate())
+    # Resume cleared it, but the loss is still breached → re-halted on the same tick.
+    assert rm.state.halted is True
+    assert rm.state.halt_scope == "day"
+    assert not rf.exists()
+
+
+def test_evaluate_resume_noop_when_not_halted(tmp_path, monkeypatch):
+    """A stray resume file when healthy is consumed without firing on_resume."""
+    rf = tmp_path / "resume"
+    rm = make_engine(resume_file=rf)
+    _stub_refresh(rm, monkeypatch)
+    rm._ltp = lambda sid: 0.0
+    rf.write_text("dashboard")
+    resumed = []
+    rm.on_resume(lambda: resumed.append(True))
+    asyncio.run(rm._evaluate())
+    assert not rf.exists() and not rm.state.halted
+    assert resumed == [], "on_resume must not fire when nothing was halted"
+
+
 # ── FIX 1 (QR-C1): activate_kill_switch must fire on_halt callbacks ──────────
 
 def test_activate_kill_switch_fires_on_halt_sync_callback():

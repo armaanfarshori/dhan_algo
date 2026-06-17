@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Badge, Separator } from '@/components/ui'
 import { KillSwitch } from './KillSwitch'
+import { ResumeButton } from './ResumeButton'
 import { useTheme } from '@/hooks/useTheme'
 import { INR0, colorPnl, fmtUptime } from '@/tokens'
 
@@ -98,7 +99,7 @@ export function TopBar({ data }) {
           >
             {theme === 'dark' ? '☾' : '☀'}
           </button>
-          <KillSwitch />
+          {halted ? <ResumeButton /> : <KillSwitch />}
         </div>
       </div>
     </header>

@@ -52,6 +52,26 @@ def test_killswitch_writes_flag_file(tmp_path, monkeypatch):
     assert (tmp_path / "killswitch").exists()
 
 
+def test_resume_writes_flag_and_clears_killswitch(tmp_path, monkeypatch):
+    """POST /api/resume drops the resume flag and removes a stale killswitch flag."""
+    monkeypatch.setattr(api, "RUN_DIR", tmp_path)
+    monkeypatch.setattr(api, "KILLSWITCH_FILE", tmp_path / "killswitch")
+    monkeypatch.setattr(api, "RESUME_FILE", tmp_path / "resume")
+    (tmp_path / "killswitch").write_text("stale")
+    resp = asyncio.run(api.resume_handler(_FakeRequest(method="POST")))
+    assert resp.status == 200
+    assert (tmp_path / "resume").exists()
+    assert not (tmp_path / "killswitch").exists()
+
+
+def test_resume_token_set_no_header_rejected(monkeypatch):
+    """Resume is auth-gated like the kill switch: token set + no header → 401."""
+    monkeypatch.setattr(api, "cfg", _make_cfg(dashboard_token="secret123"))
+    monkeypatch.setattr(api, "_unprotected_warned", False)
+    resp = asyncio.run(api.resume_handler(_FakeRequest(method="POST", headers={})))
+    assert resp.status == 401
+
+
 def test_postback_acks(monkeypatch):
     """Characterization of M6: the postback endpoint returns an ack and does not
     raise — but note it performs NO fill persistence or reconciliation."""

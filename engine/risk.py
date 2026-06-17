@@ -48,6 +48,7 @@ class RiskParams:
     check_interval_seconds: int = 10
     killswitch_file: Optional[Path] = None  # api process trips this
     halt_file: Optional[Path] = None        # loss halts persist here across restarts
+    resume_file: Optional[Path] = None      # api process drops this to clear a halt
 
 
 @dataclass
@@ -69,6 +70,7 @@ class RiskEngine:
         self._ltp = ltp_lookup
         self._db = db_backend
         self._on_halt: List[Callable] = []
+        self._on_resume: List[Callable] = []
         # DB-derived P&L cache, refreshed each monitor cycle (and at boot).
         self._realized_total = 0.0
         self._realized_today = 0.0
@@ -79,6 +81,10 @@ class RiskEngine:
 
     def on_halt(self, cb: Callable):
         self._on_halt.append(cb)
+        return cb
+
+    def on_resume(self, cb: Callable):
+        self._on_resume.append(cb)
         return cb
 
     # ── Equity & budgets (all derived, all fractions of current equity) ──────
@@ -310,6 +316,26 @@ class RiskEngine:
             await asyncio.sleep(self.params.check_interval_seconds)
 
     async def _evaluate(self):
+        # Out-of-process resume (written by the api process). Clear the halt and
+        # delete the kill-switch / persisted-halt markers so we don't re-trip.
+        # We do NOT return early: the normal loss checks below run again this
+        # tick, so an operator can never click "resume" past a still-breached
+        # daily/weekly loss budget — only a kill-switch or a recovered P&L sticks.
+        rf = self.params.resume_file
+        if rf and rf.exists():
+            rf.unlink(missing_ok=True)
+            if self.state.halted or self.state.kill_switch:
+                logger.warning("▶ RESUME requested (dashboard) — clearing halt")
+                self.resume()
+                for cb in self._on_resume:
+                    try:
+                        if asyncio.iscoroutinefunction(cb):
+                            await cb()
+                        else:
+                            cb()
+                    except Exception as exc:
+                        logger.error("Resume callback error: %s", exc)
+
         # Out-of-process kill switch (written by the api process). Goes
         # through _halt() so on_halt callbacks (flatten + alert) fire.
         ks_file = self.params.killswitch_file
@@ -438,6 +464,7 @@ class RiskEngine:
             "halted": self.state.halted,
             "halt_reason": self.state.halt_reason,
             "halt_scope": self.state.halt_scope,
+            "kill_switch": self.state.kill_switch,
             "violations": self.state.violations,
             "last_checked": (self.state.last_checked.isoformat()
                              if self.state.last_checked else None),

@@ -1,11 +1,15 @@
 import { useState } from 'react'
 import { Button, Dialog, DialogContent, DialogTitle, DialogBody, DialogFooter } from '@/components/ui'
 
-/** Top-bar kill switch — opens a confirm dialog, then POSTs /api/killswitch. */
-export function KillSwitch() {
+/**
+ * Resume control — shown only while the engine is halted. Opens a confirm
+ * dialog, then POSTs /api/resume (auth-gated like the kill switch). The trader
+ * re-arms the risk loop within ~10s; the heartbeat then clears `risk.halted`
+ * and this button unmounts. A still-breached loss budget re-halts immediately.
+ */
+export function ResumeButton() {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [fired, setFired] = useState(false)
   const [err, setErr]   = useState(null)
 
   async function confirm() {
@@ -15,17 +19,14 @@ export function KillSwitch() {
       const headers = { 'Content-Type': 'application/json' }
       const tok = localStorage.getItem('dashboard_token')
       if (tok) headers['X-Dashboard-Token'] = tok
-      const r = await fetch('/api/killswitch', { method: 'POST', headers, body: '{}' })
+      const r = await fetch('/api/resume', { method: 'POST', headers, body: '{}' })
       const d = await r.json().catch(() => ({}))
       if (r.ok && d.ok) {
-        setFired(true)
-        setOpen(false)
+        setOpen(false)   // heartbeat will clear `halted` and unmount this button
       } else if (r.status === 401 || r.status === 403) {
         setErr('Unauthorised — a dashboard token is required for this control.')
       } else {
-        // NEVER close silently on failure: the operator must know the kill
-        // did not take effect (positions may still be open).
-        setErr(d?.error?.message || `Kill switch failed (HTTP ${r.status}). Positions may NOT be halted.`)
+        setErr(d?.error?.message || `Resume failed (HTTP ${r.status}). Engine is still halted.`)
       }
     } catch (e) {
       setErr(`Network error: ${e.message}. Could not reach the engine.`)
@@ -38,21 +39,18 @@ export function KillSwitch() {
 
   return (
     <>
-      <Button variant="destructive" onClick={openDialog} disabled={fired} className="shrink-0 whitespace-nowrap">
-        <span className={`mr-1.5 inline-block h-2 w-2 rounded-full bg-loss ${fired ? '' : 'animate-pulse-soft'}`} />
-        {fired ? 'HALTED' : (
-          <>
-            <span className="sm:hidden">KILL</span>
-            <span className="hidden sm:inline">KILL SWITCH</span>
-          </>
-        )}
+      <Button variant="profit" onClick={openDialog} className="shrink-0 whitespace-nowrap">
+        <span className="mr-1.5 inline-block h-2 w-2 rounded-full bg-profit animate-pulse-soft" />
+        <span className="sm:hidden">RESUME</span>
+        <span className="hidden sm:inline">RESUME TRADING</span>
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent>
-          <DialogTitle>Confirm kill switch</DialogTitle>
+          <DialogTitle>Resume trading</DialogTitle>
           <DialogBody>
-            This halts the risk loop and flattens all open positions within ~10s.
-            You can re-arm afterwards with the Resume control.
+            This clears the halt and re-arms the risk loop within ~10s. New entries
+            become allowed again. If a daily or weekly loss budget is still breached,
+            the engine re-halts immediately — by design.
           </DialogBody>
           {err && (
             <div className="mt-3 rounded-[var(--radius-md)] border border-loss/40 bg-loss/[.10] px-3 py-2 text-[11.5px] text-loss" role="alert">
@@ -61,8 +59,8 @@ export function KillSwitch() {
           )}
           <DialogFooter>
             <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button variant="destructive" onClick={confirm} disabled={busy}>
-              {busy ? 'Halting…' : 'Halt & flatten'}
+            <Button variant="profit" onClick={confirm} disabled={busy}>
+              {busy ? 'Resuming…' : 'Resume trading'}
             </Button>
           </DialogFooter>
         </DialogContent>
