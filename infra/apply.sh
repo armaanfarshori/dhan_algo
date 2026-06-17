@@ -55,6 +55,10 @@ OUTPUT
     echo ""
     echo "  Outputs saved to: infra/aws_outputs.local"
 
+    # Always back up the gitignored secrets (tfvars/backend.hcl/aws_outputs.local)
+    # to the private tfstate S3 bucket so the single local copy is never a loss risk.
+    ./secrets-sync.sh push || echo -e "${YELLOW}WARN: secrets-sync push failed${NC}"
+
 else
     echo ""
     echo -e "${RED}Apply FAILED. Running teardown to avoid idle charges...${NC}"
