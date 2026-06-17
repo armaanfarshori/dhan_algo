@@ -1,7 +1,7 @@
 # DhanAIBot — Trading Platform (agent instructions)
 **Repo:** `github.com/armaanfarshori/dhan_algo` (PUBLIC — never commit IPs, account IDs, tokens, chat IDs)
-**Last updated:** 2026-06-16
-**Current phase:** ENGINE LIVE (paper) · SDLC-HARDENED · BACKFILL ~67% · GATE IN SHADOW
+**Last updated:** 2026-06-17
+**Current phase:** ENGINE LIVE (paper) · BACKFILL DONE · M2.5 CLEAN-DB BUILD RUNNING · S3 PIPELINE WIRED · GATE IN SHADOW
 
 ---
 
@@ -26,26 +26,75 @@ bucket name), and `secrets.md`. **All real infrastructure values live there, not
 
 AWS CLI on the Mac: profile `dhan-terraform` (set via AWS_PROFILE in ~/.zshrc).
 
-**⚠️ Terraform state** lives in a SEPARATE clone at `~/Documents/codecode/DhanAIBot/infra`
-(holds `terraform.tfvars` + gitignored `backend.hcl`), NOT this repo. Since 2026-06-16 the
-state is in S3 (`s3://dhan-trading-tfstate-<acct>/dhan-trading/terraform.tfstate`, versioned)
-+ DynamoDB lock `dhan-trading-tflock`; partial backend (bucket name in `backend.hcl`, see
-`infra/backend.hcl.example`). Run terraform from that clone: `terraform init -backend-config=backend.hcl`.
+**Terraform — SINGLE working folder = `infra/` in THIS repo** (consolidated 2026-06-17; the
+old `~/Documents/codecode/DhanAIBot/infra` clone is RETIRED). State is in S3
+(`s3://dhan-trading-tfstate-<acct>/dhan-trading/terraform.tfstate`, versioned) + DynamoDB lock
+`dhan-trading-tflock`; partial backend (bucket name in gitignored `backend.hcl`, see
+`infra/backend.hcl.example`). The gitignored secrets (`terraform.tfvars`, `backend.hcl`,
+`aws_outputs.local`) are backed up to `s3://<tfstate-bucket>/secrets/` (AES256, versioned) —
+sync with `infra/secrets-sync.sh push|pull` (on a fresh clone, `pull` to restore). Run from
+`infra/`: `terraform init -backend-config=backend.hcl`.
 ALWAYS `terraform plan` and verify NO `aws_instance`/`aws_eip` replace/destroy before `apply`
 (an `associate_public_ip_address` drift once tried to destroy the live agent — now in
-`ignore_changes`). See memory `terraform-state-and-apply`.
+`ignore_changes`; the agent EIP also has `prevent_destroy`). `infra/apply.sh` is guarded to
+NEVER auto-destroy when state already has live resources. See memory `terraform-state-and-apply`.
 
 ---
 
-## ⚡ TL;DR — Current state (2026-06-16 EOD)
+## 🤝 Two-Claude collaboration ("cowork") — lanes
+
+This repo is **PUBLIC**, so a second Claude (e.g. Claude Code on the web via the Claude GitHub
+App on `armaanfarshori/dhan_algo`) can clone it and be fully productive on the **CODE lane**
+with NO secrets or AWS access:
+- Edit code, run `pytest -q` (235 tests) + `ruff`, build the dashboard, run **local** backtests,
+  open **branches + PRs**. CI (Py3.11, x86+ARM, coverage, ruff) gates every PR.
+- It CANNOT (and should not) touch live infra: no SSH key, no AWS creds, no Tailscale.
+
+The **LIVE / INFRA lane** stays on the trusted machine that holds `~/Desktop/dhan_aws_access/`
+(SSH key, AWS profile `dhan-terraform`, Tailscale) — deploys (`sudo git pull` + restart on the
+agent), terraform applies, DB work. Order placement is locked to the agent's whitelisted EIP, so
+live ops MUST run from there. A cowork Claude proposes via PR; the trusted machine reviews,
+merges, and deploys.
+- If a coworker genuinely needs AWS/DB (e.g. heavy backtests on `dhan_clean`), share the access
+  package **out of band** (never in the repo) + Tailscale-join their box; pull TF secrets with
+  `infra/secrets-sync.sh pull`. Default to NOT doing this — the PR lane covers most work.
+
+Rules for any Claude here: PAPER_TRADING stays `true`; never commit IPs/IDs/tokens (public repo);
+no merges to `main` or deploys during market hours (09:15–15:30 IST); branch + PR for every change.
+
+---
+
+## ⚡ 2026-06-17 SESSION STATE (read this first)
+
+```
+BACKFILL COMPLETE (NSE_EQ 9470/9470). The */15 backfill watchdog cron is RETIRED;
+  a single post-close run (12:00 UTC / 17:30 IST weekdays) remains as a safety net.
+DB MIGRATED off Docker → bare-metal PostgreSQL 16 + TimescaleDB 2.27.2 (systemd), data
+  dir /data/timescaledb/pgdata. DB box was temporarily r7g.2xlarge (64GB) for M2.5; to be
+  downgraded → t4g.medium + gp3 IOPS 16000/1000 → 3000/125 (via `terraform apply`, AFTER M2.5).
+AGENT t4g.small (2GB) → to be upgraded to t4g.large (8GB) permanently (Kronos-base headroom),
+  same `terraform apply`. NOTE: apply STOPS the agent (kills the M2.5 build) — so apply only
+  after M2.5 finishes. EIP survives stop/start; Dhan whitelist unaffected.
+M2.5 CLEAN-DB BUILD RUNNING on the agent: scripts/build_clean_db.py --transform --export
+  (6 parallel workers) → dhan_clean.bars (1,707 liquid NSE_EQ names) → exports per-security
+  Parquet to s3://<bucket>/kronos/training-data/. Log: /tmp/m25_build.log.
+S3 PIPELINE WIRED end-to-end (branch feat/s3-pipeline-wiring): clean→S3→prepare_kronos_dataset
+  (--timeframe 1min|5min A/B)→finetune.py (--upload-s3)→KRONOS_CHECKPOINT s3:// loads in the
+  live gate (KronosSignalEngine syncs s3→local, fail-open). kronos_model standardized → base.
+  M3 backtester now reads dhan_clean (config.backtest_db_url). tests 235 + new s3-wiring tests.
+OPEN BRANCHES pending merge after M2.5 verifies: feat/m25-transform-streaming,
+  feat/s3-pipeline-wiring, chore/infra-single-source, docs/status-refresh-2026-06-17.
+TRADING WAS HALTED for the day by the user (safe to do infra resizes). PAPER mode unchanged.
+```
+
+## ⚡ TL;DR — platform shape
 
 ```
 TWO PROCESSES on the agent (systemd):
   dhan-trader  (apps/trader.py) — order flow only; heartbeat → run/trader_heartbeat.json
   dhan-api     (apps/api.py)    — dashboard :8765; reads DB + heartbeat only
        (handlers decomposed into apps/routes/{heartbeat,db,market,system}.py + _db_query helper)
-PAPER mode · Kronos gate SHADOW (logs verdicts, never blocks) · 192 tests, CI green.
-Backfill RUNNING in screen `backfill` (~67%, ckpt backfill_ckpt_NSE_EQ.json).
+PAPER mode · Kronos gate SHADOW (logs verdicts, never blocks) · 235 tests, CI green.
 main.py is GONE (Phase 1). Hermes LLM gateway RETIRED (plain Telegram via core/notify.py).
 
 2026-06-16 — FULL SDLC REMEDIATION shipped (64/65 checklist items, 11 PRs, backfill never
