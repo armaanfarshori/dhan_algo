@@ -1,7 +1,18 @@
 #!/bin/bash
-# DB server bootstrap — injected as user_data.
-# Minimal Terraform template substitution; all bash vars use plain $ syntax
-# because this script has NO heredocs and no complex expansions.
+# DB server bootstrap — injected as Terraform user_data.
+#
+# BARE-METAL PostgreSQL 16 + TimescaleDB (NO Docker). The platform migrated off a
+# Docker TimescaleDB container to a native systemd Postgres in 2026-06; this script
+# is the from-scratch provisioner for that bare-metal setup. It ADOPTS an existing
+# cluster on the EBS data volume if one is present (the migration path), and only
+# runs initdb on a truly empty volume.
+#
+# ⚠️ This provisioner is NOT exercised on every deploy (the live DB box is long-lived
+# and snapshot-protected). Validate it on a throwaway instance before relying on it
+# for disaster recovery — package/repo names and TimescaleDB tuning may drift.
+#
+# Terraform templatefile substitutes ${...}; literal bash ${...} is escaped as $${...};
+# a plain $VAR is left untouched.
 set -euxo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
@@ -11,14 +22,8 @@ AWS_REGION="${aws_region}"
 S3_BUCKET="${s3_bucket}"
 SSM_PREFIX="${ssm_prefix}"
 
-# ── Packages ──────────────────────────────────────────────────────────────────
-apt-get update -y
-apt-get install -y docker.io awscli jq postgresql-client
-systemctl enable docker
-systemctl start docker
-
-# ── Mount EBS data volume ─────────────────────────────────────────────────────
-# Wait for the volume to appear (attachment takes a few seconds)
+# ── Mount EBS data volume FIRST (PGDATA lives on it) ──────────────────────────
+# Attachment takes a few seconds.
 sleep 10
 DATA_DEV=""
 for candidate in /dev/nvme1n1 /dev/xvdf /dev/sdf; do
@@ -33,10 +38,55 @@ if ! blkid "$DATA_DEV" &>/dev/null; then
   mkfs.ext4 -L timescaledb-data "$DATA_DEV"
 fi
 mkdir -p /data/timescaledb/pgdata
-echo "LABEL=timescaledb-data /data/timescaledb ext4 defaults,nofail 0 2" >> /etc/fstab
+grep -q timescaledb-data /etc/fstab || \
+  echo "LABEL=timescaledb-data /data/timescaledb ext4 defaults,nofail 0 2" >> /etc/fstab
 mount -a
 
-# ── Pull DB password from SSM ─────────────────────────────────────────────────
+# ── Packages: PostgreSQL 16 + TimescaleDB from their official apt repos ───────
+apt-get update -y
+apt-get install -y awscli jq curl gnupg ca-certificates lsb-release postgresql-common
+
+# PGDG (PostgreSQL 16)
+install -d /usr/share/postgresql-common/pgdg
+curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+  -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+  > /etc/apt/sources.list.d/pgdg.list
+
+# TimescaleDB
+curl -fsSL https://packagecloud.io/timescale/timescaledb/gpgkey \
+  | gpg --dearmor -o /usr/share/keyrings/timescaledb.gpg
+echo "deb [signed-by=/usr/share/keyrings/timescaledb.gpg] https://packagecloud.io/timescale/timescaledb/ubuntu/ $(lsb_release -cs) main" \
+  > /etc/apt/sources.list.d/timescaledb.list
+
+apt-get update -y
+apt-get install -y postgresql-16 postgresql-client-16 timescaledb-2-postgresql-16
+
+# ── Point PG16 at the EBS data dir; adopt an existing cluster or initdb ───────
+systemctl stop postgresql || true
+PG_CONF=/etc/postgresql/16/main/postgresql.conf
+PG_HBA=/etc/postgresql/16/main/pg_hba.conf
+
+chown -R postgres:postgres /data/timescaledb/pgdata
+chmod 700 /data/timescaledb/pgdata
+if [ ! -s /data/timescaledb/pgdata/PG_VERSION ]; then
+  # Truly empty volume — fresh cluster. (Migrated volumes already have PG_VERSION
+  # and are adopted as-is, never re-initialised.)
+  sudo -u postgres /usr/lib/postgresql/16/bin/initdb -D /data/timescaledb/pgdata
+fi
+
+sed -i "s|^#\?data_directory.*|data_directory = '/data/timescaledb/pgdata'|" "$PG_CONF"
+# TimescaleDB must be preloaded; tune for the ~800M-row bars hypertable.
+timescaledb-tune --quiet --yes --conf-path="$PG_CONF" \
+  || echo "shared_preload_libraries = 'timescaledb'" >> "$PG_CONF"
+echo "listen_addresses = '*'" >> "$PG_CONF"
+grep -q "10.0.0.0/16" "$PG_HBA" \
+  || echo "host all all 10.0.0.0/16 scram-sha-256" >> "$PG_HBA"
+
+systemctl enable postgresql
+systemctl start postgresql
+
+# ── Role + DB + extension from SSM password (idempotent; no DO/$$ blocks) ─────
 DB_PASSWORD=$(aws ssm get-parameter \
   --region "$AWS_REGION" \
   --name "$SSM_PREFIX/db_password" \
@@ -44,22 +94,17 @@ DB_PASSWORD=$(aws ssm get-parameter \
   --query Parameter.Value \
   --output text)
 
-# ── Start TimescaleDB ─────────────────────────────────────────────────────────
-docker run -d \
-  --name timescaledb \
-  --restart always \
-  -e POSTGRES_DB=dhan_trading \
-  -e POSTGRES_USER=trader \
-  -e "POSTGRES_PASSWORD=$DB_PASSWORD" \
-  -v /data/timescaledb/pgdata:/var/lib/postgresql/data \
-  -p 5432:5432 \
-  timescale/timescaledb:2.17.2-pg16
-
 for i in $(seq 1 30); do
-  docker exec timescaledb pg_isready -U trader -d dhan_trading && break || sleep 5
+  sudo -u postgres pg_isready && break || sleep 2
 done
 
-# ── Write backup script (no heredoc — plain file write) ───────────────────────
+sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='trader'" | grep -q 1 \
+  || sudo -u postgres psql -c "CREATE ROLE trader LOGIN PASSWORD '$DB_PASSWORD'"
+sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='dhan_trading'" | grep -q 1 \
+  || sudo -u postgres createdb -O trader dhan_trading
+sudo -u postgres psql -d dhan_trading -c "CREATE EXTENSION IF NOT EXISTS timescaledb"
+
+# ── Backup script (bare-metal pg_dump → S3; no Docker) ────────────────────────
 cat > /usr/local/bin/db_backup.sh << 'BACKUP_EOF'
 #!/bin/bash
 set -e
@@ -83,8 +128,7 @@ _backup_notify_fail() {
   fi
 }
 
-if ! PGPASSWORD=$DB_PASS docker exec timescaledb \
-    pg_dump -U trader -d dhan_trading -Fc | \
+if ! PGPASSWORD=$DB_PASS pg_dump -U trader -h localhost -d dhan_trading -Fc | \
     aws s3 cp - "s3://$S3_BUCKET/db-backups/dhan_trading_$DATE.dump"; then
   echo "ERROR: backup failed at $DATE" >&2
   _backup_notify_fail

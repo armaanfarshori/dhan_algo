@@ -174,11 +174,12 @@ Market open → ATR% screener picks top-N volatile NSE equities
 
 ```bash
 git clone https://github.com/armaanfarshori/dhan_algo && cd dhan_algo
-python3.11 -m venv .venv && source .venv/bin/activate
+python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 cp .env.example .env            # set DHAN_CLIENT_ID + DHAN_ACCESS_TOKEN
-docker compose up -d            # throwaway local TimescaleDB
+# Local DB: install PostgreSQL 16 + TimescaleDB natively (brew/apt), create a
+# `dhan_trading` database, and point DB_* at it — or use any existing dev DB.
 alembic upgrade head
 
 python backfill.py --instruments        # scrip master (~224K instruments)

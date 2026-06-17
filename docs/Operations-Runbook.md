@@ -250,7 +250,8 @@ aws dlm get-lifecycle-policies --profile dhan-terraform
 aws s3 ls s3://<bucket>/db-backups/ | sort | tail -5
 # Download and restore
 aws s3 cp s3://<bucket>/db-backups/<dump>.dump /tmp/
-docker exec timescaledb pg_restore -U trader -d dhan_trading \
+# Bare-metal restore (no Docker):
+sudo -u postgres pg_restore -d dhan_trading \
   --clean --if-exists /tmp/<dump>.dump
 ```
 
@@ -344,7 +345,7 @@ Rules:
 | `DH-904` rate-limit errors | Which endpoint? | `charts/intraday` tolerates ~1 req/s — space calls, retry with backoff |
 | `DH-901` token errors in backfill | Backfill runtime? | In-memory token stale on multi-day run — restart the backfill process |
 | Trader restart leaves positions unmanaged | Heartbeat strategies: `or_locked` | Should self-heal via OR seeding; EOD square-off is the unconditional backstop |
-| Postgres down / OOM | `docker ps` on DB box; `dmesg` | Restart container; check swap + `maintenance_work_mem`; never reintroduce uncompressed duplicate tables |
+| Postgres down / OOM | `systemctl status postgresql` on DB box; `dmesg` | `sudo systemctl restart postgresql`; check swap + `maintenance_work_mem`; never reintroduce uncompressed duplicate tables |
 | Backup failure Telegram alert | `/var/log/db_backup.log` on DB box | Check S3 permissions, IAM role, disk space; re-run manually |
 
 ---

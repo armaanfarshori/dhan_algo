@@ -182,7 +182,7 @@ Every abbreviation, acronym, and domain term used across the codebase and docume
 | **cron** | The Unix time-based job scheduler. Agent crontab (weekdays): backfill watchdog every 15 min, calibration `fill` + `report` at 16:45 IST, EOD summary at 17:00 IST, `scripts/health_alert.py` every 5 min. |
 | **Dependabot** | GitHub's automated dependency-update tool. Active and currently clean on this repo. |
 | **DLM** | AWS Data Lifecycle Manager. Creates daily EBS snapshots of the TimescaleDB data volume with 7-day retention. Configured in `infra/storage.tf`. |
-| **Docker** | Container runtime. Used locally for the development TimescaleDB instance (`docker compose up -d`). The production TimescaleDB is pinned to `timescale/timescaledb:2.17.2-pg16`. |
+| **Docker** | **Retired (2026-06).** The platform DB once ran in a Docker TimescaleDB container; it was migrated to bare-metal PostgreSQL 16 + TimescaleDB (systemd). No Docker remains in the stack. |
 | **EBS** | Elastic Block Store. AWS persistent block storage. The TimescaleDB data volume is a separate 30 GB `gp3` EBS volume that survives instance replacement. |
 | **EC2** | Elastic Compute Cloud. AWS virtual machine service. The platform uses two EC2 instances: the agent (`t4g.small`, public subnet, Elastic IP) and the DB (`t4g.small`, private subnet). |
 | **EIP** | Elastic IP Address. A static public IP attached to the agent EC2. Whitelisted at Dhan's DevPortal for order placement. (Dhan's IP whitelist applies to orders only; data and WebSocket work from any IP.) |

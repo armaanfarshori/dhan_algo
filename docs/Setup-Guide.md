@@ -1,6 +1,6 @@
 # Setup Guide
 
-Two paths: **local development** (Mac/Linux, docker-compose, paper only) and
+Two paths: **local development** (Mac/Linux, native Postgres, paper only) and
 the **production AWS deploy**. All live execution belongs on AWS — Dhan locks
 order placement to one whitelisted IP, and there is no sandbox.
 
@@ -8,18 +8,20 @@ order placement to one whitelisted IP, and there is no sandbox.
 
 ## Local development
 
-**Prerequisites:** Python 3.12+, Docker, Node 18+ (for the dashboard).
+**Prerequisites:** Python 3.12+, PostgreSQL 16 + TimescaleDB, Node 18+ (for the dashboard).
 
 ```bash
 git clone https://github.com/armaanfarshori/dhan_algo && cd dhan_algo
-python3.11 -m venv .venv && source .venv/bin/activate
+python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 cp .env.example .env
 # Minimum: DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN (from web.dhan.co → DhanHQ APIs)
 # For token auto-refresh: DHAN_PIN + DHAN_TOTP_SECRET
 
-docker compose up -d          # throwaway local TimescaleDB on :5432
+# Local DB: install PostgreSQL 16 + TimescaleDB natively (brew install postgresql@16
+# + the timescaledb tap, or apt), create role `trader` + db `dhan_trading`, then set
+# DB_* in .env. (No Docker — the platform runs bare-metal Postgres.)
 ```
 
 Run Alembic migrations (schema head is **007**). `alembic/env.py` reads `DB_*`
