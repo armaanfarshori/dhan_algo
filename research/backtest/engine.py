@@ -81,8 +81,11 @@ def load_day_bars(security_id: str, day: date) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-def _slip(price: float, side: str, bps: float) -> float:
-    s = price * bps / 10_000
+def _slip(price: float, side: str, bps: float, tick: float = 0.0) -> float:
+    """Adverse slippage. Flat-bps by default; with a `tick` (e.g. NSE ₹0.05) the
+    slippage is floored at half a tick, so cheap/thin names — where bps under-
+    states real cost — pay at least the tick-driven minimum. tick=0 ⇒ pure bps."""
+    s = max(price * bps / 10_000, tick / 2)
     return round(price + s if side == "BUY" else price - s, 2)
 
 

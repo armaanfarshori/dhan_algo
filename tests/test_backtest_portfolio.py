@@ -51,11 +51,30 @@ def test_long_breakout_produces_trade_net_below_gross(monkeypatch):
 
 
 def test_no_lookahead_fill_at_next_bar_open(monkeypatch):
-    # With 0 slippage, entry must fill at the NEXT bar's open (== after_close here),
-    # never at the signal bar's price.
+    # With 0 slippage + 0 tick, entry must fill at the NEXT bar's open
+    # (== after_close here), never at the signal bar's price.
     _patch_bars(monkeypatch, {"1": _session(after_close=103.0)})
-    trades, _ = _run({DAY: ["1"]}, PortfolioParams(slippage_bps=0.0))
+    trades, _ = _run({DAY: ["1"]}, PortfolioParams(slippage_bps=0.0, tick_size=0.0))
     assert trades[0].entry_price == pytest.approx(103.0)
+
+
+def test_tick_floor_slippage(monkeypatch):
+    # bps=0 but tick=0.05 → BUY entry pays at least a half-tick (0.025) adverse.
+    _patch_bars(monkeypatch, {"1": _session(after_close=103.0)})
+    trades, _ = _run({DAY: ["1"]},
+                     PortfolioParams(slippage_bps=0.0, tick_size=0.05, partial_fill_pct=0.0))
+    # half-tick 0.025 added then rounded to paise ⇒ ~103.02–103.03
+    assert trades[0].entry_price == pytest.approx(103.025, abs=0.01)
+    assert trades[0].entry_price > 103.0
+
+
+def test_partial_fill_caps_qty(monkeypatch):
+    # Thin fill bar (vol=5,000); 10% cap ⇒ fill qty capped at 500 even though the
+    # risk/notional-sized qty is larger.
+    _patch_bars(monkeypatch, {"1": _session(after_close=103.0, vol=5_000)})
+    trades, _ = _run({DAY: ["1"]},
+                     PortfolioParams(slippage_bps=0.0, tick_size=0.0, partial_fill_pct=0.10))
+    assert trades[0].qty == 500
 
 
 def test_concurrent_position_cap(monkeypatch):

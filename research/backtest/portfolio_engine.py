@@ -48,6 +48,8 @@ class PortfolioParams:
     max_daily_loss_pct: float = 0.02       # portfolio daily-loss kill-switch
     min_stop_distance_pct: float = 0.0035
     adv_participation_pct: float = 0.01
+    tick_size: float = 0.05                # NSE tick; slippage floored at half-tick
+    partial_fill_pct: float = 0.10         # fill qty capped at this % of the fill-bar volume
     orb: ORBParams = field(default_factory=ORBParams)
 
 
@@ -79,12 +81,13 @@ class _Book:
 
 
 def _close(book: _Book, trades: list, sid: str, day: date, raw_px: float,
-           exit_ts: datetime, reason: str, slippage_bps: float, orb: ORB):
+           exit_ts: datetime, reason: str, slippage_bps: float, orb: ORB,
+           tick: float = 0.0):
     """Close sid's position at raw_px (a bar open or close) + adverse slippage,
     book the full-cost round trip, and release its risk budget."""
     pos = book.positions.pop(sid)
     exit_side = "SELL" if pos["side"] == "LONG" else "BUY"
-    fill_px = _slip(raw_px, exit_side, slippage_bps)
+    fill_px = _slip(raw_px, exit_side, slippage_bps, tick)
     direction = 1 if pos["side"] == "LONG" else -1
     gross = (fill_px - pos["entry_px"]) * pos["qty"] * direction
     buy_px, sell_px = ((pos["entry_px"], fill_px) if direction == 1
@@ -154,15 +157,22 @@ async def replay_portfolio(universe_by_day: dict[date, list[str]],
             if sid in pending:
                 kind, d, qty = pending.pop(sid)
                 if kind == "ENTER" and not book.halted_today and book.open_count < params.max_open_positions:
-                    fill_px = _slip(float(bar["open"]), d.side, params.slippage_bps)
-                    book.positions[sid] = {
-                        "side": "LONG" if d.side == "BUY" else "SHORT",
-                        "qty": qty, "entry_px": fill_px, "entry_ts": ts, "stop": d.stop}
-                    risk.register_risk(sid, risk.position_risk(fill_px, d.stop, qty))
-                    orb.notify_fill(d.side, qty, fill_px)
+                    # Partial fill: you can't take unlimited size out of one bar of
+                    # a thin name — cap qty at a % of the fill bar's volume.
+                    if params.partial_fill_pct > 0:
+                        cap = int(params.partial_fill_pct * float(bar["volume"]))
+                        qty = min(qty, cap)
+                    if qty > 0:
+                        fill_px = _slip(float(bar["open"]), d.side,
+                                        params.slippage_bps, params.tick_size)
+                        book.positions[sid] = {
+                            "side": "LONG" if d.side == "BUY" else "SHORT",
+                            "qty": qty, "entry_px": fill_px, "entry_ts": ts, "stop": d.stop}
+                        risk.register_risk(sid, risk.position_risk(fill_px, d.stop, qty))
+                        orb.notify_fill(d.side, qty, fill_px)
                 elif kind == "EXIT" and sid in book.positions:
                     _close(book, trades, sid, day, float(bar["open"]), ts, d.reason,
-                           params.slippage_bps, orb)
+                           params.slippage_bps, orb, params.tick_size)
 
             # 2. Portfolio daily-loss kill-switch: queue exits for all open names,
             #    block new entries for the rest of the day.
@@ -204,7 +214,7 @@ async def replay_portfolio(universe_by_day: dict[date, list[str]],
             elif decision.action == "EXIT" and sid in book.positions:
                 if idx == last_idx[sid]:
                     _close(book, trades, sid, day, float(bar["close"]), ts,
-                           decision.reason, params.slippage_bps, orb)
+                           decision.reason, params.slippage_bps, orb, params.tick_size)
                 else:
                     pending[sid] = ("EXIT", decision, 0)
 
@@ -214,7 +224,7 @@ async def replay_portfolio(universe_by_day: dict[date, list[str]],
             last = df.iloc[-1]
             _close(book, trades, sid, day, float(last["close"]),
                    last["time"].to_pydatetime(), "forced EOD close",
-                   params.slippage_bps, orbs[sid])
+                   params.slippage_bps, orbs[sid], params.tick_size)
 
         daily.append({"day": str(day), "net_pnl": round(book.realized_today, 2),
                       "equity_end": round(book.equity, 2),
