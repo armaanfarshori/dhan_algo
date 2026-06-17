@@ -27,10 +27,10 @@ Definition of done: tests exist for the happy path and every spec edge case, the
 been run, and `.pipeline/tests.md` records the results. Then return a 3-line summary.
 
 ## Notes for this repo
-- CI runs **Python 3.11** (x86 + ARM) + coverage + ruff. The local default `python3` may
-  be 3.9 — some modules use 3.10+ syntax (`X | None`) and won't import on 3.9; if a test
-  fails to *import* locally on 3.9, run it on a 3.11 interpreter and note that in tests.md
-  (it's not a real failure).
+- CI runs **Python 3.12** (x86 + ARM) + coverage + ruff. The project standardizes on 3.12
+  (see `.python-version`); run tests with a 3.12 interpreter so local matches CI. If the
+  system `python3` is older, create/activate a 3.12 venv first — don't treat a stale-Python
+  import error as a real failure, fix the environment.
 - PUBLIC repo: no real IPs/IDs/tokens in test fixtures. Tests must not hit live AWS/Dhan or
   the live DB — use synthetic data / monkeypatch DB loaders (see `tests/test_backtest_*`).
 - Don't flip `PAPER_TRADING`, deploy, or restart services. Tests only.

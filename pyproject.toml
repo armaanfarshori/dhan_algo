@@ -1,5 +1,5 @@
 [tool.ruff]
-target-version = "py311"
+target-version = "py312"
 # Exclude vendored, generated, and build artefacts
 exclude = [
     ".venv",

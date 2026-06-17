@@ -8,7 +8,7 @@ order placement to one whitelisted IP, and there is no sandbox.
 
 ## Local development
 
-**Prerequisites:** Python 3.11+, Docker, Node 18+ (for the dashboard).
+**Prerequisites:** Python 3.12+, Docker, Node 18+ (for the dashboard).
 
 ```bash
 git clone https://github.com/armaanfarshori/dhan_algo && cd dhan_algo

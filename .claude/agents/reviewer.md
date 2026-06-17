@@ -15,8 +15,9 @@ Steps:
 2. Read the real diff with `git diff` (and `git status` / `git log` as needed).
 3. INDEPENDENTLY confirm the gates (don't trust tests.md): run `python3 -m pytest -q`
    (or the new test file) and `python3 -m ruff check .`. A red suite or ruff finding is a
-   blocking issue. (If a test only fails to *import* on local 3.9 due to 3.10+ syntax,
-   that's not a real failure — CI is 3.11.)
+   blocking issue. (Run on Python 3.12 — the project standard, matching CI. If the system
+   `python3` is older, use a 3.12 venv; a stale-Python import error is an env problem to fix,
+   not a pass.)
 4. Judge the change against the spec, not your own preferences:
    - Does the diff satisfy every Acceptance criterion?
    - Is every spec edge case actually handled in code AND covered by a test?

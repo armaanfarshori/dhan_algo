@@ -36,9 +36,9 @@ The gatekeeper can't be the thing that edits the code it's judging.
 - **Public repo:** no real IPs/IDs/tokens in code OR `.pipeline/*.md` (placeholders only).
 - **Safety invariants:** agents never flip `PAPER_TRADING`, edit `.env`, touch AWS/secrets,
   or restart `dhan-trader`/`dhan-api`.
-- **Real gates:** tester + reviewer run `pytest -q` + `ruff check .` (CI is Py3.11 x86+ARM +
-  coverage + ruff). Note: local default `python3` may be 3.9 — an *import* failure from
-  3.10+ syntax isn't a real failure (CI is 3.11).
+- **Real gates:** tester + reviewer run `pytest -q` + `ruff check .` (CI is Py3.12 x86+ARM +
+  coverage + ruff). The project standardizes on **Python 3.12** (`.python-version`); run on a
+  3.12 interpreter so local matches CI — fix a stale-Python env rather than excusing it.
 - **Not a replacement for deep QA:** for substantial changes the **≥15-agent QA stack** and/or
   `/code-review ultra` still run before merge. `/ship`'s reviewer is the first gate, not the only one.
 

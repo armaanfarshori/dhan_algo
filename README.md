@@ -140,7 +140,7 @@ tests/                 195 tests across 27 files, run in CI on every push
 
 ## CI / CD
 
-CI runs on **Python 3.11**, both **x86** and **ARM** (ubuntu-24.04-arm), on every push to `main` and every pull request:
+CI runs on **Python 3.12**, both **x86** and **ARM** (ubuntu-24.04-arm), on every push to `main` and every pull request:
 
 - **test** — `pytest` with coverage (threshold 41%), `--cov-report=term-missing`
 - **ruff** — lint check on all Python files

@@ -57,7 +57,7 @@ point at this `CLAUDE.md` as source-of-truth + the rules below.
 **CODE lane — Claude Code (web/CLI via the Claude GitHub App).** Clones the repo and is fully
 productive without secrets:
 - Edit code, run `pytest -q` (235 tests) + `ruff`, build the dashboard, run **local** backtests,
-  open **branches + PRs**. CI (Py3.11, x86+ARM, coverage, ruff) gates every PR.
+  open **branches + PRs**. CI (Py3.12, x86+ARM, coverage, ruff) gates every PR.
 - It CANNOT (and should not) touch live infra: no SSH key, no AWS creds, no Tailscale.
 
 The **LIVE / INFRA lane** stays on the trusted machine that holds `~/Desktop/dhan_aws_access/`
@@ -125,7 +125,7 @@ disturbed). Highlights (see memory `terraform-state-and-apply`, `credential-scru
   • Infra: remote TF state in S3 + DynamoDB lock; daily EBS snapshots (DLM); systemd
     StartLimitBurst + OnFailure=dhan-alert@; scripts/health_alert.py monitor cron (5-min);
     logrotate; TimescaleDB image pinned 2.17.2-pg16.
-  • CI: Py3.11 + x86/ARM matrix + coverage gate + ruff + pre-commit; CodeQL + Dependabot CLEAN.
+  • CI: Py3.12 + x86/ARM matrix + coverage gate + ruff + pre-commit; CodeQL + Dependabot CLEAN.
   • Skipped: DATA-07 (equity_curve PK — risky hypertable change, ~zero value). OPS-03 SSH lockdown
     SCOPED OUT (user decision).
 ```
@@ -266,7 +266,7 @@ dhan_algo/
 ├── backfill.py             Historical OHLCV CLI (checkpointed)
 ├── config.py               pydantic-settings Config — the only env reader
 ├── db.py                   SQLAlchemy engine/session
-├── tests/                  192 tests (pytest -q) + GitHub Actions CI (Py3.11, x86+ARM, cov, ruff)
+├── tests/                  pytest -q + GitHub Actions CI (Py3.12, x86+ARM, cov, ruff)
 └── apps/routes/            decomposed dashboard handlers (heartbeat, db, market, system)
 ```
 
