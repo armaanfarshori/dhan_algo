@@ -11,6 +11,11 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+# Count resources already in state BEFORE applying. The auto-teardown-on-failure
+# below is ONLY safe for a fresh provision (nothing live yet). If infra already
+# exists, a failed apply must NEVER auto-destroy — that would wipe production.
+PRE_APPLY_RESOURCES=$(terraform state list 2>/dev/null | wc -l | tr -d ' ')
+
 echo -e "${YELLOW}Running terraform apply...${NC}"
 
 if terraform apply -auto-approve; then
@@ -55,10 +60,23 @@ OUTPUT
     echo ""
     echo "  Outputs saved to: infra/aws_outputs.local"
 
+    # Always back up the gitignored secrets (tfvars/backend.hcl/aws_outputs.local)
+    # to the private tfstate S3 bucket so the single local copy is never a loss risk.
+    ./secrets-sync.sh push || echo -e "${YELLOW}WARN: secrets-sync push failed${NC}"
+
 else
     echo ""
-    echo -e "${RED}Apply FAILED. Running teardown to avoid idle charges...${NC}"
-    terraform destroy -auto-approve || true
-    echo -e "${RED}Teardown complete. Fix the error above and re-run ./apply.sh${NC}"
+    if [ "${PRE_APPLY_RESOURCES:-0}" -eq 0 ]; then
+        # Fresh provision — nothing was live, so tear down partial resources to
+        # avoid idle charges.
+        echo -e "${RED}Apply FAILED on a fresh provision. Tearing down partial resources to avoid idle charges...${NC}"
+        terraform destroy -auto-approve || true
+        echo -e "${RED}Teardown complete. Fix the error above and re-run ./apply.sh${NC}"
+    else
+        # Infra already existed — NEVER auto-destroy live infra on a failure.
+        echo -e "${RED}Apply FAILED — and ${PRE_APPLY_RESOURCES} resources were already live.${NC}"
+        echo -e "${RED}NOT auto-destroying (that would wipe production). Infra may be in a partial state.${NC}"
+        echo -e "${YELLOW}Inspect with 'terraform plan' and fix manually before re-running.${NC}"
+    fi
     exit 1
 fi

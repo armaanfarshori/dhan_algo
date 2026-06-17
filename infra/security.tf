@@ -13,13 +13,16 @@ resource "aws_security_group" "db" {
     security_groups = [aws_security_group.agent.id]
   }
 
-  # SSH for operator maintenance — set ssh_allowed_cidr in tfvars to restrict to your IP
+  # SSH only from inside the VPC — the DB is in a private subnet with no public
+  # IP and is reached via the agent jump host (connect.sh db -J agent). This is
+  # the deliberate hardening applied 2026-06-17 (was var.ssh_allowed_cidr =
+  # 0.0.0.0/0); codified here so `terraform apply` no longer reverts it.
   ingress {
-    description = "SSH operator"
+    description = "SSH from within VPC (via agent jump host)"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = [var.ssh_allowed_cidr]
+    cidr_blocks = ["10.0.0.0/16"]
   }
 
   # All outbound (apt, Docker pulls, S3 backups)
