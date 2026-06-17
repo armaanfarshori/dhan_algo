@@ -44,6 +44,7 @@ cfg = get_config()
 RUN_DIR = Path(__file__).parent.parent / "run"
 HEARTBEAT_FILE = RUN_DIR / "trader_heartbeat.json"
 KILLSWITCH_FILE = RUN_DIR / "killswitch"
+RESUME_FILE = RUN_DIR / "resume"
 HEARTBEAT_INTERVAL = 5.0
 
 # Holds the live ApiUsageFlusher created by write_heartbeat() so that the
@@ -332,6 +333,7 @@ async def main():
                 max_open_positions=cfg.max_open_positions,
                 killswitch_file=KILLSWITCH_FILE,
                 halt_file=RUN_DIR / "halt_state.json",
+                resume_file=RESUME_FILE,
             ),
             portfolio, ltp_lookup, db_backend=db)
         # Restart-proofing: restore an in-scope loss halt, seed the DB-backed
@@ -361,6 +363,15 @@ async def main():
                         await portfolio.apply_fill(fill, strategy="ORB")
                         r.strategy.notify_flat()
                         risk.release_risk(r.sid)
+
+        @risk.on_resume
+        async def on_resume():
+            logger.warning("▶ TRADING RESUMED (%s) — halt cleared via dashboard",
+                           portfolio.mode)
+            from core.notify import send_async
+            await send_async(f"▶ TRADING RESUMED ({portfolio.mode})\n"
+                             "Halt cleared from the dashboard. Risk loop re-armed; "
+                             "new entries allowed if no loss budget is breached.")
 
         # ── Strategy runners ───────────────────────────────────────────────────
         from engine.runner import StrategyRunner

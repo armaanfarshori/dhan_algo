@@ -45,6 +45,7 @@ ROOT = Path(__file__).parent.parent
 RUN_DIR = ROOT / "run"
 HEARTBEAT_FILE = RUN_DIR / "trader_heartbeat.json"
 KILLSWITCH_FILE = RUN_DIR / "killswitch"
+RESUME_FILE = RUN_DIR / "resume"
 TRADER_LOG = Path("/var/log/dhan/trader.log")
 DIST_DIR = ROOT / "dashboard" / "dist"
 STATIC_DIR = ROOT / "static"
@@ -213,6 +214,7 @@ from apps.routes.heartbeat import (  # noqa: E402
     config_handler,
     trading_mode_handler,
     killswitch_handler,
+    resume_handler,
     kronos_live_handler,
 )
 from apps.routes.db import (  # noqa: E402
@@ -330,6 +332,7 @@ def build_app() -> web.Application:
     app.router.add_get("/api/mode", trading_mode_handler)
     app.router.add_post("/api/mode", trading_mode_handler)
     app.router.add_post("/api/killswitch", killswitch_handler)
+    app.router.add_post("/api/resume", resume_handler)
     app.router.add_get("/api/paper/positions", paper_positions_handler)
     app.router.add_get("/api/config", config_handler)
     app.router.add_get("/api/funds", funds_handler)

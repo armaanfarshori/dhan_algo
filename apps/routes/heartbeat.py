@@ -147,6 +147,26 @@ async def killswitch_handler(request: web.Request) -> web.Response:
                               "message": "Kill switch flag set — trader halts within ~10s"})
 
 
+async def resume_handler(request: web.Request) -> web.Response:
+    """Clear a halt (kill-switch or loss) from the dashboard. Auth-gated like the
+    kill switch. Drops a `run/resume` flag the trader's risk loop consumes within
+    ~10s; also removes a stale `run/killswitch` so it can't immediately re-trip.
+    A still-breached daily/weekly loss budget will re-halt on the next tick — by
+    design (you can't click past a real loss limit)."""
+    import apps.api as _api
+    if (denial := _api._check_auth(request)) is not None:
+        return denial
+    _api.RUN_DIR.mkdir(exist_ok=True)
+    if _api.KILLSWITCH_FILE.exists():
+        _api.KILLSWITCH_FILE.unlink()
+    _api.RESUME_FILE.write_text(
+        f"dashboard @ {datetime.now(timezone.utc).isoformat()}")
+    _api.logger.warning("▶ RESUME requested via dashboard — flag written for trader")
+    return web.json_response({"ok": True, "halted": False,
+                              "message": "Resume flag set — trader re-arms within ~10s "
+                                         "(re-halts if a loss budget is still breached)"})
+
+
 async def kronos_live_handler(_r: web.Request) -> web.Response:
     from apps.api import read_heartbeat
     hb, _ = read_heartbeat()

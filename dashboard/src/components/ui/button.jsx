@@ -4,6 +4,7 @@ const VARIANTS = {
   default:    'border border-border2 bg-card text-foreground hover:border-faint',
   ghost:      'text-muted-foreground hover:text-foreground hover:bg-panel',
   destructive:'border border-loss/35 bg-loss/[.08] text-loss hover:bg-loss/[.14]',
+  profit:     'border border-profit/35 bg-profit/[.08] text-profit hover:bg-profit/[.14]',
   outline:    'border border-border2 text-muted-foreground hover:text-foreground',
 }
 
