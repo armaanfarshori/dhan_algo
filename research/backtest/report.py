@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from math import sqrt
 from statistics import mean, stdev
+from typing import Optional
 
 from research.backtest.engine import BTTrade
 
@@ -74,6 +75,47 @@ class Report:
             max_dd = max(max_dd, (peak - equity) / peak)
         return round(max_dd * 100, 2)
 
+    @property
+    def payoff_ratio(self) -> float:
+        """Avg win ÷ avg loss — win rate alone is meaningless for breakout."""
+        wins = [t.net_pnl for t in self.trades if t.net_pnl > 0]
+        losses = [abs(t.net_pnl) for t in self.trades if t.net_pnl < 0]
+        if not wins or not losses:
+            return 0.0
+        return round(mean(wins) / mean(losses), 2)
+
+    @property
+    def net_over_gross(self) -> float:
+        """Cost retention: net ÷ gross. Low ⇒ costs eat the edge."""
+        g = self.total_gross
+        return round(self.total_net / g, 2) if g > 0 else 0.0
+
+    @property
+    def top5_day_share(self) -> float:
+        """% of total net profit concentrated in the 5 best days. High ⇒ fragile."""
+        net = self.total_net
+        if net <= 0 or not self.daily_pnl:
+            return 0.0
+        top5 = sum(sorted(self.daily_pnl.values(), reverse=True)[:5])
+        return round(100 * top5 / net, 1)
+
+    @property
+    def months_positive_pct(self) -> float:
+        m = defaultdict(float)
+        for d, pnl in self.daily_pnl.items():
+            m[(d.year, d.month)] += pnl
+        if not m:
+            return 0.0
+        return round(100 * sum(1 for v in m.values() if v > 0) / len(m), 1)
+
+    @property
+    def longest_losing_streak(self) -> int:
+        streak = worst = 0
+        for pnl in self.daily_pnl.values():
+            streak = streak + 1 if pnl < 0 else 0
+            worst = max(worst, streak)
+        return worst
+
     def per_security(self) -> dict[str, dict]:
         agg: dict[str, dict] = {}
         for t in self.trades:
@@ -91,9 +133,14 @@ class Report:
             "costs": self.total_costs,
             "net_pnl": self.total_net,
             "win_rate_pct": self.win_rate,
+            "payoff_ratio": self.payoff_ratio,
             "profit_factor": self.profit_factor,
             "sharpe_daily_ann": self.sharpe,
             "max_drawdown_pct": self.max_drawdown_pct,
+            "net_over_gross": self.net_over_gross,
+            "top5_day_share_pct": self.top5_day_share,
+            "months_positive_pct": self.months_positive_pct,
+            "longest_losing_streak_days": self.longest_losing_streak,
             "final_equity": round(self.starting_equity + self.total_net, 2),
         }
 
@@ -113,3 +160,26 @@ class Report:
             ratio = abs(self.total_costs / self.total_gross) * 100
             print(f"  Costs consumed {ratio:.0f}% of gross P&L — "
                   f"if this is large, the edge is not real.\n")
+
+
+def m3_panel(trades: list[BTTrade], starting_equity: float,
+             split_date: Optional[date] = None) -> dict:
+    """Full / in-sample / out-of-sample KPI panel for the M3 study.
+
+    `split_date` is the first OOS day: trades with `day < split_date` are IS,
+    `day >= split_date` are OOS. The OOS block must be a contiguous LATER period
+    never seen during tuning/fine-tuning (date-split, never random). Returns the
+    full panel plus the OOS÷IS Sharpe degradation ratio."""
+    full = Report(trades, starting_equity)
+    out: dict = {"full": full.summary()}
+    if split_date is not None:
+        is_t = [t for t in trades if t.day < split_date]
+        oos_t = [t for t in trades if t.day >= split_date]
+        is_r = Report(is_t, starting_equity)
+        oos_r = Report(oos_t, starting_equity)
+        out["is"] = is_r.summary()
+        out["oos"] = oos_r.summary()
+        out["split_date"] = str(split_date)
+        out["oos_is_sharpe_ratio"] = (
+            round(oos_r.sharpe / is_r.sharpe, 2) if is_r.sharpe > 0 else None)
+    return out
