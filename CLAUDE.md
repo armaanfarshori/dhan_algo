@@ -72,9 +72,9 @@ reviews, merges, and deploys.
 Rules for any Claude here: PAPER_TRADING stays `true`; never commit IPs/IDs/tokens (public repo);
 branch + PR for every change (never commit straight to `main`). **The agent merges PRs itself**
 (memory `agent-handles-merges` — don't wait for a human) once gated by **green CI + outside
-market hours (09:15–15:30 IST)** (+ reviewer APPROVE for `/ship`). The market-hours + CI gates
-are safety rails, not human-gating; only the deploy (`sudo git pull` + restart on the agent)
-stays a deliberate trusted-machine step.
+market hours (09:15–15:30 IST)**. The market-hours + CI gates are safety rails, not
+human-gating; only the deploy (`sudo git pull` + restart on the agent) stays a deliberate
+trusted-machine step.
 
 ---
 
