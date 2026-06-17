@@ -337,96 +337,138 @@ def _compute_vwap(rows: list[tuple]) -> list[tuple]:
     return out
 
 
+# The cleaned-read SELECT (one security at a time). Identical filters to the
+# COPY_SQL sketch above, plus the corp-action gap-day filter. Streamed via a
+# server-side cursor so memory stays bounded regardless of how many bars a
+# single liquid name has (the busiest names have ~450K+ 1m rows over ~5y, which
+# is ~800MB if fetchall'd as psycopg2 Decimals — enough to OOM a small box that
+# is also running the live trader). See _stream_transform_one.
+SELECT_CLEAN_SQL = """
+    SELECT time, security_id, timeframe, open, high, low, close, volume, vwap
+    FROM bars
+    WHERE security_id = %s
+      AND timeframe = '1m'
+      AND (time AT TIME ZONE 'Asia/Kolkata')::time >= '09:15'
+      AND (time AT TIME ZONE 'Asia/Kolkata')::time <= '15:30'
+      -- Drop circuit-breaker sessions: session volume below threshold
+      AND DATE(time AT TIME ZONE 'Asia/Kolkata') NOT IN (
+          SELECT DATE(time AT TIME ZONE 'Asia/Kolkata')
+          FROM bars
+          WHERE security_id = %s AND timeframe = '1m'
+          GROUP BY DATE(time AT TIME ZONE 'Asia/Kolkata')
+          HAVING SUM(volume) < %s
+      )
+      -- Drop corp-action gap sessions: this day's first-1m open gapped
+      -- > threshold vs the prior trading day's last-1m close (split/bonus/
+      -- large overnight event). Computed from 1m so it never depends on
+      -- 1d bars; per-security so it stays on the security_id index.
+      AND DATE(time AT TIME ZONE 'Asia/Kolkata') NOT IN (
+          SELECT day FROM (
+              SELECT
+                  day,
+                  day_open,
+                  LAG(day_close) OVER (ORDER BY day) AS prev_close
+              FROM (
+                  SELECT
+                      DATE(time AT TIME ZONE 'Asia/Kolkata') AS day,
+                      first(open,  time) AS day_open,
+                      last(close,  time) AS day_close
+                  FROM bars
+                  WHERE security_id = %s AND timeframe = '1m'
+                    AND (time AT TIME ZONE 'Asia/Kolkata')::time >= '09:15'
+                    AND (time AT TIME ZONE 'Asia/Kolkata')::time <= '15:30'
+                  GROUP BY DATE(time AT TIME ZONE 'Asia/Kolkata')
+              ) d
+          ) g
+          WHERE prev_close > 0
+            AND ABS(day_open - prev_close) / prev_close > %s
+      )
+    ORDER BY time
+"""
+
+INSERT_CLEAN_SQL = """
+    INSERT INTO bars
+        (time, security_id, timeframe, open, high, low, close, volume, vwap)
+    VALUES %s
+    ON CONFLICT DO NOTHING
+"""
+
+
+def _stream_transform_one(raw, cln_cur, sid: str, insert_page: int = 5000) -> int:
+    """
+    Stream one security's cleaned 1m bars from raw → dhan_clean with a
+    server-side cursor, computing daily-reset VWAP incrementally and flushing
+    inserts every `insert_page` rows. Peak memory is O(insert_page), not
+    O(security's row count). Returns rows written.
+
+    The SELECT's ORDER BY time guarantees rows arrive in session order, so the
+    cumulative VWAP accumulators (reset on day change) stay correct across the
+    streamed batches — identical result to _compute_vwap on the full list.
+    """
+    ss = raw.cursor(name=f"tx_{sid}")          # named => server-side, streaming
+    ss.itersize = 20000
+    ss.execute(SELECT_CLEAN_SQL,
+               (sid, sid, CIRCUIT_BREAKER_VOL, sid, CORP_ACTION_THRESHOLD))
+
+    cum_pv = 0.0
+    cum_v  = 0
+    cur_day = None
+    buf: list[tuple] = []
+    written = 0
+
+    for row in ss:
+        row    = list(row)
+        ts     = row[0]
+        day    = ts.date() if hasattr(ts, "date") else str(ts)[:10]
+        close  = float(row[6]) if row[6] is not None else 0.0
+        volume = int(row[7])   if row[7] is not None else 0
+
+        if day != cur_day:          # new session — reset accumulators
+            cum_pv  = 0.0
+            cum_v   = 0
+            cur_day = day
+
+        cum_pv += close * volume
+        cum_v  += volume
+        row[8]  = round(cum_pv / cum_v, 4) if cum_v > 0 else None
+        buf.append(tuple(row))
+
+        if len(buf) >= insert_page:
+            psycopg2.extras.execute_values(cln_cur, INSERT_CLEAN_SQL, buf, page_size=insert_page)
+            written += len(buf)
+            buf.clear()
+
+    if buf:
+        psycopg2.extras.execute_values(cln_cur, INSERT_CLEAN_SQL, buf, page_size=insert_page)
+        written += len(buf)
+
+    ss.close()
+    raw.rollback()   # read-only snapshot — release it so it can't pin vacuum xmin
+    return written
+
+
 def transform(universe: list[str], batch_size: int = 50):
     log.info("Stage 2: transforming %d instruments into dhan_clean…", len(universe))
     raw  = raw_conn()
     cln  = clean_conn()
-    raw_cur = raw.cursor()
     cln_cur = cln.cursor()
 
     done = 0
+    total_rows = 0
     for sid in universe:
-        # Read from raw
-        # COPY_SQL is defined above but intentionally NEVER executed here.
-        # It was a cross-DB INSERT sketch written against the source schema
-        # (dhan_trading.bars) and would need a dblink or FDW to run across
-        # connections — neither is configured.  The actual read path is the
-        # raw_cur2 query immediately below.  Dead code; kept for reference only.
-        # DO NOT remove the `if False` guard: executing COPY_SQL here would
-        # attempt to INSERT into the raw dhan_trading.bars (wrong target) via
-        # raw_cur, which writes to the same connection — potential corruption.
-        _ = COPY_SQL  # suppress "unused variable" linters; guard is intentional
-        if False:     # noqa: SIM210  — guard must stay; see comment above
-            raw_cur.execute(COPY_SQL, {"sid": sid, "circuit_vol": CIRCUIT_BREAKER_VOL})
-
-        # Actually: read from raw then insert into clean (cross-DB via python)
-        raw_cur2 = raw.cursor()
-        raw_cur2.execute("""
-            SELECT time, security_id, timeframe, open, high, low, close, volume, vwap
-            FROM bars
-            WHERE security_id = %s
-              AND timeframe = '1m'
-              AND (time AT TIME ZONE 'Asia/Kolkata')::time >= '09:15'
-              AND (time AT TIME ZONE 'Asia/Kolkata')::time <= '15:30'
-              -- Drop circuit-breaker sessions: session volume below threshold
-              AND DATE(time AT TIME ZONE 'Asia/Kolkata') NOT IN (
-                  SELECT DATE(time AT TIME ZONE 'Asia/Kolkata')
-                  FROM bars
-                  WHERE security_id = %s AND timeframe = '1m'
-                  GROUP BY DATE(time AT TIME ZONE 'Asia/Kolkata')
-                  HAVING SUM(volume) < %s
-              )
-              -- Drop corp-action gap sessions: this day's first-1m open gapped
-              -- > threshold vs the prior trading day's last-1m close (split/bonus/
-              -- large overnight event). Computed from 1m so it never depends on
-              -- 1d bars; per-security so it stays on the security_id index.
-              AND DATE(time AT TIME ZONE 'Asia/Kolkata') NOT IN (
-                  SELECT day FROM (
-                      SELECT
-                          day,
-                          day_open,
-                          LAG(day_close) OVER (ORDER BY day) AS prev_close
-                      FROM (
-                          SELECT
-                              DATE(time AT TIME ZONE 'Asia/Kolkata') AS day,
-                              first(open,  time) AS day_open,
-                              last(close,  time) AS day_close
-                          FROM bars
-                          WHERE security_id = %s AND timeframe = '1m'
-                            AND (time AT TIME ZONE 'Asia/Kolkata')::time >= '09:15'
-                            AND (time AT TIME ZONE 'Asia/Kolkata')::time <= '15:30'
-                          GROUP BY DATE(time AT TIME ZONE 'Asia/Kolkata')
-                      ) d
-                  ) g
-                  WHERE prev_close > 0
-                    AND ABS(day_open - prev_close) / prev_close > %s
-              )
-            ORDER BY time
-        """, (sid, sid, CIRCUIT_BREAKER_VOL, sid, CORP_ACTION_THRESHOLD))
-
-        rows = raw_cur2.fetchall()
-        raw_cur2.close()
-
-        if rows:
-            rows = _compute_vwap(rows)
-            psycopg2.extras.execute_values(cln_cur, """
-                INSERT INTO bars
-                    (time, security_id, timeframe, open, high, low, close, volume, vwap)
-                VALUES %s
-                ON CONFLICT DO NOTHING
-            """, rows, page_size=5000)
-
+        total_rows += _stream_transform_one(raw, cln_cur, sid)
         done += 1
         if done % batch_size == 0:
             cln.commit()
-            log.info("  %d / %d instruments committed", done, len(universe))
+            log.info("  %d / %d instruments committed (%s rows so far)",
+                     done, len(universe), f"{total_rows:,}")
 
     cln.commit()
-    raw_cur.close()
     cln_cur.close()
     raw.close()
     cln.close()
-    log.info("Stage 2 complete — %d instruments written to dhan_clean.bars", done)
+    log.info("Stage 2 complete — %d instruments, %s rows written to dhan_clean.bars",
+             done, f"{total_rows:,}")
 
 
 # ── Stage 3: Export Parquet to S3 ─────────────────────────────────────────────
