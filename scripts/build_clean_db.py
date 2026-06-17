@@ -447,28 +447,48 @@ def _stream_transform_one(raw, cln_cur, sid: str, insert_page: int = 5000) -> in
     return written
 
 
-def transform(universe: list[str], batch_size: int = 50):
-    log.info("Stage 2: transforming %d instruments into dhan_clean…", len(universe))
-    raw  = raw_conn()
-    cln  = clean_conn()
+def _transform_shard(sids: list[str], worker_id: int, commit_every: int = 25) -> tuple[int, int]:
+    """Process one shard of the universe on a dedicated pair of connections.
+    Returns (instruments_done, rows_written). Each worker streams its securities
+    independently so N workers => N concurrent server-side queries on the DB box,
+    which is the whole point — the box is I/O-bound on ONE core otherwise."""
+    raw = raw_conn()
+    cln = clean_conn()
     cln_cur = cln.cursor()
-
     done = 0
-    total_rows = 0
-    for sid in universe:
-        total_rows += _stream_transform_one(raw, cln_cur, sid)
+    rows = 0
+    for sid in sids:
+        rows += _stream_transform_one(raw, cln_cur, sid)
         done += 1
-        if done % batch_size == 0:
+        if done % commit_every == 0:
             cln.commit()
-            log.info("  %d / %d instruments committed (%s rows so far)",
-                     done, len(universe), f"{total_rows:,}")
-
+            log.info("  [w%d] %d/%d instruments (%s rows)", worker_id, done, len(sids), f"{rows:,}")
     cln.commit()
     cln_cur.close()
     raw.close()
     cln.close()
+    return done, rows
+
+
+def transform(universe: list[str], workers: int = 6):
+    log.info("Stage 2: transforming %d instruments into dhan_clean with %d parallel workers…",
+             len(universe), workers)
+    # Round-robin shard so each worker gets a mix of big (volume-ordered head)
+    # and small names — balances the per-query cost across workers.
+    shards = [universe[i::workers] for i in range(workers)]
+    grand_done = 0
+    grand_rows = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_transform_shard, shards[i], i): i for i in range(workers)
+                   if shards[i]}
+        for fut in as_completed(futures):
+            d, r = fut.result()
+            grand_done += d
+            grand_rows += r
+            log.info("  worker %d finished — running total: %d/%d instruments, %s rows",
+                     futures[fut], grand_done, len(universe), f"{grand_rows:,}")
     log.info("Stage 2 complete — %d instruments, %s rows written to dhan_clean.bars",
-             done, f"{total_rows:,}")
+             grand_done, f"{grand_rows:,}")
 
 
 # ── Stage 3: Export Parquet to S3 ─────────────────────────────────────────────
