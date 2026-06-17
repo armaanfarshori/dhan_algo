@@ -14,7 +14,7 @@ DB_HOST="${db_host}"
 
 # ── Packages ──────────────────────────────────────────────────────────────────
 apt-get update -y
-apt-get install -y python3.11 python3.11-venv python3.11-dev \
+apt-get install -y python3.12 python3.12-venv python3.12-dev \
   git awscli jq curl build-essential libpq-dev postgresql-client
 
 # uv — fast Python package manager
@@ -71,7 +71,7 @@ chmod 600 "$APP_DIR/.env"
 
 # ── Python venv + deps ────────────────────────────────────────────────────────
 cd "$APP_DIR"
-"$UV" venv .venv --python 3.11
+"$UV" venv .venv --python 3.12
 "$UV" pip install -r requirements.txt
 
 # ── Wait for DB + run Alembic migrations ─────────────────────────────────────
