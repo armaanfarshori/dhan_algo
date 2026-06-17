@@ -25,6 +25,7 @@ Returns a dict:
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -98,6 +99,7 @@ class KronosSignalEngine:
         self._signal_thresh = cfg.kronos_thresh
         self._offline       = cfg.kronos_offline
         self._revision      = cfg.kronos_revision or None
+        self._checkpoint    = (cfg.kronos_checkpoint or "").strip()
         self._loaded_from   = ""
         self._bucket_min    = max(1, int(pd.Timedelta(self._timeframe).total_seconds() // 60))
 
@@ -112,8 +114,64 @@ class KronosSignalEngine:
             self._predictor = await loop.run_in_executor(None, self._load_sync, device)
             logger.info("Kronos loaded from %s.", self._loaded_from)
 
+    def _resolve_checkpoint(self, ckpt: str) -> str:
+        """Resolve a checkpoint reference to a local directory.
+
+        Local path → returned as-is. `s3://bucket/prefix/` → synced ONCE into a
+        local cache dir (subsequent starts reuse it), then that dir is returned.
+        The dir is expected to contain BOTH the model and tokenizer files
+        (finetune.py saves them together into output_dir/best)."""
+        if not ckpt.startswith("s3://"):
+            return ckpt
+
+        without = ckpt[len("s3://"):]
+        bucket, _, prefix = without.partition("/")
+        prefix = prefix.rstrip("/")
+        cache_root = os.path.expanduser("~/.cache/dhan_kronos")
+        local_dir = os.path.join(cache_root, bucket, prefix)
+
+        # Reuse an already-synced checkpoint (presence of any file == synced).
+        if os.path.isdir(local_dir) and any(os.scandir(local_dir)):
+            logger.info("Kronos checkpoint cache hit: %s", local_dir)
+            return local_dir
+
+        import boto3
+        os.makedirs(local_dir, exist_ok=True)
+        s3 = boto3.client("s3")
+        paginator = s3.get_paginator("list_objects_v2")
+        n = 0
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix + "/"):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                if key.endswith("/"):
+                    continue
+                rel = key[len(prefix) + 1:]
+                dest = os.path.join(local_dir, rel)
+                os.makedirs(os.path.dirname(dest) or local_dir, exist_ok=True)
+                s3.download_file(bucket, key, dest)
+                n += 1
+        if n == 0:
+            raise FileNotFoundError(f"No objects under {ckpt}")
+        logger.info("Synced %d checkpoint files from %s → %s", n, ckpt, local_dir)
+        return local_dir
+
     def _load_sync(self, device: str):
         from kronos import KronosTokenizer, Kronos, KronosPredictor
+
+        # Fine-tuned checkpoint (local dir or s3:// URI). Fail-OPEN: if it can't
+        # be resolved/loaded, fall through to the HF zero-shot path below rather
+        # than leave the gate dead (Kronos errors must never block trades).
+        if self._checkpoint:
+            try:
+                local_dir = self._resolve_checkpoint(self._checkpoint)
+                tok = KronosTokenizer.from_pretrained(local_dir)
+                mdl = Kronos.from_pretrained(local_dir)
+                self._loaded_from = f"fine-tuned checkpoint {self._checkpoint}"
+                return KronosPredictor(mdl, tok, max_context=512)
+            except Exception as exc:
+                logger.critical(
+                    "Kronos checkpoint load FAILED (%s) — falling back to zero-shot %s",
+                    exc, self._model_id)
 
         def _fetch(offline: bool):
             tok = KronosTokenizer.from_pretrained(

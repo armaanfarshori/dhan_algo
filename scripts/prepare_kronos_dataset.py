@@ -34,12 +34,10 @@ import logging
 import os
 import sys
 from pathlib import Path
-from datetime import date
 
 import boto3
 import numpy as np
 import pandas as pd
-import pyarrow.parquet as pq
 from tqdm import tqdm
 
 logging.basicConfig(
@@ -62,9 +60,14 @@ VAL_START   = "2025-01-01"
 VAL_END     = "2025-12-31"
 TEST_START  = "2026-01-01"   # touch ONCE for final eval
 
-CONTEXT_LEN = 512   # must match score_from_db() and finetune.py
-PRED_LEN    = 30    # must match score_from_db() and finetune.py
-MIN_BARS    = CONTEXT_LEN + PRED_LEN   # minimum bars to form one window
+# Length presets per scoring timeframe. These MUST match what the model is
+# served with: config.py kronos_lookback (context) / kronos_pred_len (pred) for
+# 5min, and the legacy 1min values. finetune.py must be invoked with the same
+# --context_length/--prediction_length for the matching timeframe.
+TF_PRESETS = {
+    "1min": {"context": 512, "pred": 30},   # legacy — OOD for NSE (corpus is 5min+)
+    "5min": {"context": 480, "pred": 6},     # matches live config (lookback 480, pred 6)
+}
 
 # Features expected by KronosPredictor (kronos/kronos.py)
 PRICE_COLS = ["open", "high", "low", "close"]
@@ -79,6 +82,20 @@ def add_amount(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["amount"] = df["volume"] * df[PRICE_COLS].mean(axis=1)
     return df
+
+
+def resample_5min(df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate 1-min bars to 5-min — matches core.kronos_signal._aggregate_bars:
+    open=first, high=max, low=min, close=last, volume=sum. Empty bins (overnight
+    gaps) are dropped, so no synthetic bar spans two sessions."""
+    d = df.copy()
+    d["time"] = pd.to_datetime(d["time"], utc=True)
+    d = d.set_index("time").sort_index()
+    agg = d.resample("5min").agg({
+        "open": "first", "high": "max", "low": "min",
+        "close": "last", "volume": "sum",
+    }).dropna(subset=["open", "high", "low", "close"])
+    return agg.reset_index()
 
 
 def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -150,6 +167,9 @@ def process_instrument(
     security_id: str,
     df: pd.DataFrame,
     out_dir: Path,
+    timeframe: str = "5min",
+    context_len: int = 480,
+    pred_len: int = 6,
 ) -> dict | None:
     """
     Process one instrument:
@@ -169,6 +189,9 @@ def process_instrument(
         log.warning("SKIP %s — no 'time' column", security_id)
         return None
 
+    if timeframe == "5min":
+        df = resample_5min(df)
+
     df = add_amount(df)
     df = add_time_features(df)
 
@@ -177,11 +200,12 @@ def process_instrument(
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.dropna(subset=FEAT_COLS)
 
+    min_bars = context_len + pred_len
     splits = split_by_date(df)
     stats  = {"security_id": security_id, "splits": {}}
 
     for split_name, split_df in splits.items():
-        if len(split_df) < MIN_BARS:
+        if len(split_df) < min_bars:
             stats["splits"][split_name] = {"bars": len(split_df), "windows": 0}
             continue
 
@@ -194,7 +218,7 @@ def process_instrument(
         np.save(split_out / f"{security_id}_x.npy",     x)
         np.save(split_out / f"{security_id}_stamp.npy", stamp)
 
-        n_windows = max(0, (len(split_df) - CONTEXT_LEN - PRED_LEN) // PRED_LEN + 1)
+        n_windows = max(0, (len(split_df) - context_len - pred_len) // pred_len + 1)
         stats["splits"][split_name] = {"bars": len(split_df), "windows": n_windows}
 
     return stats
@@ -202,7 +226,8 @@ def process_instrument(
 
 # ── Dataset info ──────────────────────────────────────────────────────────────
 
-def write_manifest(out_dir: Path, all_stats: list[dict]):
+def write_manifest(out_dir: Path, all_stats: list[dict],
+                   timeframe: str, context_len: int, pred_len: int):
     total_train_windows = sum(
         s["splits"].get("train", {}).get("windows", 0) for s in all_stats
     )
@@ -211,8 +236,9 @@ def write_manifest(out_dir: Path, all_stats: list[dict]):
     )
     manifest = {
         "prepared_at":        pd.Timestamp.now(tz="UTC").isoformat(),
-        "context_length":     CONTEXT_LEN,
-        "pred_length":        PRED_LEN,
+        "timeframe":          timeframe,
+        "context_length":     context_len,
+        "pred_length":        pred_len,
         "features":           FEAT_COLS,
         "time_features":      TIME_COLS,
         "splits": {
@@ -240,9 +266,18 @@ def main():
                      help="Download directly from S3 (requires AWS credentials)")
     ap.add_argument("--out",  type=Path, required=True, metavar="DIR",
                     help="Output directory for processed numpy files")
+    ap.add_argument("--timeframe", choices=list(TF_PRESETS), default="5min",
+                    help="Bar granularity to train on. 5min (default) aggregates "
+                         "the 1m Parquet to match live serving; 1min = legacy/OOD. "
+                         "Build both for the A/B shadow (separate --out dirs).")
     ap.add_argument("--limit", type=int, default=None,
                     help="Process only N instruments (for quick testing)")
     args = ap.parse_args()
+
+    preset      = TF_PRESETS[args.timeframe]
+    context_len = preset["context"]
+    pred_len    = preset["pred"]
+    log.info("Timeframe=%s → context_len=%d pred_len=%d", args.timeframe, context_len, pred_len)
 
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -262,13 +297,15 @@ def main():
     skipped   = 0
 
     for security_id, df in tqdm(instruments, desc="Processing"):
-        stats = process_instrument(security_id, df, args.out)
+        stats = process_instrument(security_id, df, args.out,
+                                   timeframe=args.timeframe,
+                                   context_len=context_len, pred_len=pred_len)
         if stats is None:
             skipped += 1
             continue
         all_stats.append(stats)
 
-    write_manifest(args.out, all_stats)
+    write_manifest(args.out, all_stats, args.timeframe, context_len, pred_len)
 
     log.info("Done. %d instruments processed, %d skipped.", len(all_stats), skipped)
     log.info("")
@@ -277,9 +314,10 @@ def main():
     log.info("    --model NeoQuasar/Kronos-base \\")
     log.info("    --data_path %s/train/ \\", args.out)
     log.info("    --val_path  %s/val/ \\", args.out)
-    log.info("    --context_length %d \\", CONTEXT_LEN)
-    log.info("    --prediction_length %d \\", PRED_LEN)
-    log.info("    --output_dir ~/kronos-nse-v1/")
+    log.info("    --context_length %d \\", context_len)
+    log.info("    --prediction_length %d \\", pred_len)
+    log.info("    --upload-s3 --s3-name nse-%s-v1 \\", args.timeframe)
+    log.info("    --output_dir ~/kronos-nse-%s-v1/", args.timeframe)
 
 
 if __name__ == "__main__":

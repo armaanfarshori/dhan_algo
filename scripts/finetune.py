@@ -21,7 +21,6 @@ After training:
 import argparse
 import json
 import logging
-import math
 import os
 import sys
 import time
@@ -32,7 +31,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-from huggingface_hub import hf_hub_download
 from tqdm import tqdm
 
 logging.basicConfig(
@@ -272,12 +270,48 @@ def train(args):
 
     log.info("Training complete. Best val_loss=%.4f", best_val_loss)
     log.info("Checkpoint saved to: %s/best/", output_dir)
+
+    s3_uri = None
+    if args.upload_s3:
+        s3_uri = _upload_checkpoint_s3(output_dir / "best", args.s3_name)
+
     log.info("")
-    log.info("Upload to S3:")
-    log.info("  aws s3 sync %s/best/ s3://$S3_BUCKET/kronos/checkpoints/nse-v1/", output_dir)
-    log.info("")
-    log.info("Then on agent EC2 — update .env and restart platform:")
-    log.info("  KRONOS_CHECKPOINT=s3://$S3_BUCKET/kronos/checkpoints/nse-v1/")
+    if s3_uri:
+        log.info("Checkpoint uploaded to %s", s3_uri)
+        log.info("Then on agent EC2 — set in .env and restart platform:")
+        log.info("  KRONOS_CHECKPOINT=%s", s3_uri)
+    else:
+        log.info("Upload to S3 (or re-run with --upload-s3):")
+        log.info("  aws s3 sync %s/best/ s3://$S3_BUCKET/kronos/checkpoints/%s/",
+                 output_dir, args.s3_name)
+        log.info("Then on agent EC2 — set in .env and restart platform:")
+        log.info("  KRONOS_CHECKPOINT=s3://$S3_BUCKET/kronos/checkpoints/%s/", args.s3_name)
+
+
+def _upload_checkpoint_s3(local_dir: Path, name: str) -> str | None:
+    """Sync a local checkpoint dir to s3://$S3_BUCKET/kronos/checkpoints/<name>/.
+    Returns the s3:// URI on success, None if S3_BUCKET is unset/upload failed.
+    The URI it returns is exactly what KRONOS_CHECKPOINT expects (the live
+    KronosSignalEngine syncs it back down on first load)."""
+    bucket = os.environ.get("S3_BUCKET", "")
+    if not bucket:
+        log.warning("--upload-s3 set but S3_BUCKET is empty — skipping upload")
+        return None
+    try:
+        import boto3
+        s3 = boto3.client("s3")
+        prefix = f"kronos/checkpoints/{name}"
+        n = 0
+        for f in sorted(Path(local_dir).rglob("*")):
+            if f.is_file():
+                rel = f.relative_to(local_dir).as_posix()
+                s3.upload_file(str(f), bucket, f"{prefix}/{rel}")
+                n += 1
+        log.info("Uploaded %d checkpoint files to s3://%s/%s/", n, bucket, prefix)
+        return f"s3://{bucket}/{prefix}/"
+    except Exception as exc:
+        log.error("Checkpoint S3 upload failed: %s", exc)
+        return None
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -297,6 +331,12 @@ def main():
     ap.add_argument("--epochs",            type=int,  default=3)
     ap.add_argument("--batch_size",        type=int,  default=32)
     ap.add_argument("--lr",                type=float, default=1e-4)
+    # For the 5-min A/B variant, pass --context_length 480 --prediction_length 6
+    # (matches config kronos_lookback/kronos_pred_len) against the 5min dataset.
+    ap.add_argument("--upload-s3", action="store_true", dest="upload_s3",
+                    help="Sync best/ to s3://$S3_BUCKET/kronos/checkpoints/<s3-name>/ after training")
+    ap.add_argument("--s3-name", dest="s3_name", default="nse-v1",
+                    help="Checkpoint name under kronos/checkpoints/ (e.g. nse-5min-v1)")
     args = ap.parse_args()
 
     train(args)

@@ -40,7 +40,11 @@ async def run(args) -> int:
     from strategies.orb import ORBParams
 
     cfg = get_config()
-    init_db(cfg.db_url)
+    # M3 runs on the cleaned replica (dhan_clean), not raw dhan_trading — every
+    # bars/universe query in the backtester goes through this engine.
+    init_db(cfg.backtest_db_url)
+    logging.getLogger("dhan.backtest").info(
+        "Backtest DB = %s (clean replica)", cfg.backtest_db_name)
 
     params = BacktestParams(
         equity=args.equity,
