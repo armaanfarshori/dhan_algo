@@ -2,8 +2,8 @@
 
 A `planner → coder → tester → reviewer` chain in `.claude/`. Each agent has its own
 context window, model, and tool scope; they hand off through `.pipeline/`. One command —
-`/ship <feature>` — runs the whole chain on a feature branch and stops at the reviewer's
-verdict. **It never auto-merges.**
+`/ship <feature>` — runs the whole chain on a feature branch. On the reviewer's APPROVE the
+**agent merges itself** (memory `agent-handles-merges`), gated by green CI + outside market hours.
 
 ## Layout
 ```

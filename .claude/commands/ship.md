@@ -1,5 +1,5 @@
 ---
-description: Run a feature request through the full planner -> coder -> tester -> reviewer pipeline, handing off via the .pipeline/ folder. Works on a feature branch; stops at the reviewer's verdict; never auto-merges.
+description: Run a feature request through the full planner -> coder -> tester -> reviewer pipeline, handing off via the .pipeline/ folder. Works on a feature branch; the agent merges on reviewer APPROVE + green CI + outside market hours.
 argument-hint: <feature request, e.g. add a /api/health detail field>
 ---
 
