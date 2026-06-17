@@ -594,6 +594,12 @@ def main():
     ap.add_argument("--export",    action="store_true", help="Export Parquet files to S3")
     ap.add_argument("--all",       action="store_true", help="Run all three stages")
     ap.add_argument("--workers",   type=int, default=4,  help="Parallel S3 upload workers")
+    ap.add_argument("--ids",       help="Comma-separated security_ids to restrict "
+                    "transform/export to (targeted re-clean of repaired names; skips identify)")
+    ap.add_argument("--delete-first", action="store_true", dest="delete_first",
+                    help="With --transform --ids: DELETE those securities from dhan_clean.bars "
+                    "before re-transforming, so the clean filters re-apply to the complete "
+                    "(re-backfilled) raw data rather than merging into stale partial rows")
     args = ap.parse_args()
 
     if not any([args.identify, args.transform, args.export, args.all]):
@@ -603,6 +609,8 @@ def main():
     run_identify  = args.identify  or args.all
     run_transform = args.transform or args.all
     run_export    = args.export    or args.all
+
+    target_ids = [s.strip() for s in args.ids.split(",") if s.strip()] if args.ids else None
 
     if run_transform or run_export:
         ensure_clean_db()
@@ -614,12 +622,25 @@ def main():
         universe = identify_universe(dry_run=dry)
 
     if run_transform:
-        if universe is None:
+        if target_ids:
+            universe = target_ids
+            log.info("Targeted transform of %d security_ids (--ids)", len(target_ids))
+            if args.delete_first:
+                conn = clean_conn(); cur = conn.cursor()
+                cur.execute("DELETE FROM bars WHERE security_id = ANY(%s)", (target_ids,))
+                conn.commit()
+                log.info("--delete-first: removed %d rows for %d securities from dhan_clean.bars",
+                         cur.rowcount, len(target_ids))
+                cur.close(); conn.close()
+        elif universe is None:
             universe = identify_universe(dry_run=False)
         transform(universe)
 
     if run_export:
-        if universe is None:
+        if target_ids:
+            universe = target_ids
+            log.info("Targeted export of %d security_ids (--ids)", len(target_ids))
+        elif universe is None:
             # Load from dhan_clean.clean_universe if already built
             conn = clean_conn()
             cur  = conn.cursor()
