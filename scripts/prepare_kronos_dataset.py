@@ -35,10 +35,11 @@ import os
 import sys
 from pathlib import Path
 
-import boto3
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
+# boto3 + tqdm are imported lazily inside the functions that use them — this
+# module is imported by tests (for TF_PRESETS / resample_5min / process_instrument)
+# in a CI env that installs only the core deps (no boto3/tqdm).
 
 logging.basicConfig(
     level=logging.INFO,
@@ -141,6 +142,8 @@ def load_parquet_local(data_dir: Path) -> list[tuple[str, pd.DataFrame]]:
 
 def load_parquet_s3() -> list[tuple[str, pd.DataFrame]]:
     """Load all .parquet files directly from S3."""
+    import boto3
+    from tqdm import tqdm
     s3 = boto3.client("s3")
     paginator = s3.get_paginator("list_objects_v2")
     keys = []
@@ -296,6 +299,7 @@ def main():
     all_stats = []
     skipped   = 0
 
+    from tqdm import tqdm
     for security_id, df in tqdm(instruments, desc="Processing"):
         stats = process_instrument(security_id, df, args.out,
                                    timeframe=args.timeframe,
