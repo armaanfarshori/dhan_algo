@@ -340,6 +340,13 @@ async def main():
         # P&L cache, and conservatively book one full risk budget against
         # each reconciled position (their stops are recomputed by ORB).
         risk.load_persisted_halt()
+        # Discard any resume flag left on disk from before this boot: it must NOT
+        # auto-clear a halt that load_persisted_halt() just restored (a persisted
+        # loss-halt requires a deliberate, post-boot resume). The operator can
+        # re-issue resume from the dashboard if they still want it.
+        if RESUME_FILE.exists():
+            RESUME_FILE.unlink()
+            logger.warning("Discarded a stale run/resume flag at boot")
         await risk.refresh_pnl()
         for p in portfolio.open_positions():
             risk.register_risk(p.security_id, risk.risk_budget_per_trade)

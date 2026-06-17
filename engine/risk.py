@@ -323,10 +323,11 @@ class RiskEngine:
         # daily/weekly loss budget — only a kill-switch or a recovered P&L sticks.
         rf = self.params.resume_file
         if rf and rf.exists():
-            rf.unlink(missing_ok=True)
             if self.state.halted or self.state.kill_switch:
                 logger.warning("▶ RESUME requested (dashboard) — clearing halt")
-                self.resume()
+                self.resume()                  # clears state + killswitch/halt files
+                rf.unlink(missing_ok=True)     # consume ONLY after resume() succeeds,
+                                               # so a raised resume() is retried next tick
                 for cb in self._on_resume:
                     try:
                         if asyncio.iscoroutinefunction(cb):
@@ -335,6 +336,11 @@ class RiskEngine:
                             cb()
                     except Exception as exc:
                         logger.error("Resume callback error: %s", exc)
+            else:
+                # Stray flag while healthy (e.g. left over from before a halt) —
+                # consume it so it can't fire later, but don't pretend we resumed.
+                logger.info("Resume flag present but engine not halted — ignoring")
+                rf.unlink(missing_ok=True)
 
         # Out-of-process kill switch (written by the api process). Goes
         # through _halt() so on_halt callbacks (flatten + alert) fire.
@@ -405,6 +411,10 @@ class RiskEngine:
         fashion (logs a warning if any are present).
         """
         full_reason = f"Kill switch: {reason}"
+        # Set the flag eagerly on BOTH paths so check_intent() and get_summary()
+        # never report kill_switch=False in the window before the scheduled _halt
+        # task runs. _halt does not set this field; it is owned here.
+        self.state.kill_switch = True
         try:
             loop = asyncio.get_running_loop()
             # We are inside an async context — schedule _halt as a task so all

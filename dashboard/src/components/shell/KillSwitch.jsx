@@ -47,7 +47,7 @@ export function KillSwitch() {
           </>
         )}
       </Button>
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={(v) => { if (!busy) setOpen(v) }}>
         <DialogContent>
           <DialogTitle>Confirm kill switch</DialogTitle>
           <DialogBody>

@@ -287,6 +287,100 @@ def test_evaluate_resume_does_not_clear_breached_loss(tmp_path, monkeypatch):
     assert not rf.exists()
 
 
+def test_evaluate_resume_does_not_clear_breached_weekly_loss(tmp_path, monkeypatch):
+    """Resume can't override a still-breached WEEKLY loss — re-halts scope 'week'."""
+    rf = tmp_path / "resume"
+    rm = make_engine(resume_file=rf)
+    _stub_refresh(rm, monkeypatch)
+    rm._realized_today = -3_000      # within daily budget (10k)
+    rm._realized_week = -30_000      # over weekly budget (25k)
+    rm._ltp = lambda sid: 0.0
+    asyncio.run(rm._evaluate())
+    assert rm.state.halted and rm.state.halt_scope == "week"
+
+    rf.write_text("dashboard")
+    asyncio.run(rm._evaluate())
+    assert rm.state.halted is True
+    assert rm.state.halt_scope == "week"
+    assert not rf.exists()
+
+
+def test_evaluate_resume_clears_halt_file_too(tmp_path, monkeypatch):
+    """A resume via _evaluate deletes the persisted halt_state.json (not just state)."""
+    hf = tmp_path / "halt_state.json"
+    rf = tmp_path / "resume"
+    rm = make_engine(halt_file=hf, resume_file=rf)
+    _stub_refresh(rm, monkeypatch)
+    rm._ltp = lambda sid: 0.0
+    asyncio.run(rm._halt("weekly loss", scope="week"))   # persists hf
+    assert hf.exists()
+    rf.write_text("dashboard")
+    asyncio.run(rm._evaluate())
+    assert not hf.exists() and not rf.exists()
+    assert not rm.state.halted
+
+
+def test_evaluate_resume_fires_async_on_resume_callback(tmp_path, monkeypatch):
+    """An async on_resume callback is awaited (not left a dangling coroutine)."""
+    ks = tmp_path / "killswitch"
+    rf = tmp_path / "resume"
+    rm = make_engine(killswitch_file=ks, resume_file=rf)
+    _stub_refresh(rm, monkeypatch)
+    rm._ltp = lambda sid: 0.0
+    ks.write_text("op"); asyncio.run(rm._evaluate())
+    assert rm.state.halted
+    ks.unlink(); rf.write_text("dashboard")
+    fired = []
+    async def _cb():
+        fired.append(True)
+    rm.on_resume(_cb)
+    asyncio.run(rm._evaluate())
+    assert fired == [True] and not rm.state.halted
+
+
+def test_resume_unlinked_only_after_resume_succeeds(tmp_path, monkeypatch):
+    """If resume() raises, the flag is NOT consumed — it's retried next tick."""
+    rf = tmp_path / "resume"
+    rm = make_engine(resume_file=rf)
+    _stub_refresh(rm, monkeypatch)
+    rm._ltp = lambda sid: 0.0
+    rm.state.halted = True
+    rf.write_text("dashboard")
+
+    def _boom():
+        raise RuntimeError("resume failed")
+    monkeypatch.setattr(rm, "resume", _boom)
+    # _evaluate is called inside the monitor loop's try/except, but here we call it
+    # directly — the exception propagates; the flag must still be on disk.
+    try:
+        asyncio.run(rm._evaluate())
+    except RuntimeError:
+        pass
+    assert rf.exists(), "resume flag must survive a failed resume() for retry"
+
+
+def test_get_summary_reports_kill_switch(monkeypatch):
+    """get_summary() surfaces kill_switch so the dashboard can tell halt types apart."""
+    rm = make_engine()
+    _stub_refresh(rm, monkeypatch)
+    assert rm.get_summary()["kill_switch"] is False
+    rm.state.kill_switch = True
+    assert rm.get_summary()["kill_switch"] is True
+
+
+def test_activate_kill_switch_sets_flag_eagerly_in_async_ctx():
+    """In an async context, activate_kill_switch sets kill_switch=True immediately,
+    not only once the scheduled _halt task runs."""
+    rm = make_engine()
+    async def _run():
+        rm.activate_kill_switch("operator")
+        # synchronously after the call, before yielding to the scheduled task:
+        assert rm.state.kill_switch is True
+        await asyncio.sleep(0)   # let the _halt task run
+    asyncio.run(_run())
+    assert rm.state.halted is True
+
+
 def test_evaluate_resume_noop_when_not_halted(tmp_path, monkeypatch):
     """A stray resume file when healthy is consumed without firing on_resume."""
     rf = tmp_path / "resume"

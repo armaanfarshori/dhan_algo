@@ -156,13 +156,23 @@ async def resume_handler(request: web.Request) -> web.Response:
     import apps.api as _api
     if (denial := _api._check_auth(request)) is not None:
         return denial
-    _api.RUN_DIR.mkdir(exist_ok=True)
-    if _api.KILLSWITCH_FILE.exists():
-        _api.KILLSWITCH_FILE.unlink()
-    _api.RESUME_FILE.write_text(
-        f"dashboard @ {datetime.now(timezone.utc).isoformat()}")
+    try:
+        _api.RUN_DIR.mkdir(exist_ok=True)
+        # Write the resume flag FIRST, then clear any stale kill-switch flag. If we
+        # die between the two, the trader still sees the resume and self-heals; the
+        # reverse order could leave it seeing neither flag (stuck halted).
+        _api.RESUME_FILE.write_text(
+            f"dashboard @ {datetime.now(timezone.utc).isoformat()}")
+        _api.KILLSWITCH_FILE.unlink(missing_ok=True)
+    except OSError as exc:
+        _api.logger.error("Resume flag write failed: %s", exc)
+        return web.json_response(
+            {"ok": False, "error": {"message": f"Could not set resume flag: {exc}"}},
+            status=500)
     _api.logger.warning("▶ RESUME requested via dashboard — flag written for trader")
-    return web.json_response({"ok": True, "halted": False,
+    # Still halted at this instant — the trader clears it within ~10s; the dashboard
+    # confirms via the heartbeat's risk.halted, not this response.
+    return web.json_response({"ok": True, "halted": True,
                               "message": "Resume flag set — trader re-arms within ~10s "
                                          "(re-halts if a loss budget is still breached)"})
 
