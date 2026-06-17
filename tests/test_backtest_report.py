@@ -14,6 +14,26 @@ def _t(day: date, net: float, gross: float = None, costs: float = 10.0) -> BTTra
                    exit_price=101.0, exit_reason="t", gross_pnl=gross, costs=costs, net_pnl=net)
 
 
+def test_edge_guards_no_trades_and_zero_equity():
+    # No trades: profit_factor must be 0.0 (not inf), and metrics don't crash.
+    r = Report([], 100_000)
+    assert r.profit_factor == 0.0
+    assert r.sharpe == 0.0 and r.max_drawdown_pct == 0.0
+    assert r.net_over_gross == 0.0 and r.win_rate == 0.0
+    # Zero starting equity + a losing day must not ZeroDivisionError.
+    r0 = Report([_t(date(2024, 1, 2), -50)], 0.0)
+    assert isinstance(r0.max_drawdown_pct, float)   # no crash
+
+
+def test_net_over_gross_all_losing_is_computed():
+    # All-losing system: gross<0 → ratio is still computed (costs make it worse),
+    # not silently 0.0.
+    trades = [_t(date(2024, 1, 2), -110, gross=-100),
+              _t(date(2024, 1, 3), -210, gross=-200)]
+    r = Report(trades, 100_000)
+    assert r.net_over_gross == round(-320 / -300, 2)   # 1.07, not 0.0
+
+
 def test_payoff_and_cost_retention():
     trades = [_t(date(2024, 1, 2), 300, gross=320),
               _t(date(2024, 1, 3), -100, gross=-90),

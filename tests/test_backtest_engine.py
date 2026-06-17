@@ -39,7 +39,7 @@ def session(breakout_then_target=True):
 
 
 def run(bars, gate_fn=None, **pkw):
-    params = BacktestParams(orb=ORBParams(), slippage_bps=0.0, **pkw)
+    params = BacktestParams(orb=ORBParams(), slippage_bps=0.0, tick_size=0.0, **pkw)
     return asyncio.run(replay_security_day("999", DAY, params, gate_fn, bars=bars))
 
 

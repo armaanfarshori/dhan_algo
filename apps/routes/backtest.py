@@ -8,6 +8,7 @@ CLI, not the browser.
 """
 import json
 import logging
+import re
 from pathlib import Path
 
 from aiohttp import web
@@ -16,11 +17,17 @@ logger = logging.getLogger("dhan.api")
 
 # apps/routes/backtest.py → parents[2] = repo root → research/backtest/results
 _RESULTS = Path(__file__).resolve().parents[2] / "research" / "backtest" / "results"
+_STEM_RE = re.compile(r"[\w\-]+")   # result names are kebab/alnum: M3-YYYY-MM-DD
 
 
 def _safe_stem(name: str) -> str:
-    """Strip any path-traversal — only a bare file stem is allowed."""
-    return Path(name).name.replace("..", "")
+    """Defence-in-depth: `Path(name).name` strips any directory components, then
+    a whitelist (`[\\w\\-]+`) requires a bare alphanumeric/underscore/hyphen stem
+    (anything with a dot/slash/other char → ''). Combined with the `_RESULTS /`
+    prefix this keeps reads inside the results dir. A whitelist beats blacklisting
+    '..' (which also mangled legit names like foo..bar)."""
+    stem = Path(name).name
+    return stem if _STEM_RE.fullmatch(stem) else ""
 
 
 async def backtest_runs_handler(_r: web.Request) -> web.Response:

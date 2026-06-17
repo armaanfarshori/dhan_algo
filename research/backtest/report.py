@@ -49,6 +49,8 @@ class Report:
 
     @property
     def profit_factor(self) -> float:
+        if not self.trades:
+            return 0.0                       # no trades → undefined, not inf
         wins = sum(t.net_pnl for t in self.trades if t.net_pnl > 0)
         losses = abs(sum(t.net_pnl for t in self.trades if t.net_pnl < 0))
         return round(wins / losses, 2) if losses else float("inf")
@@ -72,7 +74,8 @@ class Report:
         for pnl in self.daily_pnl.values():
             equity += pnl
             peak = max(peak, equity)
-            max_dd = max(max_dd, (peak - equity) / peak)
+            if peak > 0:                     # guard: starting_equity=0 / wiped-out
+                max_dd = max(max_dd, (peak - equity) / peak)
         return round(max_dd * 100, 2)
 
     @property
@@ -86,9 +89,11 @@ class Report:
 
     @property
     def net_over_gross(self) -> float:
-        """Cost retention: net ÷ gross. Low ⇒ costs eat the edge."""
+        """Cost retention: net ÷ gross. Low ⇒ costs eat the edge. Computed for
+        any non-zero gross (a losing system has gross<0; the ratio is still
+        informative); 0.0 only when there's no gross P&L at all (no trades)."""
         g = self.total_gross
-        return round(self.total_net / g, 2) if g > 0 else 0.0
+        return round(self.total_net / g, 2) if g != 0 else 0.0
 
     @property
     def top5_day_share(self) -> float:

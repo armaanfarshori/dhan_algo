@@ -42,6 +42,7 @@ class BacktestParams:
     risk_per_trade: float = 0.01
     max_notional_pct: float = 0.20
     slippage_bps: float = 2.0
+    tick_size: float = 0.05            # half-tick slippage floor (cheap/thin names)
     orb: ORBParams = field(default_factory=ORBParams)
 
 
@@ -141,7 +142,7 @@ async def replay_security_day(
             kind, d, qty = pending
             pending = None
             if kind == "ENTER":
-                fill_px = _slip(float(bar["open"]), d.side, params.slippage_bps)
+                fill_px = _slip(float(bar["open"]), d.side, params.slippage_bps, params.tick_size)
                 pos_qty = qty
                 pos_entry_price = fill_px
                 pos_entry_ts = ts
@@ -149,7 +150,7 @@ async def replay_security_day(
                 orb.notify_fill(d.side, qty, fill_px)
             else:   # EXIT
                 exit_side = "SELL" if pos_side == "LONG" else "BUY"
-                fill_px = _slip(float(bar["open"]), exit_side, params.slippage_bps)
+                fill_px = _slip(float(bar["open"]), exit_side, params.slippage_bps, params.tick_size)
                 close_position(fill_px, ts, d.reason)
 
         # 2. Let the strategy see the bar
@@ -173,7 +174,7 @@ async def replay_security_day(
         elif decision.action == "EXIT" and pos_qty != 0:
             if i == n - 1:
                 exit_side = "SELL" if pos_side == "LONG" else "BUY"
-                fill_px = _slip(float(bar["close"]), exit_side, params.slippage_bps)
+                fill_px = _slip(float(bar["close"]), exit_side, params.slippage_bps, params.tick_size)
                 close_position(fill_px, ts, decision.reason)
             else:
                 pending = ("EXIT", decision, 0)
@@ -182,7 +183,7 @@ async def replay_security_day(
     if pos_qty != 0:
         last = df.iloc[-1]
         exit_side = "SELL" if pos_side == "LONG" else "BUY"
-        fill_px = _slip(float(last["close"]), exit_side, params.slippage_bps)
+        fill_px = _slip(float(last["close"]), exit_side, params.slippage_bps, params.tick_size)
         close_position(fill_px, last["time"].to_pydatetime(), "forced EOD close")
 
     return trades
