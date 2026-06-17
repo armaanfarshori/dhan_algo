@@ -372,7 +372,11 @@ async def run_backfill(args, cfg):
 
         ckpt_dir  = Path("/opt/dhan-trading")
         ckpt_dir  = ckpt_dir if ckpt_dir.exists() else Path("/tmp")
-        CKPT_FILE = ckpt_dir / f"backfill_ckpt_{args.exchange_segment}.json"
+        # --force (targeted gap repair) uses a SEPARATE checkpoint file so it never
+        # overwrites/corrupts the main segment checkpoint, and starts at index 0.
+        _force = getattr(args, "force", False)
+        _ckpt_suffix = "_force" if _force else ""
+        CKPT_FILE = ckpt_dir / f"backfill_ckpt_{args.exchange_segment}{_ckpt_suffix}.json"
         id_list   = list(args.security_ids)
         n_total   = len(id_list)
 
@@ -390,7 +394,10 @@ async def run_backfill(args, cfg):
         # Determine the start index
         start_idx = 0
         ckpt_idx  = None
-        if CKPT_FILE.exists():
+        if _force:
+            logger.info("--force: re-processing ALL %d securities from index 0 "
+                        "(gap repair; holes filled via upsert; separate checkpoint)", n_total)
+        if not _force and CKPT_FILE.exists():
             try:
                 d = _json.loads(CKPT_FILE.read_text())
                 if d.get("segment") == args.exchange_segment and d.get("last_id") in id_list:
@@ -407,7 +414,7 @@ async def run_backfill(args, cfg):
             start_idx = ckpt_idx + 1
             logger.info("Checkpoint: resuming at index %d/%d (after security_id=%s)",
                         start_idx, n_total, id_list[ckpt_idx])
-        else:
+        elif not _force:
             # No checkpoint — seed from DB: find furthest already-loaded security
             try:
                 from db import get_session
@@ -547,6 +554,10 @@ def main():
         help="Securities processed in parallel per batch (checkpoint advances per "
              "batch). >1 overlaps fetch+write across securities; keep modest (3-5) "
              "so the shared rate-limiter doesn't trigger DH-904. Default 1 (serial).")
+    parser.add_argument("--force", action="store_true",
+        help="Ignore checkpoint + DB-seed; re-process ALL --ids from index 0 "
+             "(targeted gap repair — fills holes via upsert; uses a SEPARATE "
+             "checkpoint so the main segment checkpoint is untouched).")
 
     raw = parser.parse_args()
     cfg = get_config()
