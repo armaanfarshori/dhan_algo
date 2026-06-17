@@ -48,7 +48,7 @@ _SQL = text("""
     GROUP BY daily.security_id
     HAVING COUNT(*) >= :min_days
        AND AVG(daily.vol) >= :min_vol
-    ORDER BY atr_pct DESC
+    ORDER BY atr_pct DESC, daily.security_id ASC   -- deterministic tiebreak at the LIMIT cut
     LIMIT :n
 """)
 
