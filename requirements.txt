@@ -38,6 +38,13 @@ pytz>=2024.1
 
 # Kronos foundation model (vendored in kronos/ — MIT License)
 torch>=2.0.0,<3
+
+# M2.5 clean-data pipeline + Kronos training/checkpoint I/O
+# (scripts/build_clean_db.py, prepare_kronos_dataset.py, finetune.py;
+#  core/kronos_signal.py syncs an s3:// checkpoint to local cache)
+boto3>=1.34
+pyarrow>=14.0
+tqdm>=4.66
 einops==0.8.1
 huggingface_hub>=0.33.1,<1
 safetensors>=0.4.0

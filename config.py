@@ -74,8 +74,12 @@ class Config(BaseSettings):
 
     # ── Kronos ──────────────────────────────────────────────────────────────
     kronos_tokenizer: str = "NeoQuasar/Kronos-Tokenizer-base"
-    kronos_model: str = "NeoQuasar/Kronos-small"
-    kronos_checkpoint: str = ""           # S3 path after fine-tuning; empty = HF zero-shot
+    kronos_model: str = "NeoQuasar/Kronos-base"
+    # KRONOS_CHECKPOINT: a fine-tuned checkpoint dir. Accepts a local path OR an
+    # s3:// URI (synced to a local cache once on first load — see
+    # core/kronos_signal.KronosSignalEngine._resolve_checkpoint). Empty = HF
+    # zero-shot from kronos_model above.
+    kronos_checkpoint: str = ""
     # Scoring frequency/params follow the Kronos paper (arXiv:2508.02739):
     # NSE is in the pre-training corpus at 5-min+ ONLY (no 1-min), and the
     # paper's price/return-forecasting protocol is lookback 480 @ 5T with
@@ -134,12 +138,23 @@ class Config(BaseSettings):
     db_name: str = "dhan_trading"
     db_user: str = "trader"
     db_password: str = "trader123"
+    # Cleaned replica (M2.5, built by scripts/build_clean_db.py). The M3
+    # backtester reads bars from HERE, not the raw dhan_trading, so the
+    # three-way study runs on the same cleaned universe Kronos trains on.
+    backtest_db_name: str = "dhan_clean"
 
     @property
     def db_url(self) -> str:
+        return self._db_url(self.db_name)
+
+    @property
+    def backtest_db_url(self) -> str:
+        return self._db_url(self.backtest_db_name)
+
+    def _db_url(self, name: str) -> str:
         return (
             f"postgresql+psycopg2://{quote_plus(self.db_user)}:{quote_plus(self.db_password)}"
-            f"@{self.db_host}:{self.db_port}/{self.db_name}"
+            f"@{self.db_host}:{self.db_port}/{name}"
         )
 
     # SEC-10: warn loudly when the known-weak default DB password is used in
