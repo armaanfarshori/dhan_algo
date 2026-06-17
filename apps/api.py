@@ -239,6 +239,10 @@ from apps.routes.system import (  # noqa: E402
     backfill_status_handler,
     system_health_handler,
 )
+from apps.routes.backtest import (  # noqa: E402
+    backtest_runs_handler,
+    backtest_run_handler,
+)
 
 
 # ── Postback webhook (Dhan order-update notifications) ────────────────────────
@@ -342,6 +346,8 @@ def build_app() -> web.Application:
     app.router.add_get("/api/rate-limits", rate_limits_handler)
     app.router.add_get("/api/backfill/status", backfill_status_handler)
     app.router.add_get("/api/system/health", system_health_handler)
+    app.router.add_get("/api/backtest/runs", backtest_runs_handler)
+    app.router.add_get("/api/backtest/runs/{name}", backtest_run_handler)
     app.router.add_post("/postback", postback_handler)
 
     if (DIST_DIR / "assets").exists():
