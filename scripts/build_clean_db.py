@@ -79,6 +79,12 @@ S3_PREFIX  = "kronos/training-data"
 
 MIN_AVG_DAILY_VOLUME  = 50_000
 MIN_TRADING_DAYS      = 480       # ~2 years
+# Intraday completeness: drop names whose 1m-bar days cover < this fraction of
+# their DAILY-bar days. Dhan's intraday archive is shorter/sparser than its daily
+# for some thin names (a full re-backfill can't fill what Dhan doesn't have); such
+# partial 1m histories would bias the M3 backtest + Kronos training. See the
+# 2026-06-17 gap re-scan (131→87 holes, 87 source-capped).
+MIN_INTRADAY_COMPLETENESS = 0.70
 CORP_ACTION_THRESHOLD = 0.15      # 15% overnight gap → drop that session (not the instrument)
 CIRCUIT_BREAKER_VOL   = 1_000     # session volume below this → drop session
 IST_OFFSET_HOURS      = 5.5       # UTC+5:30
@@ -197,6 +203,16 @@ summary AS (
         AVG(day_volume)::BIGINT                       AS avg_daily_volume
     FROM daily_stats
     GROUP BY security_id
+),
+daily_cov AS (
+    -- Daily-bar day count per security — the yardstick for 1m completeness.
+    SELECT security_id, COUNT(DISTINCT time::date) AS daily_days
+    FROM bars
+    WHERE timeframe = '1d'
+      AND security_id IN (
+          SELECT security_id FROM instruments WHERE exchange_segment = 'NSE_EQ'
+      )
+    GROUP BY security_id
 )
 SELECT
     s.security_id,
@@ -208,8 +224,14 @@ SELECT
     s.avg_daily_volume
 FROM summary s
 JOIN instruments i USING (security_id)
+LEFT JOIN daily_cov d USING (security_id)
 WHERE s.trading_days     >= %(min_days)s
   AND s.avg_daily_volume >= %(min_vol)s
+  -- Intraday-completeness gate: drop names whose 1m coverage is below the
+  -- threshold of their daily-bar days (Dhan-source-capped partial histories).
+  -- Names with no daily bars (can't be checked) are kept.
+  AND (d.daily_days IS NULL OR d.daily_days = 0
+       OR s.trading_days::float / d.daily_days >= %(min_completeness)s)
 ORDER BY s.avg_daily_volume DESC
 """
 
@@ -233,8 +255,9 @@ def identify_universe(dry_run=True):
     cur.execute("SET statement_timeout = '600000'")   # 10 minutes
     cur.execute("SET lock_timeout      = '5000'")     # 5 seconds
     cur.execute(IDENTIFY_SQL, {
-        "min_days":    MIN_TRADING_DAYS,
-        "min_vol":     MIN_AVG_DAILY_VOLUME,
+        "min_days":         MIN_TRADING_DAYS,
+        "min_vol":          MIN_AVG_DAILY_VOLUME,
+        "min_completeness": MIN_INTRADAY_COMPLETENESS,
     })
     rows = cur.fetchall()
     cur.close()
@@ -567,11 +590,12 @@ def export_parquet(universe: list[str], workers: int = 4):
         "count":      len(universe),
         "s3_prefix":  f"s3://{S3_BUCKET}/{S3_PREFIX}/",
         "filters": {
-            "min_avg_daily_volume":  MIN_AVG_DAILY_VOLUME,
-            "min_trading_days":      MIN_TRADING_DAYS,
-            "corp_action_threshold": CORP_ACTION_THRESHOLD,
-            "circuit_breaker_vol":   CIRCUIT_BREAKER_VOL,
-            "market_hours_ist":      f"{MARKET_OPEN_IST}–{MARKET_CLOSE_IST}",
+            "min_avg_daily_volume":     MIN_AVG_DAILY_VOLUME,
+            "min_trading_days":         MIN_TRADING_DAYS,
+            "min_intraday_completeness": MIN_INTRADAY_COMPLETENESS,
+            "corp_action_threshold":    CORP_ACTION_THRESHOLD,
+            "circuit_breaker_vol":      CIRCUIT_BREAKER_VOL,
+            "market_hours_ist":         f"{MARKET_OPEN_IST}–{MARKET_CLOSE_IST}",
         },
     }
     import json
