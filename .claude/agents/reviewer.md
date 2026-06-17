@@ -32,7 +32,7 @@ Return your verdict in exactly this shape:
     - [checklist item]: pass / fail — one-line reason
     - ...
     Blocking issues: <numbered list, or "none">
-    Recommendation: <open PR / send back to coder, and what specifically to fix>
+    Recommendation: <merge / send back to coder, and what specifically to fix>
 
 Do not modify any file. Do not run git commit, git merge, or git push. You only advise.
 

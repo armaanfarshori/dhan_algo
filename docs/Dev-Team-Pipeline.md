@@ -30,9 +30,9 @@ Agent files load at session start — restart Claude Code or run `/agents` to pi
 The gatekeeper can't be the thing that edits the code it's judging.
 
 ## How it fits OUR rules (the tweaks vs the stock pipeline)
-- **Branch + PR, never `main`.** `/ship` works on `feat/<slug>`; merge is a human decision,
-  only after green CI and **never during market hours (09:15–15:30 IST)**. See
-  `always-branch-for-changes` / `no-main-commits-during-trading`.
+- **Branch + PR; the AGENT merges** (memory `agent-handles-merges` — not the human), but only
+  after **reviewer APPROVE + green CI + outside market hours (09:15–15:30 IST)**. Never commit
+  straight to `main`. See `always-branch-for-changes` / `no-main-commits-during-trading`.
 - **Public repo:** no real IPs/IDs/tokens in code OR `.pipeline/*.md` (placeholders only).
 - **Safety invariants:** agents never flip `PAPER_TRADING`, edit `.env`, touch AWS/secrets,
   or restart `dhan-trader`/`dhan-api`.
@@ -43,7 +43,10 @@ The gatekeeper can't be the thing that edits the code it's judging.
   `/code-review ultra` still run before merge. `/ship`'s reviewer is the first gate, not the only one.
 
 ## Honest caveats (from the source design)
-- **No auto-merge** — deliberate; merging unattended to `main` is how bad deploys happen.
+- **Agent-merge is gated, not blind.** The stock pipeline never auto-merges; here the agent
+  DOES merge on APPROVE — but only behind reviewer APPROVE + green CI + outside market hours,
+  which are the safety rails that replace the human gate. (Merging unattended to `main` with
+  no gates is how bad deploys happen — these gates are non-negotiable.)
 - **Subagents multiply tokens** (~7× a single thread for subagent-heavy flows) — worth it for
   real features, overkill for typos.
 - For genuine overnight runs you'd drive `/ship` from headless mode (`claude -p "…"`) on a
