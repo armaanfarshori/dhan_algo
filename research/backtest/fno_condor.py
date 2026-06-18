@@ -205,7 +205,7 @@ def price_condor(
                  option chain with per-strike IV).
     dte:         Calendar days to expiry.
     strikes:     Output of :func:`build_condor`.
-    lot:         Lot size (default NIFTY_LOT = 75).
+    lot:         Lot size (default NIFTY_LOT = 65).
 
     Returns
     -------

@@ -1,26 +1,24 @@
-"""F&O Phase-0 data backfill / ingest — NIFTY index options.
+"""F&O Phase-0 data backfill / ingest — NIFTY index options (capture-everything).
 
-Populates the four tables added in Alembic 009 (see docs/fno-handoff.md):
+Populates the tables added in Alembic 009/010:
 
-  • ``backfill_futures_bars``  — NIFTY index-futures OHLCV + open interest from
+  • ``backfill_futures_bars``   — NIFTY index-futures OHLCV + open interest from
         Dhan's historical charts endpoint (``charts/historical`` / ``intraday``,
         NSE_FNO / FUTIDX). Real history is available here.
-  • ``snapshot_atm_iv``        — one ATM-straddle IV row per expiry, pulled from
-        the LIVE option-chain endpoint. **Dhan exposes no historical option
-        chain / IV** (verified against the v2 docs, 2026-06-19), so this is a
-        going-forward EOD collector (run post-close via cron), not a backfill.
-        Historical IV would have to be derived (Black-76 on historical option
-        OHLCV) — deferred; see Open Q#1 in docs/fno-handoff.md.
-  • ``ingest_india_vix``       — India VIX daily OHLC from an NSE public CSV
-        (no API quota). Pure file ingest.
-  • ``build_expiry_calendar``  — NIFTY expiry dates from the option-chain expiry
+  • ``backfill_index_bars``     — Daily OHLCV for IDX_I index instruments (NIFTY 50
+        id "13", India VIX id "21", …). Replaces the old india_vix table (dropped
+        in 010); realized_vol_20d is derived later by core/fno_derived.
+  • ``snapshot_option_chain``   — FULL option-chain capture: one row per
+        (snapshot_time, underlying_scrip, expiry_date, strike, option_type) with
+        all ltp/oi/volume/bid/ask/prev_*/IV/greeks + raw JSONB. ATM IV is also
+        projected into option_atm_iv at capture time.
+  • ``build_expiry_calendar``   — NIFTY expiry dates from the option-chain expiry
         list endpoint, classified weekly/monthly.
 
 Hard invariants (CLAUDE.md + handoff):
   • Historical reads only — this module never touches an order path.
   • All *live* Dhan fetches refuse to run during market hours (09:15–15:30 IST,
-    weekdays) via ``_assert_off_hours``. The ATM-IV snapshot is designed to run
-    just after close. India-VIX CSV ingest is a local file op (no guard needed).
+    weekdays) via ``_assert_off_hours``.
   • Pure parse/extract helpers are deterministic and DB-free so they unit-test
     without creds or a database.
 
@@ -28,22 +26,23 @@ Run live from the trusted machine, off-hours, e.g.::
 
     python -m core.fno_backfill --futures --symbol NIFTY --security-id <id> \
         --from 2024-06-01 --to 2026-06-18
+    python -m core.fno_backfill --index --security-id 13 --symbol NIFTY \
+        --from 2024-06-01 --to 2026-06-18
+    python -m core.fno_backfill --index --security-id 21 --symbol INDIAVIX \
+        --from 2024-06-01 --to 2026-06-18
     python -m core.fno_backfill --expiry-calendar --symbol NIFTY
-    python -m core.fno_backfill --atm-iv --symbol NIFTY          # post-close only
-    python -m core.fno_backfill --india-vix path/to/india_vix.csv
+    python -m core.fno_backfill --chain --symbol NIFTY [--expiry YYYY-MM-DD]
+    python -m core.fno_backfill --atm-iv --symbol NIFTY [--expiry YYYY-MM-DD]
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
-import io
+import json
 import logging
 import math
 from datetime import date, datetime, time, timedelta, timezone
-from pathlib import Path
 from typing import Any, Iterable, Optional
-
-import pandas as pd
 
 logger = logging.getLogger("dhan.fno_backfill")
 
@@ -52,6 +51,9 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 # Underlying scrip ids for the option-chain / expiry-list endpoints (UnderlyingSeg=IDX_I).
 # 13 = NIFTY 50 (confirmed via core/live_feed.py IDX_I subscription).
 SYMBOL_SCRIP: dict[str, int] = {"NIFTY": 13}
+
+# IDX_I feed security ids used by backfill_index_bars.
+INDEX_SECURITY_IDS: dict[str, str] = {"NIFTY": "13", "INDIAVIX": "21"}
 
 # ATM strike step (₹) per underlying.
 SYMBOL_STRIKE_STEP: dict[str, int] = {"NIFTY": 50}
@@ -116,6 +118,18 @@ def _normalize_iv(v: Any) -> Optional[float]:
     return f / 100.0
 
 
+def _safe_float(v: Any) -> Optional[float]:
+    """Return float(v) or None on TypeError/ValueError/None. Used by history
+    parsers to guard against None or non-numeric elements in Dhan's parallel
+    arrays so we never write NULL into NOT-NULL OHLC columns."""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_futures_history(
     raw: dict[str, Any],
     symbol: str,
@@ -141,18 +155,79 @@ def parse_futures_history(
     ois = inner.get("open_interest") or inner.get("oi") or [None] * n
     rows: list[dict[str, Any]] = []
     for i, ts in enumerate(timestamps[:n]):
+        o = _safe_float(opens[i])
+        h = _safe_float(highs[i])
+        lo = _safe_float(lows[i])
+        c = _safe_float(closes[i])
+        if any(v is None for v in (o, h, lo, c)):
+            logger.debug(
+                "parse_futures_history: skipping bar %d (None in OHLC): o=%s h=%s l=%s c=%s",
+                i, o, h, lo, c,
+            )
+            continue
         rows.append(
             {
                 "time": datetime.fromtimestamp(int(ts), tz=timezone.utc),
                 "symbol": symbol,
                 "timeframe": timeframe,
-                "open": float(opens[i]),
-                "high": float(highs[i]),
-                "low": float(lows[i]),
-                "close": float(closes[i]),
-                "volume": int(volumes[i] or 0),
+                "open": o,
+                "high": h,
+                "low": lo,
+                "close": c,
+                "volume": int(_safe_float(volumes[i]) or 0),
                 "open_interest": (None if ois[i] is None else int(ois[i])),
                 "expiry_date": expiry_date,
+            }
+        )
+    return rows
+
+
+def parse_index_history(
+    raw: dict[str, Any],
+    security_id: str,
+    symbol: str,
+    timeframe: str = "1d",
+) -> list[dict[str, Any]]:
+    """Parse a Dhan ``charts/historical|intraday`` response into index_bars rows.
+
+    Same array-parsing / guards as parse_futures_history but produces rows for
+    the ``index_bars`` table: keys time(UTC), security_id, symbol, timeframe,
+    open, high, low, close, volume. Note: realized_vol_20d is NOT set here —
+    it is derived later by core/fno_derived.
+    """
+    inner = (raw.get("data") or raw) if isinstance(raw, dict) else {}
+    timestamps = inner.get("timestamp") or []
+    opens = inner.get("open") or []
+    highs = inner.get("high") or []
+    lows = inner.get("low") or []
+    closes = inner.get("close") or []
+    n = min(len(timestamps), len(opens), len(highs), len(lows), len(closes))
+    if n == 0:
+        return []
+    volumes = inner.get("volume") or [0] * n
+    rows: list[dict[str, Any]] = []
+    for i, ts in enumerate(timestamps[:n]):
+        o = _safe_float(opens[i])
+        h = _safe_float(highs[i])
+        lo = _safe_float(lows[i])
+        c = _safe_float(closes[i])
+        if any(v is None for v in (o, h, lo, c)):
+            logger.debug(
+                "parse_index_history: skipping bar %d (None in OHLC): o=%s h=%s l=%s c=%s",
+                i, o, h, lo, c,
+            )
+            continue
+        rows.append(
+            {
+                "time": datetime.fromtimestamp(int(ts), tz=timezone.utc),
+                "security_id": security_id,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "open": o,
+                "high": h,
+                "low": lo,
+                "close": c,
+                "volume": int(_safe_float(volumes[i]) or 0),
             }
         )
     return rows
@@ -218,64 +293,107 @@ def extract_atm_iv(
     }
 
 
-def parse_india_vix_csv(text: str) -> list[dict[str, Any]]:
-    """Parse an NSE India-VIX history CSV into india_vix rows.
+def parse_option_chain(
+    chain: dict[str, Any],
+    underlying_scrip: int,
+    underlying_seg: str,
+    expiry_date: date,
+    now: Optional[datetime] = None,
+) -> list[dict[str, Any]]:
+    """Parse a Dhan option-chain response into option_chain_snapshot rows.
 
-    NSE's CSV columns vary by export; we match case/space-insensitively on
-    Date + Close (High/Low optional). Date formats ``DD-MMM-YYYY`` and
-    ``YYYY-MM-DD`` are both handled by pandas.
+    Chain shape: ``{"data": {"last_price": <spot>, "oc": {"<strike>":
+    {"ce": {...}, "pe": {...}}, ...}}}``.
 
-    The ``time`` stored for each daily bar is the trading DATE at 00:00 UTC
-    (not midnight IST). This anchors the daily bar to its calendar date in UTC
-    so ``time::date`` joins correctly with futures_bars daily bars, which also
-    land on the same UTC date.
+    For EVERY strike and EVERY side present (ce, pe) emits one row capturing ALL
+    fields. Missing fields → None; never raises on a partial node. If ``data``
+    is null or an error envelope, returns [].
+
+    IV is stored RAW (percent as Dhan returns it) — NOT normalised here.
+    Normalisation is done downstream (extract_atm_iv / fno_derived).
     """
-    # Strip UTF-8 BOM if present (NSE CSVs sometimes include it).
-    text = text.lstrip("﻿")
-    df = pd.read_csv(io.StringIO(text), skipinitialspace=True)
-    if df.empty or df.columns.empty:
+    if not isinstance(chain, dict):
+        return []
+    data = chain.get("data")
+    if not data or not isinstance(data, dict):
+        return []
+    oc = data.get("oc") or {}
+    if not oc:
         return []
 
-    # Normalise column names: lower, strip, remove spaces and underscores.
-    norm = {c: c.strip().lower().replace(" ", "").replace("_", "") for c in df.columns}
-
-    def col(*names: str) -> Optional[str]:
-        for orig, n in norm.items():
-            if n in names:
-                return orig
-        return None
-
-    c_date = col("date")
-    c_close = col("close", "closingvalue", "vixclose")
-    c_high = col("high", "highvalue")
-    c_low = col("low", "lowvalue")
-    if not c_date or not c_close:
-        raise ValueError(
-            f"India VIX CSV missing Date/Close columns; found: {list(df.columns)}"
-        )
-
-    # Parse dates; dayfirst=True handles DD-MMM-YYYY and DD-MM-YYYY; errors→NaT.
-    dates = pd.to_datetime(df[c_date], dayfirst=True, errors="coerce")
-    closes = pd.to_numeric(df[c_close], errors="coerce")
+    spot = data.get("last_price")
+    snapshot_time = (now or _now_ist()).astimezone(timezone.utc)
 
     rows: list[dict[str, Any]] = []
-    for i in range(len(df)):
-        if pd.isna(dates.iloc[i]) or pd.isna(closes.iloc[i]):
+    for strike_key, sides in oc.items():
+        try:
+            strike = float(strike_key)
+        except (TypeError, ValueError):
             continue
-        d: date = dates.iloc[i].date()
-        # Store as calendar DATE at 00:00 UTC — not midnight IST — so that
-        # time::date comparisons align with other UTC-anchored daily bars.
-        t = datetime.combine(d, time(0, 0), tzinfo=timezone.utc)
-        high_raw = pd.to_numeric(df[c_high].iloc[i], errors="coerce") if c_high else float("nan")
-        low_raw = pd.to_numeric(df[c_low].iloc[i], errors="coerce") if c_low else float("nan")
-        rows.append(
-            {
-                "time": t,
-                "close": float(closes.iloc[i]),
-                "high": None if pd.isna(high_raw) else float(high_raw),
-                "low": None if pd.isna(low_raw) else float(low_raw),
-            }
-        )
+        if not isinstance(sides, dict):
+            continue
+        for opt_type, node in (("CE", sides.get("ce")), ("PE", sides.get("pe"))):
+            if node is None:
+                continue
+            if not isinstance(node, dict):
+                continue
+            greeks = node.get("greeks") or {}
+
+            def _f(key: str) -> Optional[float]:
+                v = node.get(key)
+                if v is None:
+                    return None
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return None
+
+            def _i(key: str) -> Optional[int]:
+                v = node.get(key)
+                if v is None:
+                    return None
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    return None
+
+            def _gf(key: str) -> Optional[float]:
+                v = greeks.get(key)
+                if v is None:
+                    return None
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return None
+
+            rows.append(
+                {
+                    "snapshot_time": snapshot_time,
+                    "underlying_scrip": underlying_scrip,
+                    "underlying_seg": underlying_seg,
+                    "expiry_date": expiry_date,
+                    "strike": strike,
+                    "option_type": opt_type,
+                    "security_id": node.get("security_id"),
+                    "ltp": _f("last_price"),
+                    "prev_close": _f("previous_close_price"),
+                    "volume": _i("volume"),
+                    "oi": _i("oi"),
+                    "prev_oi": _i("previous_oi"),
+                    "prev_volume": _i("previous_volume"),
+                    "top_bid_price": _f("top_bid_price"),
+                    "top_ask_price": _f("top_ask_price"),
+                    "top_bid_qty": _i("top_bid_quantity"),
+                    "top_ask_qty": _i("top_ask_quantity"),
+                    "iv": _f("implied_volatility"),  # raw percent, not normalised
+                    "delta": _gf("delta"),
+                    "theta": _gf("theta"),
+                    "gamma": _gf("gamma"),
+                    "vega": _gf("vega"),
+                    "spot": float(spot) if spot is not None else None,
+                    "raw": node,
+                }
+            )
     return rows
 
 
@@ -332,6 +450,26 @@ def _upsert_futures_bars(rows: list[dict[str, Any]]) -> int:
     return _execute_values(sql, tuples)
 
 
+def _upsert_index_bars(rows: list[dict[str, Any]]) -> int:
+    """Upsert rows into index_bars. Conflict key: (security_id, timeframe, time).
+    realized_vol_20d is intentionally excluded — filled by core/fno_derived."""
+    sql = (
+        "INSERT INTO index_bars "
+        "(time, security_id, symbol, timeframe, open, high, low, close, volume) "
+        "VALUES %s ON CONFLICT (security_id, timeframe, time) DO UPDATE SET "
+        "open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low, "
+        "close=EXCLUDED.close, volume=EXCLUDED.volume"
+    )
+    tuples = [
+        (
+            r["time"], r["security_id"], r["symbol"], r["timeframe"],
+            r["open"], r["high"], r["low"], r["close"], r["volume"],
+        )
+        for r in rows
+    ]
+    return _execute_values(sql, tuples)
+
+
 def _upsert_atm_iv(rows: list[dict[str, Any]]) -> int:
     sql = (
         "INSERT INTO option_atm_iv "
@@ -353,13 +491,55 @@ def _upsert_atm_iv(rows: list[dict[str, Any]]) -> int:
     return _execute_values(sql, tuples)
 
 
-def _upsert_india_vix(rows: list[dict[str, Any]]) -> int:
+def _upsert_option_chain_snapshot(rows: list[dict[str, Any]]) -> int:
+    """Upsert full option-chain rows. Conflict key:
+    (snapshot_time, underlying_scrip, expiry_date, strike, option_type).
+    raw is serialised to JSON and cast to ::jsonb server-side."""
     sql = (
-        "INSERT INTO india_vix (time, close, high, low) VALUES %s "
-        "ON CONFLICT (time) DO UPDATE SET "
-        "close=EXCLUDED.close, high=EXCLUDED.high, low=EXCLUDED.low"
+        "INSERT INTO option_chain_snapshot "
+        "(snapshot_time, underlying_scrip, underlying_seg, expiry_date, strike, option_type, "
+        "security_id, ltp, prev_close, volume, oi, prev_oi, prev_volume, "
+        "top_bid_price, top_ask_price, top_bid_qty, top_ask_qty, "
+        "iv, delta, theta, gamma, vega, spot, raw) "
+        "VALUES %s ON CONFLICT (snapshot_time, underlying_scrip, expiry_date, strike, option_type) "
+        "DO UPDATE SET "
+        "underlying_seg=EXCLUDED.underlying_seg, "
+        "security_id=EXCLUDED.security_id, ltp=EXCLUDED.ltp, prev_close=EXCLUDED.prev_close, "
+        "volume=EXCLUDED.volume, oi=EXCLUDED.oi, prev_oi=EXCLUDED.prev_oi, "
+        "prev_volume=EXCLUDED.prev_volume, "
+        "top_bid_price=EXCLUDED.top_bid_price, top_ask_price=EXCLUDED.top_ask_price, "
+        "top_bid_qty=EXCLUDED.top_bid_qty, top_ask_qty=EXCLUDED.top_ask_qty, "
+        "iv=EXCLUDED.iv, delta=EXCLUDED.delta, theta=EXCLUDED.theta, "
+        "gamma=EXCLUDED.gamma, vega=EXCLUDED.vega, spot=EXCLUDED.spot, raw=EXCLUDED.raw"
     )
-    return _execute_values(sql, [(r["time"], r["close"], r["high"], r["low"]) for r in rows])
+    tuples = [
+        (
+            r["snapshot_time"], r["underlying_scrip"], r["underlying_seg"],
+            r["expiry_date"], r["strike"], r["option_type"],
+            r["security_id"], r["ltp"], r["prev_close"],
+            r["volume"], r["oi"], r["prev_oi"], r["prev_volume"],
+            r["top_bid_price"], r["top_ask_price"], r["top_bid_qty"], r["top_ask_qty"],
+            r["iv"], r["delta"], r["theta"], r["gamma"], r["vega"],
+            r["spot"],
+            json.dumps(r["raw"]) if r["raw"] is not None else None,
+        )
+        for r in rows
+    ]
+    # raw column needs ::jsonb cast — use a template
+    template = (
+        "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)"
+    )
+    if not tuples:
+        return 0
+    from psycopg2.extras import execute_values
+
+    from db import get_session
+
+    with get_session() as session:
+        cur = session.connection().connection.cursor()
+        execute_values(cur, sql, tuples, template=template, page_size=500)
+        cur.close()
+    return len(tuples)
 
 
 def _upsert_expiry_calendar(rows: list[dict[str, Any]]) -> int:
@@ -407,46 +587,92 @@ async def backfill_futures_bars(
     return n
 
 
-async def snapshot_atm_iv(
+async def backfill_index_bars(
     client: Any,
+    security_id: str,
     symbol: str,
-    expiry_date: date,
+    from_date: str,
+    to_date: str,
     *,
-    expiry_type: Optional[str] = None,
-    underlying_scrip: Optional[int] = None,
+    timeframe: str = "1d",
     now: Optional[datetime] = None,
 ) -> int:
-    """Pull the LIVE option chain for one expiry, extract ATM IV, upsert one
-    option_atm_iv row. Intended to run post-close (EOD snapshot). Off-hours only
-    — Dhan has no historical option chain, so this only ever samples forward."""
-    _assert_off_hours("snapshot_atm_iv", now)
+    """Fetch IDX_I index OHLCV for one index instrument and upsert into index_bars.
+
+    Used for NIFTY 50 (security_id="13") and India VIX (security_id="21").
+    Off-hours only. realized_vol_20d is NOT set here — derived by core/fno_derived.
+    """
+    _assert_off_hours("backfill_index_bars", now)
+    raw = await client.get_daily_historical(
+        security_id=security_id,
+        exchange_segment="IDX_I",
+        instrument="INDEX",
+        from_date=from_date,
+        to_date=to_date,
+    )
+    rows = parse_index_history(raw, security_id, symbol, timeframe)
+    n = _upsert_index_bars(rows)
+    logger.info("index_bars: upserted %d rows for %s/%s (%s→%s)", n, symbol, security_id, from_date, to_date)
+    return n
+
+
+async def snapshot_option_chain(
+    client: Any,
+    symbol: str = "NIFTY",
+    *,
+    underlying_scrip: Optional[int] = None,
+    underlying_seg: str = "IDX_I",
+    expiry_date: Optional[date] = None,
+    expiry_type: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> dict[str, Any]:
+    """Pull the LIVE option chain for one expiry, capture ALL rows into
+    option_chain_snapshot, and also project the ATM IV into option_atm_iv.
+
+    If ``expiry_date`` is None, the nearest upcoming expiry is picked via
+    ``client.get_fno_expiry_list``. Off-hours only.
+
+    Returns ``{"chain_rows": n, "atm": 0|1}``.
+    """
+    _assert_off_hours("snapshot_option_chain", now)
+    # Capture now once so snapshot_time and option_atm_iv.time are identical.
+    now = now or _now_ist()
     scrip = underlying_scrip if underlying_scrip is not None else SYMBOL_SCRIP[symbol]
     step = SYMBOL_STRIKE_STEP.get(symbol, 50)
-    chain = await client.get_fno_option_chain(scrip, expiry_date.isoformat())
-    row = extract_atm_iv(chain, symbol, expiry_date, expiry_type, step, now)
-    if row is None:
-        logger.warning("snapshot_atm_iv: no ATM node for %s %s", symbol, expiry_date)
-        return 0
-    return _upsert_atm_iv([row])
 
+    if expiry_date is None:
+        raw_expiries = await client.get_fno_expiry_list(scrip, underlying_seg)
+        data = raw_expiries.get("data", raw_expiries) if isinstance(raw_expiries, dict) else raw_expiries
+        parsed = sorted({d for d in (_parse_date(x) for x in (data or [])) if d is not None})
+        today = now.astimezone(_IST).date()
+        future = [d for d in parsed if d >= today]
+        if not future:
+            logger.warning(
+                "snapshot_option_chain: no future expiries for %s (today=%s, all=%s)",
+                symbol, today, parsed,
+            )
+            return {"chain_rows": 0, "atm": 0}
+        expiry_date = min(future)
 
-def ingest_india_vix(csv_source: str | Path) -> int:
-    """Ingest India VIX daily OHLC from an NSE CSV (path or raw CSV text)."""
-    if isinstance(csv_source, Path):
-        text = csv_source.read_text()
-    elif (
-        isinstance(csv_source, str)
-        and "\n" not in csv_source
-        and len(csv_source) < 4096
-        and Path(csv_source).exists()
-    ):
-        text = Path(csv_source).read_text()
+    chain = await client.get_fno_option_chain(scrip, expiry_date.isoformat(), underlying_seg)
+
+    # Full capture — pass the same `now` so snapshot_time is consistent.
+    snap_rows = parse_option_chain(chain, scrip, underlying_seg, expiry_date, now)
+    n = _upsert_option_chain_snapshot(snap_rows)
+    logger.info(
+        "option_chain_snapshot: upserted %d rows for %s %s", n, symbol, expiry_date
+    )
+
+    # Project ATM IV into option_atm_iv (keep that table current) — same `now`.
+    atm_row = extract_atm_iv(chain, symbol, expiry_date, expiry_type, step, now)
+    atm_count = 0
+    if atm_row is not None:
+        _upsert_atm_iv([atm_row])
+        atm_count = 1
     else:
-        text = str(csv_source)
-    rows = parse_india_vix_csv(text)
-    n = _upsert_india_vix(rows)
-    logger.info("india_vix: upserted %d rows", n)
-    return n
+        logger.warning("snapshot_option_chain: no ATM node for %s %s", symbol, expiry_date)
+
+    return {"chain_rows": n, "atm": atm_count}
 
 
 async def build_expiry_calendar(
@@ -454,13 +680,14 @@ async def build_expiry_calendar(
     symbol: str,
     *,
     underlying_scrip: Optional[int] = None,
+    underlying_seg: str = "IDX_I",
     now: Optional[datetime] = None,
 ) -> int:
     """Fetch the live NIFTY expiry list, classify weekly/monthly, upsert
     expiry_calendar. Off-hours only."""
     _assert_off_hours("build_expiry_calendar", now)
     scrip = underlying_scrip if underlying_scrip is not None else SYMBOL_SCRIP[symbol]
-    raw = await client.get_fno_expiry_list(scrip)
+    raw = await client.get_fno_expiry_list(scrip, underlying_seg)
     data = raw.get("data", raw) if isinstance(raw, dict) else raw
     expiries = sorted({d for d in (_parse_date(x) for x in (data or [])) if d is not None})
     rows = [
@@ -477,13 +704,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="F&O Phase-0 data backfill (off-hours only)")
     p.add_argument("--symbol", default="NIFTY")
     p.add_argument("--futures", action="store_true", help="backfill index-futures bars")
-    p.add_argument("--security-id", help="futures contract security id (for --futures)")
+    p.add_argument("--security-id", help="security id (for --futures and --index)")
     p.add_argument("--from", dest="from_date")
     p.add_argument("--to", dest="to_date")
-    p.add_argument("--atm-iv", action="store_true", help="snapshot ATM IV (post-close)")
-    p.add_argument("--expiry", help="expiry date YYYY-MM-DD (for --atm-iv)")
+    p.add_argument(
+        "--index", action="store_true",
+        help="backfill index bars (IDX_I); requires --security-id, --from, --to",
+    )
     p.add_argument("--expiry-calendar", action="store_true", help="build expiry calendar")
-    p.add_argument("--india-vix", metavar="CSV", help="ingest India VIX CSV path")
+    p.add_argument(
+        "--chain", action="store_true",
+        help="snapshot full option chain into option_chain_snapshot (post-close only)",
+    )
+    p.add_argument(
+        "--atm-iv", action="store_true",
+        help="snapshot ATM IV into option_atm_iv (delegates to snapshot_option_chain)",
+    )
+    p.add_argument("--expiry", help="expiry date YYYY-MM-DD (for --chain / --atm-iv)")
     return p
 
 
@@ -503,21 +740,26 @@ async def _amain(args: argparse.Namespace) -> None:
             await backfill_futures_bars(
                 client, args.symbol, args.security_id, args.from_date, args.to_date
             )
+        if args.index:
+            if not args.security_id:
+                raise SystemExit("--index requires --security-id")
+            if not args.from_date or not args.to_date:
+                raise SystemExit("--index requires --from and --to")
+            await backfill_index_bars(
+                client, args.security_id, args.symbol, args.from_date, args.to_date
+            )
         if args.expiry_calendar:
             await build_expiry_calendar(client, args.symbol)
-        if args.atm_iv:
-            exp = _parse_date(args.expiry)
-            if exp is None:
-                raise SystemExit("--atm-iv requires --expiry YYYY-MM-DD")
-            await snapshot_atm_iv(client, args.symbol, exp)
+        if args.chain or args.atm_iv:
+            exp = _parse_date(args.expiry) if args.expiry else None
+            result = await snapshot_option_chain(client, args.symbol, expiry_date=exp)
+            logger.info("snapshot_option_chain result: %s", result)
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     args = _build_arg_parser().parse_args()
-    if args.india_vix:
-        ingest_india_vix(args.india_vix)  # local file op — no client/off-hours guard
-    if args.futures or args.atm_iv or args.expiry_calendar:
+    if args.futures or args.index or args.chain or args.atm_iv or args.expiry_calendar:
         asyncio.run(_amain(args))
 
 

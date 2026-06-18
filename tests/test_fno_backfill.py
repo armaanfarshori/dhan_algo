@@ -92,6 +92,50 @@ def test_parse_futures_history_empty_and_missing_optional_cols():
     assert rows[0]["volume"] == 0 and rows[0]["open_interest"] is None
 
 
+# ── index history parsing ────────────────────────────────────────────────────────
+def test_parse_index_history_basic():
+    raw = {
+        "data": {
+            "timestamp": [1718000000, 1718086400],
+            "open": [23000, 23100], "high": [23200, 23250],
+            "low": [22950, 23050], "close": [23150, 23200],
+            "volume": [500, 600],
+        }
+    }
+    rows = fb.parse_index_history(raw, "13", "NIFTY", "1d")
+    assert len(rows) == 2
+    r = rows[0]
+    assert r["security_id"] == "13"
+    assert r["symbol"] == "NIFTY"
+    assert r["timeframe"] == "1d"
+    assert r["open"] == 23000.0
+    assert r["high"] == 23200.0
+    assert r["low"] == 22950.0
+    assert r["close"] == 23150.0
+    assert r["volume"] == 500
+    assert r["time"].tzinfo is timezone.utc
+    # realized_vol_20d must NOT be present (derived later by fno_derived)
+    assert "realized_vol_20d" not in r
+
+
+def test_parse_index_history_without_volume():
+    """Missing volume key → defaults to 0 (same as parse_futures_history)."""
+    raw = {
+        "data": {
+            "timestamp": [1718000000],
+            "open": [21.5], "high": [22.0], "low": [21.0], "close": [21.8],
+        }
+    }
+    rows = fb.parse_index_history(raw, "21", "INDIAVIX", "1d")
+    assert len(rows) == 1
+    assert rows[0]["volume"] == 0
+
+
+def test_parse_index_history_empty():
+    assert fb.parse_index_history({"data": {"timestamp": []}}, "13", "NIFTY") == []
+    assert fb.parse_index_history({}, "13", "NIFTY") == []
+
+
 # ── ATM IV extraction ────────────────────────────────────────────────────────────
 def _chain(spot=23412.0):
     return {
@@ -174,43 +218,182 @@ def test_extract_atm_iv_negative_dte_returns_none():
     assert row is None
 
 
-# ── India VIX CSV ────────────────────────────────────────────────────────────────
-def test_parse_india_vix_csv_variants():
-    csv_text = "Date,Open,High,Low,Close\n01-Jan-2026,13.1,14.2,12.9,13.5\n02-Jan-2026,13.5,13.8,13.0,13.2\n"
-    rows = fb.parse_india_vix_csv(csv_text)
-    assert len(rows) == 2
-    assert rows[0]["close"] == 13.5 and rows[0]["high"] == 14.2 and rows[0]["low"] == 12.9
-    # ISO date + only Close column
-    rows2 = fb.parse_india_vix_csv("date,close\n2026-01-01,13.5\n")
-    assert rows2[0]["close"] == 13.5 and rows2[0]["high"] is None
+# ── option chain parsing ─────────────────────────────────────────────────────────
+def _full_chain(spot=23412.0):
+    """A two-strike chain with all optional fields filled."""
+    return {
+        "data": {
+            "last_price": spot,
+            "oc": {
+                "23400.000000": {
+                    "ce": {
+                        "security_id": "CE_SEC_1",
+                        "last_price": 120.5,
+                        "previous_close_price": 115.0,
+                        "volume": 10000,
+                        "oi": 50000,
+                        "previous_oi": 48000,
+                        "previous_volume": 9500,
+                        "top_bid_price": 120.0,
+                        "top_ask_price": 121.0,
+                        "top_bid_quantity": 75,
+                        "top_ask_quantity": 100,
+                        "implied_volatility": 12.0,
+                        "greeks": {"delta": 0.5, "theta": -5.2, "gamma": 0.001, "vega": 12.3},
+                    },
+                    "pe": {
+                        "security_id": "PE_SEC_1",
+                        "last_price": 85.0,
+                        "previous_close_price": 90.0,
+                        "volume": 8000,
+                        "oi": 45000,
+                        "previous_oi": 43000,
+                        "previous_volume": 7500,
+                        "top_bid_price": 84.5,
+                        "top_ask_price": 85.5,
+                        "top_bid_quantity": 50,
+                        "top_ask_quantity": 80,
+                        "implied_volatility": 13.0,
+                        "greeks": {"delta": -0.5, "theta": -4.8, "gamma": 0.001, "vega": 11.9},
+                    },
+                },
+                "23450.000000": {
+                    "ce": {
+                        "security_id": "CE_SEC_2",
+                        "last_price": 90.0,
+                        "previous_close_price": 88.0,
+                        "volume": 5000,
+                        "oi": 30000,
+                        "previous_oi": 28000,
+                        "previous_volume": 4800,
+                        "top_bid_price": 89.5,
+                        "top_ask_price": 90.5,
+                        "top_bid_quantity": 40,
+                        "top_ask_quantity": 60,
+                        "implied_volatility": 11.0,
+                        "greeks": {"delta": 0.45, "theta": -4.5, "gamma": 0.0009, "vega": 10.5},
+                    },
+                    "pe": {
+                        "security_id": "PE_SEC_2",
+                        "last_price": 110.0,
+                        "previous_close_price": 112.0,
+                        "volume": 6000,
+                        "oi": 35000,
+                        "previous_oi": 33000,
+                        "previous_volume": 5500,
+                        "top_bid_price": 109.5,
+                        "top_ask_price": 110.5,
+                        "top_bid_quantity": 55,
+                        "top_ask_quantity": 70,
+                        "implied_volatility": 12.5,
+                        "greeks": {"delta": -0.55, "theta": -5.1, "gamma": 0.0009, "vega": 11.2},
+                    },
+                },
+            },
+        }
+    }
 
 
-def test_parse_india_vix_csv_missing_required_column():
-    with pytest.raises(ValueError):
-        fb.parse_india_vix_csv("Date,Open\n01-Jan-2026,13.1\n")
-
-
-def test_parse_india_vix_csv_time_is_00_00_utc():
-    """Daily bar time must be the trading DATE at 00:00 UTC (not 18:30 UTC or midnight IST)."""
-    csv_text = "Date,Open,High,Low,Close\n01-Jan-2026,13.1,14.2,12.9,13.5\n"
-    rows = fb.parse_india_vix_csv(csv_text)
-    assert len(rows) == 1
-    assert rows[0]["time"] == datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
-
-
-def test_parse_india_vix_csv_blank_or_non_numeric_close_skipped():
-    """Rows with blank or non-numeric Close values are skipped; valid rows still parsed."""
-    csv_text = (
-        "Date,Open,High,Low,Close\n"
-        "01-Jan-2026,13.1,14.2,12.9,13.5\n"
-        "02-Jan-2026,,,, \n"          # blank close
-        "03-Jan-2026,13.0,13.5,12.8,N/A\n"  # non-numeric close
-        "04-Jan-2026,13.2,13.7,12.9,13.3\n"
+def test_parse_option_chain_all_rows_and_fields():
+    """Two strikes × two sides = four rows; all fields captured; raw present."""
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=_IST)
+    rows = fb.parse_option_chain(
+        _full_chain(23412.0), 13, "IDX_I", date(2026, 6, 26), now=now
     )
-    rows = fb.parse_india_vix_csv(csv_text)
-    assert len(rows) == 2
-    assert rows[0]["close"] == 13.5
-    assert rows[1]["close"] == 13.3
+    assert len(rows) == 4
+
+    # Every row must have the key fields
+    for r in rows:
+        assert r["underlying_scrip"] == 13
+        assert r["underlying_seg"] == "IDX_I"
+        assert r["expiry_date"] == date(2026, 6, 26)
+        assert r["option_type"] in ("CE", "PE")
+        assert r["snapshot_time"].tzinfo is timezone.utc
+        assert r["spot"] == pytest.approx(23412.0)
+        assert r["raw"] is not None and isinstance(r["raw"], dict)
+
+    # Check the 23400 CE row specifically
+    ce_row = next(r for r in rows if r["strike"] == 23400.0 and r["option_type"] == "CE")
+    assert ce_row["security_id"] == "CE_SEC_1"
+    assert ce_row["ltp"] == pytest.approx(120.5)
+    assert ce_row["prev_close"] == pytest.approx(115.0)
+    assert ce_row["volume"] == 10000
+    assert ce_row["oi"] == 50000
+    assert ce_row["prev_oi"] == 48000
+    assert ce_row["prev_volume"] == 9500
+    assert ce_row["top_bid_price"] == pytest.approx(120.0)
+    assert ce_row["top_ask_price"] == pytest.approx(121.0)
+    assert ce_row["top_bid_qty"] == 75
+    assert ce_row["top_ask_qty"] == 100
+    # IV stored RAW (percent, not normalised)
+    assert ce_row["iv"] == pytest.approx(12.0)
+    assert ce_row["delta"] == pytest.approx(0.5)
+    assert ce_row["theta"] == pytest.approx(-5.2)
+    assert ce_row["gamma"] == pytest.approx(0.001)
+    assert ce_row["vega"] == pytest.approx(12.3)
+
+
+def test_parse_option_chain_iv_is_raw_not_normalised():
+    """IV must be stored as raw percent (12.0), NOT as a fraction (0.12)."""
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=_IST)
+    rows = fb.parse_option_chain(
+        _full_chain(23412.0), 13, "IDX_I", date(2026, 6, 26), now=now
+    )
+    # All IVs must be > 1 (percent scale), not < 0.2 (fraction scale)
+    for r in rows:
+        if r["iv"] is not None:
+            assert r["iv"] > 1.0, f"IV {r['iv']} looks normalised (should be percent)"
+
+
+def test_parse_option_chain_missing_fields_become_none():
+    """A partial node with only a few fields — missing ones → None, no exception."""
+    sparse_chain = {
+        "data": {
+            "last_price": 23400.0,
+            "oc": {
+                "23400.000000": {
+                    "ce": {"last_price": 120.0},   # only ltp; everything else absent
+                }
+            },
+        }
+    }
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=_IST)
+    rows = fb.parse_option_chain(sparse_chain, 13, "IDX_I", date(2026, 6, 26), now=now)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["option_type"] == "CE"
+    assert r["ltp"] == pytest.approx(120.0)
+    assert r["prev_close"] is None
+    assert r["volume"] is None
+    assert r["oi"] is None
+    assert r["iv"] is None
+    assert r["delta"] is None
+
+
+def test_parse_option_chain_error_envelope_returns_empty():
+    """If data is null or missing (error envelope from Dhan), return []."""
+    assert fb.parse_option_chain({"status": "error", "data": None}, 13, "IDX_I", date(2026, 6, 26)) == []
+    assert fb.parse_option_chain({}, 13, "IDX_I", date(2026, 6, 26)) == []
+    assert fb.parse_option_chain({"data": {}}, 13, "IDX_I", date(2026, 6, 26)) == []
+
+
+def test_parse_option_chain_only_ce_side_present():
+    """If only CE is in the node (pe key absent), emit one row per strike."""
+    chain = {
+        "data": {
+            "last_price": 23400.0,
+            "oc": {
+                "23400.000000": {
+                    "ce": {"last_price": 120.0, "implied_volatility": 12.0},
+                    # pe absent
+                }
+            },
+        }
+    }
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=_IST)
+    rows = fb.parse_option_chain(chain, 13, "IDX_I", date(2026, 6, 26), now=now)
+    assert len(rows) == 1
+    assert rows[0]["option_type"] == "CE"
 
 
 # ── expiry classification ────────────────────────────────────────────────────────
@@ -240,11 +423,11 @@ class _FakeClient:
                          "low": [0.5], "close": [1.5], "volume": [10], "open_interest": [5]}}
 
     async def get_fno_option_chain(self, scrip, expiry, underlying_seg="IDX_I"):
-        self.calls.append(("chain", scrip, expiry))
-        return _chain(23412.0)
+        self.calls.append(("chain", scrip, expiry, underlying_seg))
+        return _full_chain(23412.0)
 
     async def get_fno_expiry_list(self, scrip, underlying_seg="IDX_I"):
-        self.calls.append(("expiry", scrip))
+        self.calls.append(("expiry", scrip, underlying_seg))
         return {"data": ["2026-06-26", "2026-06-04", "2026-07-31"]}
 
 
@@ -269,21 +452,36 @@ def test_backfill_futures_bars_refuses_in_market_hours(monkeypatch):
     assert client.calls == []   # no live call was made
 
 
-def test_snapshot_atm_iv_off_hours(monkeypatch):
+def test_backfill_index_bars_off_hours_calls_and_upserts(monkeypatch):
+    """backfill_index_bars: off-hours → calls get_daily_historical with IDX_I/INDEX,
+    parses via parse_index_history, upserts via _upsert_index_bars."""
     captured = {}
-    monkeypatch.setattr(fb, "_upsert_atm_iv", _capture(captured))
+    monkeypatch.setattr(fb, "_upsert_index_bars", _capture(captured))
     client = _FakeClient()
     now = datetime(2026, 6, 20, 18, 0, tzinfo=_IST)
-    n = asyncio.run(fb.snapshot_atm_iv(client, "NIFTY", date(2026, 6, 26), expiry_type="weekly", now=now))
-    assert n == 1 and captured["rows"][0]["atm_strike"] == 23400
-    assert client.calls[0] == ("chain", 13, "2026-06-26")
+    n = asyncio.run(
+        fb.backfill_index_bars(client, "13", "NIFTY", "2024-06-01", "2026-06-18", now=now)
+    )
+    assert n == 1
+    assert len(client.calls) == 1
+    call = client.calls[0]
+    assert call[0] == "hist"
+    assert call[1]["exchange_segment"] == "IDX_I"
+    assert call[1]["instrument"] == "INDEX"
+    assert call[1]["security_id"] == "13"
+    row = captured["rows"][0]
+    assert row["security_id"] == "13"
+    assert row["symbol"] == "NIFTY"
+    assert row["timeframe"] == "1d"
+    assert row["time"].tzinfo is timezone.utc
 
 
-def test_snapshot_atm_iv_refuses_in_market_hours():
+def test_backfill_index_bars_refuses_in_market_hours(monkeypatch):
+    monkeypatch.setattr(fb, "_upsert_index_bars", lambda rows: 1 / 0)  # must never run
     client = _FakeClient()
+    now = datetime(2026, 6, 15, 11, 0, tzinfo=_IST)
     with pytest.raises(RuntimeError, match="market hours"):
-        asyncio.run(fb.snapshot_atm_iv(client, "NIFTY", date(2026, 6, 26),
-                                       now=datetime(2026, 6, 15, 11, 0, tzinfo=_IST)))
+        asyncio.run(fb.backfill_index_bars(client, "13", "NIFTY", "a", "b", now=now))
     assert client.calls == []
 
 
@@ -309,24 +507,185 @@ def test_build_expiry_calendar_refuses_in_market_hours():
     assert client.calls == []
 
 
-def test_ingest_india_vix_text(monkeypatch):
-    captured = {}
-    monkeypatch.setattr(fb, "_upsert_india_vix", _capture(captured))
-    n = fb.ingest_india_vix("Date,Close\n01-Jan-2026,13.5\n02-Jan-2026,13.2\n")
-    assert n == 2 and len(captured["rows"]) == 2
+def test_snapshot_option_chain_off_hours_full_capture(monkeypatch):
+    """snapshot_option_chain: off-hours → full chain upserted + ATM projected."""
+    chain_captured = {}
+    atm_captured = {}
+    monkeypatch.setattr(fb, "_upsert_option_chain_snapshot", _capture(chain_captured))
+    monkeypatch.setattr(fb, "_upsert_atm_iv", _capture(atm_captured))
+
+    client = _FakeClient()
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=_IST)
+    result = asyncio.run(
+        fb.snapshot_option_chain(
+            client, "NIFTY",
+            expiry_date=date(2026, 6, 26),
+            expiry_type="weekly",
+            now=now,
+        )
+    )
+    # Two strikes × two sides = 4 chain rows
+    assert result["chain_rows"] == 4
+    assert result["atm"] == 1
+
+    # chain rows contain all expected fields
+    assert len(chain_captured["rows"]) == 4
+    for r in chain_captured["rows"]:
+        assert r["underlying_scrip"] == 13
+        assert r["expiry_date"] == date(2026, 6, 26)
+        assert r["raw"] is not None
+
+    # ATM row projected
+    assert len(atm_captured["rows"]) == 1
+    assert atm_captured["rows"][0]["atm_strike"] == 23400
+
+    # Client called get_fno_option_chain (NOT get_fno_expiry_list — expiry_date was given)
+    assert any(c[0] == "chain" for c in client.calls)
+    assert not any(c[0] == "expiry" for c in client.calls)
 
 
-def test_ingest_india_vix_from_file(monkeypatch, tmp_path):
-    """ingest_india_vix should read from a file path (string), parse the CSV,
-    and call _upsert_india_vix with the resulting rows."""
-    csv_content = "Date,Open,High,Low,Close\n01-Jan-2026,13.1,14.2,12.9,13.5\n02-Jan-2026,13.5,13.8,13.0,13.2\n"
-    tmp_file = tmp_path / "india_vix.csv"
-    tmp_file.write_text(csv_content)
+def test_snapshot_option_chain_picks_nearest_expiry_when_none(monkeypatch):
+    """If expiry_date is None, snapshot_option_chain calls get_fno_expiry_list
+    and picks the MINIMUM FUTURE expiry (past expiries are filtered out).
+    Fake client returns ["2026-06-26", "2026-06-04", "2026-07-31"]; now=2026-06-20
+    so 2026-06-04 is in the past → nearest future = 2026-06-26."""
+    chain_captured = {}
+    atm_captured = {}
+    monkeypatch.setattr(fb, "_upsert_option_chain_snapshot", _capture(chain_captured))
+    monkeypatch.setattr(fb, "_upsert_atm_iv", _capture(atm_captured))
 
-    captured = {}
-    monkeypatch.setattr(fb, "_upsert_india_vix", _capture(captured))
-    n = fb.ingest_india_vix(str(tmp_file))
-    assert n == 2
-    assert len(captured["rows"]) == 2
-    assert captured["rows"][0]["close"] == 13.5
-    assert captured["rows"][1]["close"] == 13.2
+    client = _FakeClient()
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=_IST)
+    result = asyncio.run(fb.snapshot_option_chain(client, "NIFTY", now=now))
+
+    expiry_call = next(c for c in client.calls if c[0] == "expiry")
+    chain_call = next(c for c in client.calls if c[0] == "chain")
+    assert expiry_call is not None
+    # 2026-06-04 is in the past relative to now=2026-06-20; nearest FUTURE = 2026-06-26
+    assert chain_call[2] == "2026-06-26"
+    assert result["chain_rows"] == 4
+
+
+def test_snapshot_option_chain_refuses_in_market_hours(monkeypatch):
+    monkeypatch.setattr(fb, "_upsert_option_chain_snapshot", lambda rows: 1 / 0)
+    client = _FakeClient()
+    now = datetime(2026, 6, 15, 11, 0, tzinfo=_IST)
+    with pytest.raises(RuntimeError, match="market hours"):
+        asyncio.run(
+            fb.snapshot_option_chain(client, "NIFTY", expiry_date=date(2026, 6, 26), now=now)
+        )
+    assert client.calls == []
+
+
+# ── new QA-driven tests ──────────────────────────────────────────────────────────
+
+
+def test_snapshot_option_chain_picks_nearest_FUTURE_expiry_not_past(monkeypatch):
+    """Nearest-expiry auto-pick must exclude past dates.
+
+    Expiry list mixes a past date (2026-06-10), today (2026-06-20, boundary
+    included), and future dates (2026-06-26, 2026-07-31).  now = 2026-06-20 so
+    'today' is 2026-06-20.  Dates >= today = [2026-06-20, 2026-06-26, 2026-07-31];
+    nearest = 2026-06-20.  The chain call must use 2026-06-20, NOT 2026-06-10.
+    """
+    chain_captured = {}
+    atm_captured = {}
+    monkeypatch.setattr(fb, "_upsert_option_chain_snapshot", _capture(chain_captured))
+    monkeypatch.setattr(fb, "_upsert_atm_iv", _capture(atm_captured))
+
+    class _FakeClientMixed(_FakeClient):
+        async def get_fno_expiry_list(self, scrip, underlying_seg="IDX_I"):
+            self.calls.append(("expiry", scrip, underlying_seg))
+            # deliberately has a past date first so naive min() would pick it
+            return {"data": ["2026-06-10", "2026-06-20", "2026-06-26", "2026-07-31"]}
+
+    client = _FakeClientMixed()
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=_IST)
+    result = asyncio.run(fb.snapshot_option_chain(client, "NIFTY", now=now))
+
+    chain_call = next(c for c in client.calls if c[0] == "chain")
+    # 2026-06-10 is in the past; nearest future (>= today 2026-06-20) = 2026-06-20
+    assert chain_call[2] == "2026-06-20"
+    assert result["chain_rows"] == 4
+
+
+def test_snapshot_option_chain_all_past_expiries_returns_empty(monkeypatch):
+    """If ALL expiries are in the past, return {"chain_rows": 0, "atm": 0}
+    without calling get_fno_option_chain."""
+    monkeypatch.setattr(fb, "_upsert_option_chain_snapshot", lambda rows: 1 / 0)
+    monkeypatch.setattr(fb, "_upsert_atm_iv", lambda rows: 1 / 0)
+
+    class _FakeClientAllPast(_FakeClient):
+        async def get_fno_expiry_list(self, scrip, underlying_seg="IDX_I"):
+            self.calls.append(("expiry", scrip, underlying_seg))
+            return {"data": ["2026-06-01", "2026-06-10", "2026-06-15"]}
+
+    client = _FakeClientAllPast()
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=_IST)
+    result = asyncio.run(fb.snapshot_option_chain(client, "NIFTY", now=now))
+
+    assert result == {"chain_rows": 0, "atm": 0}
+    # get_fno_option_chain must NOT have been called
+    assert not any(c[0] == "chain" for c in client.calls)
+
+
+def test_parse_option_chain_only_pe_node_present():
+    """A node that has only 'pe' (no 'ce' key) emits exactly one PE row."""
+    chain = {
+        "data": {
+            "last_price": 23400.0,
+            "oc": {
+                "23400.000000": {
+                    "pe": {"last_price": 85.0, "implied_volatility": 13.0},
+                    # ce key absent
+                }
+            },
+        }
+    }
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=_IST)
+    rows = fb.parse_option_chain(chain, 13, "IDX_I", date(2026, 6, 26), now=now)
+    assert len(rows) == 1
+    assert rows[0]["option_type"] == "PE"
+    assert rows[0]["ltp"] == pytest.approx(85.0)
+    assert rows[0]["iv"] == pytest.approx(13.0)
+
+
+def test_parse_option_chain_non_dict_side_is_skipped():
+    """If a side value (ce or pe) is a non-dict (e.g. a string), it must be
+    silently skipped — no crash, no partial row emitted."""
+    chain = {
+        "data": {
+            "last_price": 23400.0,
+            "oc": {
+                "23400.000000": {
+                    "ce": "bad",          # non-dict CE — must be skipped
+                    "pe": {"last_price": 85.0},  # valid PE — must produce one row
+                }
+            },
+        }
+    }
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=_IST)
+    rows = fb.parse_option_chain(chain, 13, "IDX_I", date(2026, 6, 26), now=now)
+    assert len(rows) == 1
+    assert rows[0]["option_type"] == "PE"
+
+
+def test_parse_index_history_skips_bar_with_none_close():
+    """A bar where close is None or '' must be skipped entirely — no crash,
+    row count is reduced by one for each bad bar."""
+    raw = {
+        "data": {
+            "timestamp": [1718000000, 1718086400, 1718172800],
+            "open":  [23000, 23100, 23200],
+            "high":  [23200, 23250, 23300],
+            "low":   [22950, 23050, 23150],
+            "close": [23150, None, 23250],   # middle bar has None close
+            "volume": [500, 600, 700],
+        }
+    }
+    rows = fb.parse_index_history(raw, "13", "NIFTY", "1d")
+    # The second bar (None close) must be skipped → only 2 rows
+    assert len(rows) == 2
+    closes = [r["close"] for r in rows]
+    assert 23150.0 in closes
+    assert 23250.0 in closes
