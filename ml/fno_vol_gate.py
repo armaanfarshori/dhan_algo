@@ -133,8 +133,8 @@ def gate_decision(
     ----------
     realized_vol:
         Predicted annualised realized vol (fraction). For Phase-0 this is the
-        trailing realized_vol_20d from futures_bars (persistence proxy — see
-        module docstring). Must be non-negative.
+        trailing realized_vol_20d of the NIFTY 50 SPOT INDEX (index_bars,
+        persistence proxy — see module docstring). Must be non-negative.
     implied_vol:
         ATM straddle IV (annualised fraction) from option_atm_iv.straddle_iv.
         Must be strictly positive.

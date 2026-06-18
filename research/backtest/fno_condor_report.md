@@ -86,6 +86,9 @@ session). The §0 result was produced exactly this way:
 2. Ingest: `sync_fno_instruments()`; `backfill_index_bars(c, "13", "NIFTY", "2018-01-01", today)`;
    `backfill_index_bars(c, "21", "INDIAVIX", "2022-01-01", today)`; `build_expiry_calendar(c, "NIFTY")`;
    one `snapshot_option_chain(c, "NIFTY")` to start the forward IV record.
+   (`backfill_index_bars` / `build_expiry_calendar` / `snapshot_option_chain` are **async** — run
+   them inside `asyncio.run(...)` with a `DhanClient` built from the cached token;
+   `sync_fno_instruments` + `compute_index_realized_vol` are sync.)
 3. `compute_index_realized_vol("13")` → fills `index_bars.realized_vol_20d`.
 4. `k = calibrate_threshold(samples_from_db(source="vix"))`;
    `run_backtest(cycles_from_db("NIFTY", mode="weekly"), k=k, move_mult=1.5)`.
@@ -148,6 +151,14 @@ in raw rupees for the fixed capital allocation (default ₹2,00,000).  This make
 scale-dependent: doubling the position size doubles both mean and std, leaving Sharpe
 unchanged.  However, comparisons across different `capital` values or lot sizes are
 meaningless.  The metric is only informative within a single, consistent parameterisation.
+
+**(g) Cycle boundaries are synthetic ISO-weeks, not actual expiries.**
+`mode="weekly"` uses the last trading day of each ISO week as the cycle boundary (Dhan's
+expiry list is forward-only, so historical expiry dates aren't available). This is a faithful
+~weekly cadence, but it does not align exactly to the real NIFTY weekly expiry day (which
+itself changed weekday over 2024–25), and a rare fully-closed ISO week would yield a >7-day
+("multi-week") cycle treated like a normal one. Negligible for a regime-level screen; exact
+expiry alignment comes once per-expiry data accrues forward (`mode="expiry_calendar"`).
 
 ### Net interpretation
 

@@ -32,7 +32,6 @@ from research.backtest.fno_costs import (
 # ---------------------------------------------------------------------------
 try:
     from research.backtest.fno_condor import (
-        NIFTY_LOT,
         black76_call,
         black76_put,
         build_condor,
