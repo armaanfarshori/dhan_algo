@@ -16,7 +16,7 @@ from engine.risk import RiskEngine, RiskParams
 from engine.types import Fill, OrderIntent, Position
 from strategies.orb import ORB, ORBParams
 
-from apps.trader import flatten_all, reregister_position_risk
+from apps.trader import flatten_all, reregister_position_risk, make_ltp_lookup
 
 
 # ─── Fakes ──────────────────────────────────────────────────────────────────
@@ -101,6 +101,49 @@ def test_flatten_all_applies_fill_and_releases_on_success():
     assert orb.position == 0                  # notify_flat ran
 
 
+def test_flatten_all_uses_avg_price_when_last_price_zero():
+    """A never-ticked position (last_price==0) must be flattened on its entry
+    avg_price — the executor rejects ref_price<=0, so without this fallback the
+    position would be left naked past the kill switch."""
+    pos = Position(security_id="111", qty=8, avg_price=123.5)
+    port = FakePortfolio({"111": pos})
+    risk = _risk_engine(port)
+    risk.register_risk("111", 2_000)
+
+    orb = ORB("111")
+    orb.position = 8
+    runner = FakeRunner("111", orb, last_price=0.0)   # never ticked
+    executor = FakeExecutor(fill_sids=None)           # fills everything
+
+    asyncio.run(flatten_all([runner], port, executor, risk, "kill", "NSE_EQ"))
+
+    assert len(executor.submitted) == 1
+    submitted = executor.submitted[0]
+    assert submitted.side == "SELL"
+    assert submitted.qty == 8
+    # ref_price was the avg_price (the FakeExecutor stamps ref_price onto the fill)
+    assert port.fills_applied[0].price == 123.5
+    assert risk.committed_risk == 0
+    assert orb.position == 0
+
+
+def test_flatten_all_skips_when_no_price_and_no_avg_but_releases_risk():
+    """No last_price AND no avg_price → cannot submit (ref<=0), but the risk slot
+    is still released unconditionally."""
+    pos = Position(security_id="111", qty=4, avg_price=0.0)
+    port = FakePortfolio({"111": pos})
+    risk = _risk_engine(port)
+    risk.register_risk("111", 1_000)
+    orb = ORB("111")
+    runner = FakeRunner("111", orb, last_price=0.0)
+    executor = FakeExecutor(fill_sids=None)
+
+    asyncio.run(flatten_all([runner], port, executor, risk, "kill", "NSE_EQ"))
+
+    assert len(executor.submitted) == 0   # never submitted (ref_price<=0)
+    assert risk.committed_risk == 0       # slot still released
+
+
 def test_flatten_all_skips_flat_positions_but_still_clears_risk_map():
     """A position already flat is not re-submitted; nothing to release."""
     port = FakePortfolio({"111": Position(security_id="111", qty=0)})
@@ -113,6 +156,66 @@ def test_flatten_all_skips_flat_positions_but_still_clears_risk_map():
 
     assert len(executor.submitted) == 0
     assert risk.committed_risk == 0
+
+
+# ─── make_ltp_lookup — stale-LTP risk guard (QA P1) ──────────────────────────
+
+class _FakeFeed:
+    def __init__(self, ltp: float, age):
+        self._ltp = ltp
+        self._age = age
+
+    def get_ltp(self, sid: str) -> float:
+        return self._ltp
+
+    def get_tick_age_s(self, sid: str):
+        return self._age
+
+
+def test_ltp_lookup_uses_fresh_ws_price():
+    feed = _FakeFeed(ltp=150.0, age=10.0)        # fresh (age <= 60)
+    runner = FakeRunner("111", ORB("111"), last_price=140.0)
+    lookup = make_ltp_lookup(feed, [runner], stale_s=60.0)
+    assert lookup("111") == 150.0                # fresh WS price wins
+
+
+def test_ltp_lookup_falls_back_to_runner_last_price_when_stale():
+    feed = _FakeFeed(ltp=150.0, age=120.0)       # stale (age > 60)
+    runner = FakeRunner("111", ORB("111"), last_price=140.0)
+    lookup = make_ltp_lookup(feed, [runner], stale_s=60.0)
+    assert lookup("111") == 140.0                # falls back to REST-refreshed last_price
+
+
+def test_ltp_lookup_falls_back_when_age_none():
+    feed = _FakeFeed(ltp=150.0, age=None)        # cold cache → treat as stale
+    runner = FakeRunner("111", ORB("111"), last_price=140.0)
+    lookup = make_ltp_lookup(feed, [runner], stale_s=60.0)
+    assert lookup("111") == 140.0
+
+
+def test_ltp_lookup_warns_and_uses_stale_ws_when_no_fallback(caplog):
+    """No fresh price and no runner last_price → warn (rate-limited) and prefer
+    the stale non-zero WS price over 0 (never price a held position as worthless)."""
+    import logging
+    feed = _FakeFeed(ltp=150.0, age=120.0)       # stale WS price, no fallback
+    runner = FakeRunner("111", ORB("111"), last_price=0.0)
+    lookup = make_ltp_lookup(feed, [runner], stale_s=60.0, warn_every_s=60.0)
+
+    with caplog.at_level(logging.WARNING, logger="dhan.trader"):
+        first = lookup("111")
+        second = lookup("111")                   # within warn window → no 2nd warning
+
+    assert first == 150.0                         # stale WS price preferred over 0
+    assert second == 150.0
+    warnings = [r for r in caplog.records if "no fresh price" in r.message]
+    assert len(warnings) == 1, "warning must be rate-limited (once per window)"
+
+
+def test_ltp_lookup_returns_zero_when_nothing_available():
+    feed = _FakeFeed(ltp=0.0, age=None)          # no WS price at all
+    runner = FakeRunner("111", ORB("111"), last_price=0.0)
+    lookup = make_ltp_lookup(feed, [runner], stale_s=60.0)
+    assert lookup("111") == 0.0
 
 
 # ─── reregister_position_risk (bug d) ─────────────────────────────────────────

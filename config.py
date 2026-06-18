@@ -52,6 +52,11 @@ class Config(BaseSettings):
     max_orders_per_session: int = 4
     max_open_positions: int = 10
     paper_slippage_bps: float = 2.0       # adverse slippage on simulated fills
+    # The risk loop must not price the daily-loss halt / equity snapshot off a
+    # frozen feed. A WS tick older than this (or no tick at all) is treated as
+    # stale: ltp_lookup falls back to the runner's REST-refreshed last_price and
+    # logs a WARNING so a frozen feed is visible.
+    risk_ltp_stale_s: float = 60.0
 
     # ── ORB strategy ────────────────────────────────────────────────────────
     orb_range_minutes: int = 15
