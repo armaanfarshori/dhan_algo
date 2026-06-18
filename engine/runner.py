@@ -37,11 +37,14 @@ class StrategyRunner:
     def __init__(self, strategy: ORB, *, client, feed, gate, risk, executor,
                  portfolio, exchange_segment: str = "NSE_EQ",
                  poll_interval: float = 20.0, poll_offset: float = 0.0,
-                 max_entries_per_session: int = 4):
+                 max_entries_per_session: int = 4, batched_ohlc=None):
         self.strategy = strategy
         self.sid = strategy.security_id
         self._client = client
         self._feed = feed
+        # Shared, coalescing, TTL-cached REST OHLC fallback. When None the
+        # runner falls back to a per-sid get_ohlc (legacy / test path).
+        self._batched_ohlc = batched_ohlc
         self._gate = gate
         self._risk = risk
         self._executor = executor
@@ -103,6 +106,16 @@ class StrategyRunner:
                     "Runner %s: no fresh price — running exit logic on last known ₹%.2f",
                     self.sid, self.last_price)
                 price = high = low = self.last_price
+            elif pos.qty != 0 and pos.avg_price > 0:
+                # Never-ticked position (feed+REST both gave nothing, no prior
+                # last_price): the executor rejects ref_price<=0, so a stop/EOD
+                # exit could never fire and the position would be stuck open.
+                # Fall back to the entry avg_price as the ref so exit logic can
+                # still run. This is a last resort — surface it loudly.
+                logger.critical(
+                    "Runner %s: no price at all — running exit logic on avg_price ₹%.2f "
+                    "(never-ticked position)", self.sid, pos.avg_price)
+                price = high = low = pos.avg_price
             else:
                 return
         self.last_price = price
@@ -143,10 +156,19 @@ class StrategyRunner:
                 if ltp > 0:
                     ohlc = tick.get("ohlc", {})
                     return ltp, float(ohlc.get("high") or ltp), float(ohlc.get("low") or ltp)
-        # REST fallback
+        # REST fallback.
+        # Prefer the SHARED batched fetcher: it coalesces all concurrent stale
+        # lookups into ONE get_ohlc call for the whole watchlist, so N quiet
+        # names no longer fire N simultaneous single-sid calls → no 429 burst.
+        # Falls back to a per-sid get_ohlc when no batcher is wired (tests).
         try:
-            data = await self._client.get_ohlc({self._segment: [int(self.sid)]})
-            t = data.get("data", {}).get(self._segment, {}).get(self.sid, {})
+            if self._batched_ohlc is not None:
+                t = await self._batched_ohlc.get(self.sid)
+                if not t:
+                    return 0.0, None, None
+            else:
+                data = await self._client.get_ohlc({self._segment: [int(self.sid)]})
+                t = data.get("data", {}).get(self._segment, {}).get(self.sid, {})
             ltp = float(t.get("last_price") or 0)
             ohlc = t.get("ohlc", {})
             return ltp, float(ohlc.get("high") or ltp), float(ohlc.get("low") or ltp)

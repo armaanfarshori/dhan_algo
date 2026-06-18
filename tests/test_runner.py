@@ -655,3 +655,78 @@ def test_runner_uses_ws_tick_when_fresh():
     assert fresh_feed.ohlc_tick_calls == 1, "feed.get_ohlc_tick() must be called for fresh tick"
     price, _, _ = strategy.ticks_received[0]
     assert price == 105.0, f"strategy must see WS price (105.0) — got {price}"
+
+
+# ─── 13. Batched OHLC fallback ────────────────────────────────────────────────
+
+class _CountingBatchedOhlc:
+    """Stand-in for core.batched_ohlc.BatchedOhlc — records get() calls."""
+
+    def __init__(self, ltp: float = 200.0):
+        self._ltp = ltp
+        self.calls: list = []
+
+    async def get(self, sid: str):
+        self.calls.append(sid)
+        return {"last_price": self._ltp,
+                "ohlc": {"high": self._ltp + 1, "low": self._ltp - 1}}
+
+
+def test_runner_uses_batched_ohlc_on_stale_tick():
+    """When the WS tick is stale and a batched fetcher is wired, the runner must
+    use it instead of the per-sid client.get_ohlc (the 429-burst fix)."""
+    stale_feed = FakeFeedWithAge(ltp=105.0, age_s=_FEED_FRESH_S + 5)
+    per_sid_client = FakeClient(ltp=999.0)   # must NOT be used
+    batched = _CountingBatchedOhlc(ltp=200.0)
+
+    runner, strategy, *_ = make_runner()
+    runner._feed = stale_feed
+    runner._client = per_sid_client
+    runner._batched_ohlc = batched
+
+    asyncio.run(runner._poll_once(ist(10, 0)))
+
+    assert batched.calls == ["42"], "stale lookup must go through the batched fetcher"
+    assert len(per_sid_client.calls) == 0, "per-sid get_ohlc must NOT be called"
+    price, _, _ = strategy.ticks_received[0]
+    assert price == 200.0
+
+
+# ─── 14. avg_price fallback when never ticked ────────────────────────────────
+
+def test_poll_falls_back_to_avg_price_when_never_ticked():
+    """A held position with no fresh price, no prior last_price, but a known
+    entry avg_price must still run exit logic priced off avg_price (so EOD /
+    stop exits fire). ORB never enters while holding, so a stale price is safe.
+    """
+    decision = Decision(action="EXIT", reason="EOD square-off")
+    open_pos = Position(security_id="42", qty=5, avg_price=102.0)
+    port = FakePortfolio(position=open_pos)
+
+    # ltp=0 → _get_price returns 0; runner.last_price stays 0 (never ticked).
+    runner, strategy, gate, risk, executor, _ = make_runner(
+        decision=decision, portfolio=port, ltp=0.0)
+    assert runner.last_price == 0.0
+
+    asyncio.run(runner._poll_once(ist(15, 25)))
+
+    # Exit fired, priced off avg_price.
+    assert len(executor.submitted) == 1
+    exit_intent, ref_price = executor.submitted[0]
+    assert exit_intent.side == "SELL"
+    assert ref_price == 102.0
+
+
+def test_poll_no_price_no_avg_returns_early():
+    """No price AND no avg_price (qty!=0 but avg_price 0) → poll returns without
+    submitting (avoids ref_price<=0 which the executor rejects)."""
+    decision = Decision(action="EXIT", reason="EOD square-off")
+    open_pos = Position(security_id="42", qty=5, avg_price=0.0)
+    port = FakePortfolio(position=open_pos)
+
+    runner, strategy, gate, risk, executor, _ = make_runner(
+        decision=decision, portfolio=port, ltp=0.0)
+
+    asyncio.run(runner._poll_once(ist(15, 25)))
+
+    assert len(executor.submitted) == 0

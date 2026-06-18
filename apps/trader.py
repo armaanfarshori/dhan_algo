@@ -146,17 +146,78 @@ async def flatten_all(runners, portfolio, executor, risk, reason: str, segment: 
     from engine.types import OrderIntent
     for r in runners:
         pos = portfolio.get(r.sid)
-        if pos.qty != 0 and r.last_price > 0:
-            side = "SELL" if pos.qty > 0 else "BUY"
-            fill = await executor.submit(OrderIntent(
-                security_id=r.sid, exchange_segment=segment,
-                side=side, qty=abs(pos.qty), strategy="ORB",
-                reason=f"risk halt: {reason}"), ref_price=r.last_price)
-            if fill:
-                await portfolio.apply_fill(fill, strategy="ORB")
-                r.strategy.notify_flat()
+        if pos.qty != 0:
+            # ref_price priority: live last_price → entry avg_price. A never-ticked
+            # position has last_price==0; the executor rejects ref_price<=0, so
+            # without the avg_price fallback such a position could never be closed
+            # on a halt — left naked past the kill switch. Surface the fallback.
+            ref_price = r.last_price if r.last_price > 0 else pos.avg_price
+            if ref_price <= 0:
+                logger.critical(
+                    "flatten_all %s: cannot flatten qty=%+d — no last_price AND no "
+                    "avg_price; position left OPEN (release risk slot anyway)",
+                    r.sid, pos.qty)
+            else:
+                if r.last_price <= 0:
+                    logger.critical(
+                        "flatten_all %s: no last_price — flattening on avg_price ₹%.2f",
+                        r.sid, pos.avg_price)
+                side = "SELL" if pos.qty > 0 else "BUY"
+                fill = await executor.submit(OrderIntent(
+                    security_id=r.sid, exchange_segment=segment,
+                    side=side, qty=abs(pos.qty), strategy="ORB",
+                    reason=f"risk halt: {reason}"), ref_price=ref_price)
+                if fill:
+                    await portfolio.apply_fill(fill, strategy="ORB")
+                    r.strategy.notify_flat()
             # Release UNCONDITIONALLY (even when the flatten produced no fill).
             risk.release_risk(r.sid)
+
+
+def make_ltp_lookup(feed, runners, stale_s: float, warn_every_s: float = 60.0):
+    """Build the risk loop's price source with a staleness guard (QA P1).
+
+    The risk loop must not price the daily-loss halt / equity snapshot off a
+    frozen feed. Resolution order:
+      1. FRESH WS price — get_ltp > 0 AND tick age <= stale_s.
+      2. The runner's last_price (kept refreshed by its REST poll loop).
+      3. As a last resort, the (stale, non-zero) WS price over 0 — so the risk
+         loop never silently treats a held position as worthless.
+    When nothing fresh is available a WARNING is logged, rate-limited per sid so
+    a frozen feed is visible without flooding the log every risk tick.
+    """
+    stale_warned_at: dict = {}
+
+    def _runner_last_price(sid: str) -> float:
+        for r in runners:
+            if r.sid == sid:
+                return r.last_price
+        return 0.0
+
+    def ltp_lookup(sid: str) -> float:
+        sid = str(sid)
+        age = feed.get_tick_age_s(sid) if hasattr(feed, "get_tick_age_s") else None
+        ltp = feed.get_ltp(sid)
+        fresh = ltp > 0 and (age is not None and age <= stale_s)
+        if fresh:
+            return ltp
+        fallback = _runner_last_price(sid)
+        if fallback > 0:
+            return fallback
+        now = time.monotonic()
+        last = stale_warned_at.get(sid)
+        # `last is None` → first stale event for this sid: ALWAYS warn. Don't use a
+        # 0.0 sentinel — time.monotonic() can start near 0, which would suppress
+        # the first warning for the first warn_every_s of process uptime.
+        if last is None or now - last >= warn_every_s:
+            stale_warned_at[sid] = now
+            logger.warning(
+                "ltp_lookup %s: no fresh price (feed age=%s, ws_ltp=%.2f, "
+                "runner_last=%.2f) — risk loop pricing may be stale",
+                sid, "None" if age is None else f"{age:.0f}s", ltp, fallback)
+        return ltp if ltp > 0 else fallback
+
+    return ltp_lookup
 
 
 async def write_heartbeat(*, runners, portfolio, risk, feed, bar_builder,
@@ -361,14 +422,10 @@ async def main():
 
         runners: list = []
 
-        def ltp_lookup(sid: str) -> float:
-            ltp = feed.get_ltp(sid)
-            if ltp > 0:
-                return ltp
-            for r in runners:
-                if r.sid == sid:
-                    return r.last_price
-            return 0.0
+        # Stale-LTP guard for the risk loop (QA P1) — see make_ltp_lookup. The
+        # closure captures `runners` (a list mutated below), so the fallback sees
+        # every runner once they are appended.
+        ltp_lookup = make_ltp_lookup(feed, runners, cfg.risk_ltp_stale_s)
 
         # Live mode runs the same fractional geometry at reduced scale
         # (training wheels for M8) — paper validates exactly what live does.
@@ -426,8 +483,14 @@ async def main():
         # ── Strategy runners ───────────────────────────────────────────────────
         from engine.runner import StrategyRunner
         from strategies.orb import ORB, ORBParams
+        from core.batched_ohlc import BatchedOhlc
         params = ORBParams(orb_minutes=cfg.orb_range_minutes)
         stagger = cfg.poll_interval / max(len(watchlist_ids), 1)
+        # ONE shared batched-OHLC fallback for every runner: concurrent stale
+        # lookups collapse into a single get_ohlc({seg: all sids}) call (no 429
+        # burst when the feed goes quiet). TTL-cached for ~5s, coalesced.
+        batched_ohlc = BatchedOhlc(
+            dhan, cfg.watchlist_exchange_segment, feed.all_subscribed_sids)
         for idx, sid in enumerate(watchlist_ids):
             orb = ORB(sid, params)
             pos = portfolio.get(sid)
@@ -439,7 +502,8 @@ async def main():
                 executor=executor, portfolio=portfolio,
                 exchange_segment=cfg.watchlist_exchange_segment,
                 poll_interval=cfg.poll_interval, poll_offset=idx * stagger,
-                max_entries_per_session=cfg.max_orders_per_session))
+                max_entries_per_session=cfg.max_orders_per_session,
+                batched_ohlc=batched_ohlc))
         logger.info("ORB engine on %d securities (gate: %s)",
                     len(runners), "shadow" if cfg.kronos_shadow_mode else "enforcing")
 
