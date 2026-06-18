@@ -59,7 +59,7 @@ def upgrade() -> None:
         sa.Column("volume",           sa.BigInteger(), nullable=False, server_default="0"),
         sa.Column("open_interest",    sa.BigInteger()),
         sa.Column("expiry_date",      sa.Date()),
-        sa.Column("realized_vol_20d", sa.Float()),   # derived (core/fno_derived.py)
+        sa.Column("realized_vol_20d", sa.Double()),   # derived (core/fno_derived.py)
         sa.PrimaryKeyConstraint("symbol", "timeframe", "time"),
     )
     op.execute("SELECT create_hypertable('futures_bars', 'time', if_not_exists => TRUE)")
@@ -76,12 +76,12 @@ def upgrade() -> None:
         sa.Column("expiry_date",  sa.Date(),     nullable=False),
         sa.Column("expiry_type",  sa.String(10)),                # weekly | monthly
         sa.Column("atm_strike",   sa.Numeric(12, 4)),
-        sa.Column("call_iv",      sa.Float()),                   # fraction, e.g. 0.145
-        sa.Column("put_iv",       sa.Float()),
-        sa.Column("straddle_iv",  sa.Float()),
+        sa.Column("call_iv",      sa.Double()),                   # fraction, e.g. 0.145
+        sa.Column("put_iv",       sa.Double()),
+        sa.Column("straddle_iv",  sa.Double()),
         sa.Column("dte",          sa.Integer()),                 # calendar days to expiry
         sa.Column("spot_ref",     sa.Numeric(12, 4)),
-        sa.Column("implied_move", sa.Float()),                   # derived (core/fno_derived.py)
+        sa.Column("implied_move", sa.Double()),                   # derived (core/fno_derived.py)
         sa.PrimaryKeyConstraint("symbol", "expiry_date", "time"),
     )
     op.execute("SELECT create_hypertable('option_atm_iv', 'time', if_not_exists => TRUE)")
@@ -113,7 +113,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # Drop only the four tables this migration introduced.
-    op.execute("DROP TABLE IF EXISTS expiry_calendar")
-    op.execute("DROP TABLE IF EXISTS india_vix")
-    op.execute("DROP TABLE IF EXISTS option_atm_iv")
-    op.execute("DROP TABLE IF EXISTS futures_bars")
+    op.execute("DROP TABLE IF EXISTS expiry_calendar")          # plain table, no CASCADE needed
+    op.execute("DROP TABLE IF EXISTS india_vix CASCADE")
+    op.execute("DROP TABLE IF EXISTS option_atm_iv CASCADE")
+    op.execute("DROP TABLE IF EXISTS futures_bars CASCADE")

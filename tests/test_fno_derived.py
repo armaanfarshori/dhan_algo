@@ -31,6 +31,12 @@ def test_daily_log_returns_bad_values_are_nan():
 
 
 # ── realized vol ──────────────────────────────────────────────────────────────────
+def test_realized_vol_window_too_small_raises():
+    """window < 2 must raise ValueError (not return all-None)."""
+    with pytest.raises(ValueError):
+        d.realized_vol_series([1, 2, 3], window=1)
+
+
 def test_realized_vol_alignment_and_none_prefix():
     closes = list(range(1, 31))  # 30 closes
     vols = d.realized_vol_series(closes, window=20)
@@ -48,8 +54,9 @@ def test_realized_vol_matches_independent_calc():
     window = 20
     vols = d.realized_vol_series(closes, window=window)
     rets = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+    # result[i] covers rets[i-window .. i-1]; at i=25, window=20 → rets[5:25]
     i = 25
-    expected = statistics.stdev(rets[i - window:i]) * math.sqrt(252)
+    expected = statistics.stdev(rets[i - window : i]) * math.sqrt(252)
     assert vols[i] == pytest.approx(expected)
 
 
@@ -60,7 +67,40 @@ def test_realized_vol_constant_series_is_zero():
 
 
 def test_realized_vol_too_few_closes():
+    # n < window+1 → all None, but NOT a ValueError (window=20 >= 2)
     assert d.realized_vol_series([1, 2, 3], window=20) == [None, None, None]
+
+
+def test_realized_vol_nan_window():
+    """A zero close produces two non-finite log returns (rets[9] and rets[10]).
+    Any window that overlaps those returns must yield None; once the window has
+    fully passed bar 10, values must become non-None again.
+
+    closes layout (36 elements, indices 0-35):
+      [100]*10 + [0] + [100]*25
+    rets layout (35 elements, indices 0-34):
+      rets[9]  = log(0/100)   → -inf / nan (bad)
+      rets[10] = log(100/0)   → +inf / nan (bad)
+      all others are finite
+
+    With window=20, result[i] covers rets[i-20 .. i-1].
+    rets[10] last falls inside the window at i=30 (i-1=10 → covered).
+    At i=31, the window covers rets[11..30] — all finite → non-None.
+    """
+    closes = [100.0] * 10 + [0.0] + [100.0] * 25  # 36 elements
+    window = 20
+    vols = d.realized_vol_series(closes, window=window)
+
+    assert len(vols) == 36
+
+    # Bars in [window, 30] whose trailing return-window touches rets[9] or rets[10]
+    # must be None.
+    for i in range(window, 31):
+        assert vols[i] is None, f"expected None at index {i}, got {vols[i]}"
+
+    # Once the bad returns have exited the window, values must be non-None.
+    for i in range(31, 36):
+        assert vols[i] is not None, f"expected non-None at index {i}, got {vols[i]}"
 
 
 # ── implied move ───────────────────────────────────────────────────────────────────
@@ -73,6 +113,11 @@ def test_implied_move_formula():
 def test_implied_move_pct_consistent_with_points():
     spot, iv, dte = 23400, 0.12, 7
     assert d.implied_move(spot, iv, dte) == pytest.approx(spot * d.implied_move_pct(iv, dte))
+
+
+def test_implied_move_pct_zero_dte():
+    """dte=0 → implied_move_pct must be exactly 0.0 (expiry day, no move)."""
+    assert d.implied_move_pct(0.12, 0) == 0.0
 
 
 def test_implied_move_edge_cases():
