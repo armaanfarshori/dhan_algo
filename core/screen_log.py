@@ -136,12 +136,17 @@ def get_screen_for_day(day: date) -> list[dict[str, Any]]:
     """
     from db import get_engine
     with get_engine().connect() as conn:
+        # Enrich the ticker from instruments at read time — daily_screen.ticker is
+        # often null (the screener candidate dicts don't carry it), so without the
+        # join the UI shows the numeric security_id instead of a symbol.
         rows = conn.execute(text("""
-            SELECT trading_day, security_id, ticker, rank, score, price,
-                   volume, selected, reason, created_at
-            FROM daily_screen
-            WHERE trading_day = :d
-            ORDER BY selected DESC, rank ASC NULLS LAST, score DESC NULLS LAST
+            SELECT ds.trading_day, ds.security_id,
+                   COALESCE(NULLIF(ds.ticker, ''), NULLIF(i.ticker, ''), ds.security_id) AS ticker,
+                   ds.rank, ds.score, ds.price, ds.volume, ds.selected, ds.reason, ds.created_at
+            FROM daily_screen ds
+            LEFT JOIN instruments i ON i.security_id = ds.security_id
+            WHERE ds.trading_day = :d
+            ORDER BY ds.selected DESC, ds.rank ASC NULLS LAST, ds.score DESC NULLS LAST
         """), {"d": day}).fetchall()
     return [{
         "trading_day": str(r[0]),
