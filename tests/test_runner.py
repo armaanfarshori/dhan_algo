@@ -341,6 +341,76 @@ def test_exit_when_already_flat():
     assert len(port.fills_applied) == 0
 
 
+class _NoneExecutor:
+    """Executor that always returns None (failed/no fill)."""
+
+    def __init__(self):
+        self.submitted: list = []
+
+    async def submit(self, intent: OrderIntent, *, ref_price: float):
+        self.submitted.append((intent, ref_price))
+        return None
+
+
+class _FlippingPortfolio:
+    """get() returns an open position first, then flat (broker closed it
+    out-of-band between the exit decision and the None-fill check)."""
+
+    def __init__(self, open_pos: Position):
+        self._states = [open_pos, Position(security_id=open_pos.security_id, qty=0)]
+        self.fills_applied: list = []
+
+    def get(self, sid: str) -> Position:
+        # First call returns open; every subsequent call returns flat.
+        return self._states[0] if len(self._states) == 1 else self._states.pop(0)
+
+    async def apply_fill(self, fill, *, strategy: str = "ORB") -> float:
+        self.fills_applied.append((fill, strategy))
+        return 0.0
+
+
+def test_exit_releases_risk_on_none_fill_when_broker_flat():
+    """None fill + broker already flat → release the leaked risk slot + resync,
+    do NOT keep the committed-risk slot (which would block new entries)."""
+    decision = Decision(action="EXIT", reason="target hit")
+    open_pos = Position(security_id="42", qty=5, avg_price=102.0)
+    port = _FlippingPortfolio(open_pos)
+
+    strategy = FakeStrategy(decision=decision)
+    risk = FakeRisk()
+    runner = StrategyRunner(
+        strategy, client=None, feed=FakeFeed(ltp=105.0, high=106.0, low=104.0),
+        gate=FakeGate(), risk=risk, executor=_NoneExecutor(),
+        portfolio=port, max_entries_per_session=4)
+
+    asyncio.run(runner._poll_once(ist(10, 0)))
+
+    assert risk.released == ["42"]          # slot freed
+    assert strategy.flats_notified == 1     # strategy resynced
+    assert len(port.fills_applied) == 0     # no fill applied
+
+
+def test_exit_keeps_risk_on_none_fill_when_still_open():
+    """None fill + position STILL open → keep the slot, retry next poll.
+    Releasing here would falsely free risk on a position that remains live."""
+    decision = Decision(action="EXIT", reason="target hit")
+    open_pos = Position(security_id="42", qty=5, avg_price=102.0)
+    port = FakePortfolio(position=open_pos)   # get() always returns open
+
+    strategy = FakeStrategy(decision=decision)
+    risk = FakeRisk()
+    runner = StrategyRunner(
+        strategy, client=None, feed=FakeFeed(ltp=105.0, high=106.0, low=104.0),
+        gate=FakeGate(), risk=risk, executor=_NoneExecutor(),
+        portfolio=port, max_entries_per_session=4)
+
+    asyncio.run(runner._poll_once(ist(10, 0)))
+
+    assert risk.released == []              # slot NOT freed
+    assert strategy.flats_notified == 0     # not resynced
+    assert len(port.fills_applied) == 0
+
+
 # ─── 7. _in_window tests ──────────────────────────────────────────────────────
 
 def test_in_window_inside():

@@ -192,6 +192,17 @@ class StrategyRunner:
             return
         fill = await self._executor.submit(intent, ref_price=price)
         if fill is None:
+            # The executor returned no fill. If the broker is already flat for
+            # this security (position closed out-of-band), the committed risk
+            # slot would otherwise leak forever and block new entries — release
+            # it and resync the strategy. Only if the position is STILL open do
+            # we keep the slot and retry the exit next poll.
+            if self._portfolio.get(self.sid).qty == 0:
+                self._risk.release_risk(self.sid)
+                self.strategy.notify_flat()
+                logger.warning("Runner %s: exit fill None but broker flat — "
+                               "released risk + resynced", self.sid)
+                return
             logger.critical("Runner %s: EXIT EXECUTION FAILED — retrying next poll", self.sid)
             return
         realized = await self._portfolio.apply_fill(fill, strategy="ORB")

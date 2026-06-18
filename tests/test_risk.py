@@ -131,6 +131,36 @@ def test_kill_switch_blocks():
     assert ok
 
 
+def test_exit_not_blocked_while_halted():
+    # An EOD square-off (or any close) must pass even during a daily-loss halt
+    # or with the kill switch active — otherwise a naked position orphans.
+    rm = make_engine()
+    rm._portfolio.positions["111"] = Position(security_id="111", qty=10, avg_price=50)
+    rm.state.halted = True
+    rm.state.halt_reason = "daily loss"
+    # Closing a long (SELL) is allowed despite the halt.
+    ok, msg = rm.check_intent(intent(sid="111", side="SELL", qty=10), ref_price=45)
+    assert ok and msg == "OK"
+    # A new entry on a different security stays blocked.
+    ok, _ = rm.check_intent(intent(sid="222", side="BUY", qty=1, stop=95), ref_price=100)
+    assert not ok
+    # Same under the kill switch.
+    rm.state.halted = False
+    rm.state.kill_switch = True
+    ok, _ = rm.check_intent(intent(sid="111", side="SELL", qty=10), ref_price=45)
+    assert ok
+
+
+def test_exit_short_not_blocked_while_halted():
+    rm = make_engine()
+    rm._portfolio.positions["111"] = Position(security_id="111", qty=-10, avg_price=50)
+    rm.state.halted = True
+    rm.state.halt_reason = "daily loss"
+    # Closing a short = BUY back.
+    ok, _ = rm.check_intent(intent(sid="111", side="BUY", qty=10), ref_price=55)
+    assert ok
+
+
 # ── Persistent halts ──────────────────────────────────────────────────────────
 
 def test_daily_halt_survives_restart(tmp_path):
