@@ -566,6 +566,31 @@ class DhanClient:
         params = {"UnderlyingScrip": underlying_scrip, "ExpiryDate": expiry_date}
         return await self._request("GET", "optionchain", "data", params=params)
 
+    async def get_fno_expiry_list(
+        self, underlying_scrip: int, underlying_seg: str = "IDX_I"
+    ) -> Dict:
+        """DhanHQ v2 ``POST /v2/optionchain/expirylist`` — array of expiry dates
+        (``YYYY-MM-DD``) for an underlying. ``underlying_scrip`` 13 = NIFTY,
+        ``underlying_seg`` ``IDX_I`` for indices. Read-only market data."""
+        payload = {"UnderlyingScrip": underlying_scrip, "UnderlyingSeg": underlying_seg}
+        return await self._request("POST", "optionchain/expirylist", "data", payload)
+
+    async def get_fno_option_chain(
+        self, underlying_scrip: int, expiry: str, underlying_seg: str = "IDX_I"
+    ) -> Dict:
+        """DhanHQ v2 ``POST /v2/optionchain`` — full chain for one expiry,
+        including ``implied_volatility`` + greeks per CE/PE strike.
+
+        LIVE SNAPSHOT ONLY — Dhan exposes no historical option-chain/IV. Dhan
+        rate-limits this endpoint to one request / 3 s; space callers
+        accordingly (ATM-only sampling needs just one call per expiry/day)."""
+        payload = {
+            "UnderlyingScrip": underlying_scrip,
+            "UnderlyingSeg": underlying_seg,
+            "Expiry": expiry,
+        }
+        return await self._request("POST", "optionchain", "data", payload)
+
     # ------------------------------------------------------------------ #
     #  HISTORICAL DATA
     # ------------------------------------------------------------------ #
