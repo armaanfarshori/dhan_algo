@@ -164,7 +164,11 @@ class KronosSignalEngine:
         if self._checkpoint:
             try:
                 local_dir = self._resolve_checkpoint(self._checkpoint)
-                tok = KronosTokenizer.from_pretrained(local_dir)
+                # The checkpoint is MODEL-ONLY: fine-tuning freezes the tokenizer,
+                # so it never changes. Co-saving both to one dir clobbers them
+                # (both write config.json + model.safetensors), so the tokenizer
+                # loads from its own repo and only the model from the checkpoint.
+                tok = KronosTokenizer.from_pretrained(self._tokenizer_id)
                 mdl = Kronos.from_pretrained(local_dir)
                 self._loaded_from = f"fine-tuned checkpoint {self._checkpoint}"
                 return KronosPredictor(mdl, tok, max_context=512)
