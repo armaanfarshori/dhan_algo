@@ -5,6 +5,8 @@ These cover the pure-logic links that don't need a GPU/torch or live S3:
   - GAP E: config exposes a separate clean-DB URL for the backtester.
   - GAP A: prepare_kronos_dataset timeframe presets + 1m→5m aggregation.
 """
+from pathlib import Path
+
 import pandas as pd
 
 
@@ -72,3 +74,76 @@ def test_resample_5min_aggregates_ohlcv():
     assert first["high"] == 15        # max of bucket
     assert first["low"] == 9          # min of bucket
     assert first["volume"] == 500     # sum of bucket
+
+
+# ── streaming / bounded-memory loaders ─────────────────────────────────────────
+
+def test_iter_parquet_local_is_lazy(tmp_path, monkeypatch):
+    """The local loader must yield one (sid, df) at a time, reading each file
+    only when iteration reaches it — never building a list of all DataFrames."""
+    from scripts import prepare_kronos_dataset as mod
+
+    # Create three empty marker files so glob finds them.
+    for sid in ("100", "200", "300"):
+        (tmp_path / f"{sid}.parquet").write_bytes(b"")
+
+    reads: list[str] = []
+
+    def fake_read_parquet(path):
+        reads.append(Path(path).stem)
+        return pd.DataFrame({"time": [], "open": []})
+
+    monkeypatch.setattr(mod.pd, "read_parquet", fake_read_parquet)
+
+    gen = mod.iter_parquet_local(tmp_path)
+    # Nothing read until we pull the first item.
+    assert reads == []
+    sid, _df = next(gen)
+    assert sid == "100"
+    assert reads == ["100"]            # only the first file read so far
+    sid, _df = next(gen)
+    assert sid == "200"
+    assert reads == ["100", "200"]     # second pulled only on demand
+
+
+def test_iter_parquet_s3_holds_one_df_at_a_time(monkeypatch):
+    """The S3 loader lists keys up front but fetches/parses one object per
+    iteration step — at most one DataFrame exists at a time."""
+    import sys
+    import types
+
+    from scripts import prepare_kronos_dataset as mod
+
+    fetched: list[str] = []
+
+    class _Body:
+        def read(self):
+            return b""
+
+    class _S3:
+        def get_paginator(self, _op):
+            class _P:
+                def paginate(self, **_kw):
+                    return [{"Contents": [
+                        {"Key": "kronos/training-data/100.parquet"},
+                        {"Key": "kronos/training-data/200.parquet"},
+                    ]}]
+            return _P()
+
+        def get_object(self, Bucket, Key):  # noqa: N803 (boto3 kw casing)
+            fetched.append(Path(Key).stem)
+            return {"Body": _Body()}
+
+    fake_boto3 = types.ModuleType("boto3")
+    fake_boto3.client = lambda _svc: _S3()
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+    monkeypatch.setattr(mod.pd, "read_parquet",
+                        lambda _buf: pd.DataFrame({"time": []}))
+
+    gen = mod.iter_parquet_s3()
+    assert fetched == []               # listing keys does not fetch objects
+    sid, _df = next(gen)
+    assert sid == "100"
+    assert fetched == ["100"]          # only the first object fetched
+    sid, _df = next(gen)
+    assert fetched == ["100", "200"]
