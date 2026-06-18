@@ -169,7 +169,25 @@ def compute_loss(tokenizer, model, batch, device):
 
 # ── Training loop ─────────────────────────────────────────────────────────────
 
+def _raise_fd_limit():
+    """KronosWindowDataset mmaps every npy file and keeps the fd open (2 per
+    instrument); a full universe (1600+ instruments → 3300+ fds) exceeds the
+    common 1024 soft limit → 'OSError: Too many open files'. Raise soft→hard.
+    (The AWS DLAMI ships a huge default; plain Ubuntu/containers default to 1024.)
+    """
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft != hard:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+            log.info("Raised RLIMIT_NOFILE soft %s → %s", soft, hard)
+    except (ImportError, ValueError, OSError) as exc:  # non-Unix or capped
+        log.warning("Could not raise fd limit (%s) — large datasets may hit "
+                    "'Too many open files'", exc)
+
+
 def train(args):
+    _raise_fd_limit()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info("Device: %s", device)
 
