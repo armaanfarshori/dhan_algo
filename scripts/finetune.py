@@ -186,6 +186,24 @@ def _raise_fd_limit():
                     "'Too many open files'", exc)
 
 
+def _save_model_checkpoint(model, base_model: str, out_dir: Path):
+    """Save the fine-tuned MODEL ONLY (the tokenizer is frozen → load it from its
+    own repo at inference; co-saving both to one dir clobbers them since each
+    writes config.json + model.safetensors).
+
+    clone().contiguous() guarantees ALL tensors serialize — safetensors silently
+    drops shared/non-contiguous tensors a trained model can hold (we saw 96/192
+    saved otherwise). The architecture is unchanged by fine-tuning, so reuse the
+    base model's config.json (Kronos.save_pretrained also dropped config keys)."""
+    import shutil
+    from huggingface_hub import hf_hub_download
+    from safetensors.torch import save_file
+    out_dir.mkdir(parents=True, exist_ok=True)
+    state = {k: v.detach().cpu().clone().contiguous() for k, v in model.state_dict().items()}
+    save_file(state, str(out_dir / "model.safetensors"))
+    shutil.copy(hf_hub_download(base_model, "config.json"), out_dir / "config.json")
+
+
 def train(args):
     _raise_fd_limit()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -293,16 +311,14 @@ def train(args):
         history.append({"epoch": epoch, "step": global_step,
                         "train_loss": train_loss, "val_loss": val_loss})
 
-        # Save best checkpoint
+        # Save best checkpoint (model-only — see _save_model_checkpoint)
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             log.info("  ✓ New best val_loss=%.4f — saving checkpoint", val_loss)
-            model.save_pretrained(output_dir / "best")
-            tokenizer.save_pretrained(output_dir / "best")
+            _save_model_checkpoint(model, args.model, output_dir / "best")
 
         # Save latest checkpoint every epoch
-        model.save_pretrained(output_dir / "latest")
-        tokenizer.save_pretrained(output_dir / "latest")
+        _save_model_checkpoint(model, args.model, output_dir / "latest")
 
         if stop:
             break
