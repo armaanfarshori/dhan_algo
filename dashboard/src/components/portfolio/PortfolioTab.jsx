@@ -23,13 +23,21 @@ function compact(v) {
   return (v >= 0 ? '+₹' : '−₹') + Math.round(abs)
 }
 
+/** "2026-06-18" → "18 Jun" (equity-curve x-axis day labels) */
+function fmtDay(iso) {
+  const d = new Date(iso + 'T00:00:00')
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })
+}
+
 // ─── KPI row ─────────────────────────────────────────────────────────────────
 
 function KpiRow({ tradelog }) {
   const trades = tradelog?.data?.trades ?? []
   const exits  = trades.filter(t => t.status === 'CLOSED' && t.pnl != null)
   const wins   = exits.filter(t => (t.pnl ?? 0) > 0)
-  const losses = exits.filter(t => (t.pnl ?? 0) <= 0)
+  const losses = exits.filter(t => (t.pnl ?? 0) < 0)   // breakevens (pnl==0) are neither
 
   const winRate     = exits.length ? (wins.length / exits.length * 100) : null
   const avgWin      = wins.length   ? wins.reduce((s, t) => s + t.pnl, 0) / wins.length : 0
@@ -43,7 +51,9 @@ function KpiRow({ tradelog }) {
   // We report the rupee amount + the high-water mark, not a %: the % of a
   // P&L-only curve is meaningless when the early peak is near zero (it produced
   // absurd values like 1123%).
-  const chron = [...exits].sort((a, b) => new Date(a.exit_ts) - new Date(b.exit_ts))
+  // Only trades with a real exit_ts — a null exit_ts → new Date(null)=epoch would
+  // sort to the front and corrupt the running peak/drawdown.
+  const chron = exits.filter(t => t.exit_ts).sort((a, b) => new Date(a.exit_ts) - new Date(b.exit_ts))
   let peak = 0, eq = 0, maxDDVal = 0
   chron.forEach(t => {
     eq += t.pnl ?? 0
@@ -153,18 +163,22 @@ function KpiRow({ tradelog }) {
 
 // ─── Equity Curve ─────────────────────────────────────────────────────────────
 
-function EquityCurve({ equity, tradelog }) {
-  // Same series + same chart component as the Signals "Intraday P&L" so the two
-  // share one design.
-  const pts = (equity?.data?.intraday ?? []).map(p => ({ t: p.t, v: p.pnl }))
-  const last = pts.length ? pts[pts.length - 1].v : 0
-
+function EquityCurve({ tradelog }) {
+  // Aggregated by TRADING DAY (not intraday hours): cumulative realised P&L,
+  // one point per day, summed from the same closed trades the Calendar uses.
+  // x = trading date, y = ₹ cumulative — a proper multi-day equity curve.
   const trades = tradelog?.data?.trades ?? []
   const exits  = trades.filter(t => t.status === 'CLOSED' && t.pnl != null && t.exit_ts)
   const byDate = {}
   exits.forEach(t => { const d = istDateKey(t.exit_ts); byDate[d] = (byDate[d] ?? 0) + (t.pnl ?? 0) })
-  const tradingDays = Object.keys(byDate).length
-  const metaStr = `${last >= 0 ? '+' : ''}${INR0(last)} · ${tradingDays} day${tradingDays !== 1 ? 's' : ''}`
+  let cum = 0
+  const pts = Object.keys(byDate).sort().map(d => {
+    cum += byDate[d]
+    return { t: fmtDay(d), v: Math.round(cum) }
+  })
+  const last  = pts.length ? pts[pts.length - 1].v : 0
+  const days  = pts.length
+  const metaStr = `${last >= 0 ? '+' : ''}${INR0(last)} · ${days} trading day${days !== 1 ? 's' : ''}`
 
   return (
     <Panel>
@@ -278,10 +292,6 @@ function ClosedTradesList({ tradelog }) {
             const pnl    = t.pnl ?? 0
             const isUp   = pnl >= 0
 
-            // R-multiple: pnl / avg_loss_as_risk_unit (rough proxy)
-            // We don't have stop-loss stored, so we omit the R line when unavailable
-            const rMult  = t.r_multiple ?? null
-
             return (
               <div
                 key={i}
@@ -317,11 +327,6 @@ function ClosedTradesList({ tradelog }) {
                   >
                     {isUp ? '+' : ''}{INR0(pnl)}
                   </div>
-                  {rMult != null && (
-                    <div className="mono mt-0.5 text-[10px] text-faint">
-                      R {rMult >= 0 ? '+' : ''}{Number(rMult).toFixed(1)}
-                    </div>
-                  )}
                 </div>
               </div>
             )
@@ -339,7 +344,7 @@ function PerformancePanel({ tradelog }) {
   const trades  = tradelog?.data?.trades ?? []
   const exits   = trades.filter(t => t.status === 'CLOSED' && t.pnl != null)
   const wins    = exits.filter(t => (t.pnl ?? 0) > 0)
-  const losses  = exits.filter(t => (t.pnl ?? 0) <= 0)
+  const losses  = exits.filter(t => (t.pnl ?? 0) < 0)   // breakevens (pnl==0) are neither
 
   const avgWin   = wins.length   ? wins.reduce((s, t) => s + t.pnl, 0) / wins.length : 0
   const avgLoss  = losses.length ? losses.reduce((s, t) => s + t.pnl, 0) / losses.length : 0
@@ -450,7 +455,7 @@ export default function PortfolioTab({ data }) {
       <div className="grid grid-cols-1 items-stretch gap-3.5 lg:grid-cols-[minmax(0,1fr)_372px] [&>*]:min-w-0">
         {/* Left: Equity Curve + Calendar */}
         <div className="flex flex-col gap-3.5 [&>*:last-child]:flex-1">
-          <EquityCurve equity={data.equity} tradelog={data.tradelog} />
+          <EquityCurve tradelog={data.tradelog} />
           <CalendarPnL tradelog={data.tradelog} />
         </div>
 
