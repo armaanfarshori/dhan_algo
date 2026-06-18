@@ -241,6 +241,15 @@ class StrategyRunner:
             logger.critical("Runner %s: EXIT EXECUTION FAILED — retrying next poll", self.sid)
             return
         realized = await self._portfolio.apply_fill(fill, strategy="ORB")
+        # Partial fill (live): the residual position is still open. Releasing the
+        # risk slot + notifying flat here would leave a live position carrying ZERO
+        # booked risk and a strategy that thinks it's flat. Keep the slot booked
+        # (conservative) and retry the remainder next poll; only finalize when flat.
+        remaining = self._portfolio.get(self.sid).qty
+        if remaining != 0:
+            logger.warning("Runner %s: PARTIAL exit (%d filled, %d remain) — keeping "
+                           "risk slot, retrying remainder next poll", self.sid, fill.qty, remaining)
+            return
         self.strategy.notify_flat()
         self._risk.release_risk(self.sid)   # free its slice of the daily budget
         logger.info("Runner %s: exited (%s) — realized ₹%+.2f", self.sid, d.reason, realized)
