@@ -76,6 +76,14 @@ annualised vol). This matches how realized_vol_20d is written by
 core/fno_derived.compute_realized_vol() and how straddle_iv is stored in
 option_atm_iv (stored as a fraction by core/fno_backfill).
 
+HISTORICAL REALIZED-VOL BASE
+-----------------------------
+The realized-vol baseline in both ``samples_from_db`` paths comes from the
+**NIFTY 50 SPOT INDEX** (``index_bars``, security_id ``"13"``), specifically the
+``realized_vol_20d`` column populated by core/fno_derived.  This is consistent
+with ``cycles_from_db``, which also reads the spot index.  The underlying series
+is NOT futures bars.
+
 HISTORICAL IMPLIED BASELINE (source="vix")
 ------------------------------------------
 Until forward ATM-IV from option_atm_iv accrues sufficient history, the
@@ -324,22 +332,30 @@ def samples_from_db(
         date and timeframe.
 
         * ``realized_vol`` = ``a.realized_vol_20d`` (annualised fraction,
-          computed by core/fno_derived and stored in index_bars).
+          computed by core/fno_derived and stored in index_bars for the
+          **NIFTY 50 SPOT INDEX**, security_id ``"13"`` — consistent with
+          cycles_from_db; this is NOT futures bars).
         * ``implied_vol``  = ``b.close / 100.0`` — India VIX is an annualised
           volatility *quoted in percent* (e.g. 13.5 means 13.5 % p.a.);
           dividing by 100 converts it to an annualised fraction directly
-          comparable to realized_vol_20d.
+          comparable to realized_vol_20d.  VIX/100 is the Phase-0 implied
+          baseline.
 
         This is the Phase-0 historical path.  Rows where
         ``a.realized_vol_20d IS NULL`` or ``b.close IS NULL`` or ``b.close <= 0``
-        are silently dropped.
+        are silently dropped by the SQL.  After the DB round-trip, any pair
+        where ``realized <= 0`` or ``implied <= 0`` is also dropped in Python
+        (defence-in-depth against mock data or future schema changes that bypass
+        the SQL filter).
 
     ``source="atm"`` (live / forward path)
         Joins ``option_atm_iv`` (straddle IV for ``symbol``) with
-        ``futures_bars`` (realized_vol_20d) on the same trading date and
-        timeframe.  This is the forward path used once option_atm_iv rows
-        accumulate.  The existing DISTINCT ON de-duplication (nearest positive-dte
-        expiry per date) is preserved.
+        ``index_bars`` (realized_vol_20d for the NIFTY 50 SPOT INDEX,
+        security_id ``"13"``) on the same trading date and timeframe.  This is
+        the forward path used once option_atm_iv rows accumulate.  The existing
+        DISTINCT ON de-duplication (nearest positive-dte expiry per date) is
+        preserved.  After the DB round-trip, any pair where ``realized <= 0``
+        or ``implied <= 0`` is silently dropped in Python.
 
     Rows missing either value are silently dropped in both paths.
 
@@ -351,8 +367,9 @@ def samples_from_db(
     ----------
     source:
         Data source: ``"vix"`` (default, historical) or ``"atm"`` (live/forward).
+        Any other value raises ``ValueError``.
     nifty_id:
-        security_id of NIFTY 50 in index_bars (default ``"13"``).
+        security_id of NIFTY 50 SPOT INDEX in index_bars (default ``"13"``).
         Only used when ``source="vix"``.
     vix_id:
         security_id of India VIX in index_bars (default ``"21"``).
@@ -365,6 +382,7 @@ def samples_from_db(
     Returns
     -------
     list of (realized_vol, implied_vol) float tuples sorted ascending by date.
+    Tuples where either value is <= 0 are excluded.
     """
     from sqlalchemy import text
 
@@ -429,7 +447,13 @@ def samples_from_db(
     result: list[tuple[float, float]] = []
     for rv, iv in rows:
         try:
-            result.append((float(rv), float(iv)))
+            rv_f = float(rv)
+            iv_f = float(iv)
         except (TypeError, ValueError):
             continue
+        # Python-side guard: skip degenerate pairs even if the SQL WHERE filter
+        # is somehow bypassed (e.g. test mocks, future schema changes).
+        if rv_f <= 0 or iv_f <= 0:
+            continue
+        result.append((rv_f, iv_f))
     return result

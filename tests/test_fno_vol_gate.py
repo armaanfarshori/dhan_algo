@@ -667,15 +667,20 @@ class TestSamplesFromDbVix:
 
     @requires_module
     def test_vix_zero_or_negative_close_rows_are_dropped(self, monkeypatch):
-        """Rows with VIX close <= 0 (already /100 from SQL) must be dropped."""
+        """Rows with VIX close <= 0 (already /100 from SQL) must be dropped.
+
+        The SQL WHERE b.close > 0 is the primary filter, but the Python-side
+        guard in samples_from_db also rejects any pair where implied <= 0.
+        This test verifies the Python guard fires even when mock data bypasses
+        the SQL filter.
+        """
         from unittest.mock import MagicMock
 
         import ml.fno_vol_gate as _mod
 
-        # SQL WHERE b.close > 0 filters these; guard at float-cast level too.
         canned_rows = [
-            (0.12, 0.0),     # bad — implied=0.0 (VIX close=0 → /100 = 0.0) → dropped
-            (0.12, -0.05),   # bad — negative → dropped
+            (0.12, 0.0),     # bad — implied=0.0 → dropped by Python guard
+            (0.12, -0.05),   # bad — negative implied → dropped by Python guard
             (0.10, 0.120),   # good
         ]
 
@@ -699,8 +704,173 @@ class TestSamplesFromDbVix:
 
         result = samples_from_db(source="vix")
 
-        # The float cast succeeds for 0.0 and -0.05, so these rows ARE returned
-        # by samples_from_db (the SQL WHERE already dropped them; the Python cast
-        # layer does not re-filter by value — it only guards against TypeError/ValueError).
-        # We assert only the good row count here; the SQL is the authoritative filter.
-        assert any(pytest.approx(r) == (0.10, 0.120) for r in result)
+        # Only the one good row survives the Python-side guard.
+        assert len(result) == 1
+        assert result[0] == pytest.approx((0.10, 0.120))
+        # Confirm no tuple has a non-positive implied vol.
+        for _rv, iv in result:
+            assert iv > 0
+
+
+# ===========================================================================
+# 8. samples_from_db — source="atm" monkeypatch (no live DB required)
+# ===========================================================================
+
+
+class TestSamplesFromDbAtm:
+    """Verify samples_from_db(source='atm') row mapping, DISTINCT ON behaviour
+    (duplicate date de-duplication), and the Python-side <=0 guard.
+
+    Row layout returned by the mocked DB query:
+        (realized_vol_20d, straddle_iv)
+    i.e. the SQL already selects the nearest-expiry straddle_iv per date via
+    DISTINCT ON; the Python side just casts to float and drops bad rows.
+    """
+
+    def _patch_session(self, monkeypatch, canned_rows):
+        """Shared helper: monkeypatch get_session to return canned_rows."""
+        from unittest.mock import MagicMock
+        import sys
+        import ml.fno_vol_gate as _mod
+
+        mock_result = MagicMock()
+        mock_result.fetchall.return_value = canned_rows
+
+        mock_session = MagicMock()
+        mock_session.execute.return_value = mock_result
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+
+        mock_get_session = MagicMock(return_value=mock_session)
+        monkeypatch.setattr(_mod, "get_session", mock_get_session, raising=False)
+
+        fake_db = MagicMock()
+        fake_db.get_session = mock_get_session
+        monkeypatch.setitem(sys.modules, "db", fake_db)
+
+    @requires_module
+    def test_atm_rows_mapped_to_realized_straddle_iv_tuples(self, monkeypatch):
+        """Good rows are returned as (realized, straddle_iv) float tuples."""
+        # Simulate what the DISTINCT ON query returns: one row per trade_date.
+        canned_rows = [
+            (0.11, 0.130),   # date 1: realized=11%, straddle_iv=13.0%
+            (0.13, 0.150),   # date 2: realized=13%, straddle_iv=15.0%
+            (0.09, 0.120),   # date 3: realized=9%,  straddle_iv=12.0%
+        ]
+        self._patch_session(monkeypatch, canned_rows)
+
+        from ml.fno_vol_gate import samples_from_db
+
+        result = samples_from_db(source="atm", symbol="NIFTY")
+
+        assert len(result) == 3
+        assert result[0] == pytest.approx((0.11, 0.130))
+        assert result[1] == pytest.approx((0.13, 0.150))
+        assert result[2] == pytest.approx((0.09, 0.120))
+
+    @requires_module
+    def test_atm_distinct_on_dedup_only_one_row_per_date(self, monkeypatch):
+        """The SQL DISTINCT ON ensures one row per date; verify the Python layer
+        does not re-introduce duplicates (it just passes through what the DB returns)."""
+        # After DISTINCT ON the DB returns ONE row per date (nearest expiry).
+        # We simulate that the DB has already de-duplicated.
+        canned_rows = [
+            (0.12, 0.140),  # date 2024-01-15, nearest expiry row
+            (0.14, 0.160),  # date 2024-01-16, nearest expiry row
+        ]
+        self._patch_session(monkeypatch, canned_rows)
+
+        from ml.fno_vol_gate import samples_from_db
+
+        result = samples_from_db(source="atm")
+
+        # Exactly two rows — no duplicates introduced by Python.
+        assert len(result) == 2
+
+    @requires_module
+    def test_atm_degenerate_pairs_dropped_by_python_guard(self, monkeypatch):
+        """Rows with realized<=0 or implied<=0 are dropped by the Python guard."""
+        canned_rows = [
+            (0.0,  0.130),   # bad: realized == 0 → dropped
+            (-0.05, 0.130),  # bad: realized < 0 → dropped
+            (0.11, 0.0),     # bad: implied == 0 → dropped
+            (0.11, -0.05),   # bad: implied < 0 → dropped
+            (0.12, 0.140),   # good
+        ]
+        self._patch_session(monkeypatch, canned_rows)
+
+        from ml.fno_vol_gate import samples_from_db
+
+        result = samples_from_db(source="atm")
+
+        assert len(result) == 1
+        assert result[0] == pytest.approx((0.12, 0.140))
+        for rv, iv in result:
+            assert rv > 0
+            assert iv > 0
+
+    @requires_module
+    def test_atm_straddle_iv_is_second_element(self, monkeypatch):
+        """Confirm second element of each tuple is the straddle_iv (implied vol)."""
+        canned_rows = [
+            (0.10, 0.155),  # straddle_iv = 0.155
+        ]
+        self._patch_session(monkeypatch, canned_rows)
+
+        from ml.fno_vol_gate import samples_from_db
+
+        result = samples_from_db(source="atm")
+
+        assert len(result) == 1
+        realized, implied = result[0]
+        assert realized == pytest.approx(0.10)
+        assert implied == pytest.approx(0.155)
+
+
+# ===========================================================================
+# 9. samples_from_db — source="bad" raises ValueError
+# ===========================================================================
+
+
+class TestSamplesFromDbUnknownSource:
+    """samples_from_db must raise ValueError for any unrecognised source string."""
+
+    @requires_module
+    def test_unknown_source_raises_value_error(self, monkeypatch):
+        """source='bad' must raise ValueError immediately (before any DB call)."""
+        from unittest.mock import MagicMock
+        import sys
+        import ml.fno_vol_gate as _mod
+
+        # Patch get_session so any accidental DB call would be visible.
+        mock_get_session = MagicMock()
+        monkeypatch.setattr(_mod, "get_session", mock_get_session, raising=False)
+        fake_db = MagicMock()
+        fake_db.get_session = mock_get_session
+        monkeypatch.setitem(sys.modules, "db", fake_db)
+
+        from ml.fno_vol_gate import samples_from_db
+
+        with pytest.raises(ValueError, match="unknown source"):
+            samples_from_db(source="bad")
+
+        # The DB must NOT have been touched.
+        mock_get_session.assert_not_called()
+
+    @requires_module
+    def test_empty_string_source_raises_value_error(self, monkeypatch):
+        """source='' (empty string) must also raise ValueError."""
+        from unittest.mock import MagicMock
+        import sys
+        import ml.fno_vol_gate as _mod
+
+        mock_get_session = MagicMock()
+        monkeypatch.setattr(_mod, "get_session", mock_get_session, raising=False)
+        fake_db = MagicMock()
+        fake_db.get_session = mock_get_session
+        monkeypatch.setitem(sys.modules, "db", fake_db)
+
+        from ml.fno_vol_gate import samples_from_db
+
+        with pytest.raises(ValueError):
+            samples_from_db(source="")

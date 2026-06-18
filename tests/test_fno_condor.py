@@ -484,6 +484,90 @@ class TestRunBacktest:
 
 
 # ---------------------------------------------------------------------------
+# Robustness: malformed / None-valued cycles must be skipped silently
+# ---------------------------------------------------------------------------
+
+
+@needs_condor
+class TestMalformedCycleSkipped:
+    """run_backtest must skip (not crash on) cycles with missing or None required fields.
+
+    Verifies task item 2: guard against malformed cycles.
+    """
+
+    def test_missing_realized_vol_20d_key_is_skipped(self):
+        """A cycle dict with no 'realized_vol_20d' key must be silently skipped."""
+        bad = {
+            "cycle_id": "bad_no_rvol",
+            "spot": 23400.0,
+            "straddle_iv": 0.15,
+            # 'realized_vol_20d' deliberately absent
+            "dte": 7,
+            "expiry_spot": 23400.0,
+        }
+        result = run_backtest([bad], k=0.9, move_mult=1.0, capital=200_000.0)
+        assert result["n_trades"] == 0, (
+            "expected 0 trades when realized_vol_20d is missing"
+        )
+
+    def test_realized_vol_20d_none_is_skipped(self):
+        """A cycle dict with realized_vol_20d=None must be silently skipped."""
+        bad = {
+            "cycle_id": "bad_rvol_none",
+            "spot": 23400.0,
+            "straddle_iv": 0.15,
+            "realized_vol_20d": None,
+            "dte": 7,
+            "expiry_spot": 23400.0,
+        }
+        result = run_backtest([bad], k=0.9, move_mult=1.0, capital=200_000.0)
+        assert result["n_trades"] == 0, (
+            "expected 0 trades when realized_vol_20d is None"
+        )
+
+    def test_malformed_cycle_mixed_with_good_cycle(self):
+        """Malformed cycle is skipped; the following good SELL cycle still trades."""
+        bad = {
+            "cycle_id": "bad",
+            "spot": 23400.0,
+            "straddle_iv": 0.15,
+            "realized_vol_20d": None,  # None → skip
+            "dte": 7,
+            "expiry_spot": 23400.0,
+        }
+        good = _sell_cycle(99)
+        result = run_backtest([bad, good], k=0.9, move_mult=1.0, capital=200_000.0)
+        # bad is skipped; good passes the SELL gate → exactly 1 trade
+        assert result["n_trades"] == 1
+
+    def test_missing_spot_is_skipped(self):
+        """A cycle missing 'spot' must also be silently skipped (no KeyError)."""
+        bad = {
+            "cycle_id": "bad_no_spot",
+            # 'spot' deliberately absent
+            "straddle_iv": 0.15,
+            "realized_vol_20d": 0.10,
+            "dte": 7,
+            "expiry_spot": 23400.0,
+        }
+        result = run_backtest([bad], k=0.9, move_mult=1.0, capital=200_000.0)
+        assert result["n_trades"] == 0
+
+    def test_missing_expiry_spot_is_skipped(self):
+        """A cycle missing 'expiry_spot' must be silently skipped (no KeyError)."""
+        bad = {
+            "cycle_id": "bad_no_expiry_spot",
+            "spot": 23400.0,
+            "straddle_iv": 0.15,
+            "realized_vol_20d": 0.10,
+            "dte": 7,
+            # 'expiry_spot' deliberately absent
+        }
+        result = run_backtest([bad], k=0.9, move_mult=1.0, capital=200_000.0)
+        assert result["n_trades"] == 0
+
+
+# ---------------------------------------------------------------------------
 # go_no_go(metrics, capital) → (bool, str)
 # ---------------------------------------------------------------------------
 

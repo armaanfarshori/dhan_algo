@@ -206,3 +206,36 @@ def test_compute_index_realized_vol_empty_returns_zero():
         result = d.compute_index_realized_vol("13")
     assert result == 0
     mock_bulk.assert_not_called()
+
+
+def test_compute_index_realized_vol_sql_targets_index_bars():
+    """The bulk-update SQL passed by compute_index_realized_vol must reference
+    index_bars — not futures_bars."""
+    security_id = "13"
+    timeframe = "1d"
+    window = 20
+
+    base = datetime.datetime(2024, 1, 2, tzinfo=datetime.timezone.utc)
+    closes = [100.0 * (1 + 0.005 * math.sin(i)) for i in range(30)]
+    fake_rows = [
+        (base + datetime.timedelta(days=i), closes[i]) for i in range(30)
+    ]
+
+    captured_sql: list[str] = []
+
+    def fake_bulk_update(sql, rows):
+        captured_sql.append(sql)
+        return len(rows)
+
+    fake_cm = _make_fake_session(fake_rows)
+
+    with (
+        patch("db.get_session", return_value=fake_cm),
+        patch("core.fno_derived._bulk_update", side_effect=fake_bulk_update),
+    ):
+        d.compute_index_realized_vol(security_id, timeframe, window)
+
+    assert len(captured_sql) == 1, "expected exactly one _bulk_update call"
+    sql = captured_sql[0]
+    assert "index_bars" in sql, f"SQL must reference index_bars; got: {sql!r}"
+    assert "futures_bars" not in sql, f"SQL must NOT reference futures_bars; got: {sql!r}"
