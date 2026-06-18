@@ -38,9 +38,11 @@ from dataclasses import dataclass
 # Statutory + brokerage rates — post-April-2026
 # ---------------------------------------------------------------------------
 
-# NIFTY contract lot size (units per lot) — June 2026. Single source of truth
-# for the cost stack and the condor harness (research/backtest/fno_condor.py).
-NIFTY_LOT = 75
+# NIFTY contract lot size (units per lot) — confirmed 65 from the live Dhan detailed
+# scrip master (2026-06-19). Single source of truth for the cost stack and the condor
+# harness (research/backtest/fno_condor.py). Prefer reading lot_size from fno_instruments
+# at runtime once that table is populated; this constant is the static fallback.
+NIFTY_LOT = 65
 
 # Post-April-2026 (handoff §7): options SELL-side STT raised 0.10% -> 0.15% on premium;
 # exercise STT raised 0.125% -> 0.15% of intrinsic value.
