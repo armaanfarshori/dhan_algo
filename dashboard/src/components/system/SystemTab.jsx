@@ -438,8 +438,10 @@ function HeartbeatPanel({ data }) {
   const feedSubs     = t?.feed?.subscribed ?? 0
   const feedConn     = t?.feed?.connected
   const barsPending  = t?.bars?.pending ?? 0
-  // kill-switch state = RiskEngine.halted (the heartbeat has no kill_switch_active)
-  const ksArmed      = !t?.risk?.halted
+  // kill-switch row reflects the kill switch SPECIFICALLY (not a loss halt).
+  // kill_switch is the precise heartbeat flag; fall back to halted for older
+  // trader builds that don't emit it yet.
+  const ksArmed      = !(t?.risk?.kill_switch ?? t?.risk?.halted)
 
   // Heartbeat staleness — derive from the heartbeat timestamp (no heartbeat_age_s field)
   const hbAge  = heartbeatAgeS(t)

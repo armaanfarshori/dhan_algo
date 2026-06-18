@@ -398,10 +398,12 @@ function ExecutionsFeed({ signals }) {
 
 // ─── Kronos Gate panel ────────────────────────────────────────────────────────
 
-function GatePanel({ gate }) {
+function GatePanel({ gate, trader }) {
   const decisions = gate?.data?.decisions ?? []
   const cal       = gate?.data?.calibration
-  const isShadow  = decisions.some(d => d.shadow)
+  // Mode is authoritative from the heartbeat — NOT inferred from today's
+  // verdicts (an empty decisions list would wrongly read "LIVE" in shadow mode).
+  const isShadow  = (trader?.kronos_gate ?? 'shadow').toLowerCase() === 'shadow'
 
   return (
     <Panel className="flex h-full flex-col">
@@ -514,7 +516,7 @@ export default function SignalsTab({ data }) {
       {/* Executions + Kronos Gate — side by side at the bottom, equal height */}
       <div className="grid grid-cols-1 items-stretch gap-[14px] lg:grid-cols-2 [&>*]:min-w-0">
         <ExecutionsFeed signals={signals} />
-        <GatePanel gate={gate} />
+        <GatePanel gate={gate} trader={trader} />
       </div>
     </div>
   )
