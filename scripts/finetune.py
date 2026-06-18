@@ -210,6 +210,10 @@ def train(args):
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     steps_per_epoch = len(train_loader)
     total_steps     = steps_per_epoch * args.epochs
+    # When --max-steps caps the run, decay the cosine schedule over the ACTUAL
+    # number of steps we'll take — otherwise the LR barely moves off its peak.
+    if args.max_steps:
+        total_steps = min(total_steps, args.max_steps)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps,
                                                       eta_min=args.lr * 0.1)
 
@@ -218,11 +222,15 @@ def train(args):
 
     best_val_loss = float("inf")
     history = []
+    global_step = 0
+    target_steps = args.max_steps or total_steps
+    stop = False
 
     for epoch in range(1, args.epochs + 1):
         # ── Train ─────────────────────────────────────────────────
         model.train()
         train_loss = 0.0
+        n_train = 0
         t0 = time.time()
 
         for step, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}")):
@@ -233,27 +241,39 @@ def train(args):
             optimizer.step()
             scheduler.step()
             train_loss += loss.item()
+            n_train += 1
+            global_step += 1
 
             if step % 200 == 0 and step > 0:
-                avg = train_loss / (step + 1)
+                avg = train_loss / n_train
                 lr  = scheduler.get_last_lr()[0]
-                log.info("  step %d/%d  loss=%.4f  lr=%.2e", step, steps_per_epoch, avg, lr)
+                log.info("  step %d/%d  loss=%.4f  lr=%.2e", global_step, target_steps, avg, lr)
 
-        train_loss /= len(train_loader)
+            if args.max_steps and global_step >= args.max_steps:
+                log.info("Reached --max-steps=%d — ending training", args.max_steps)
+                stop = True
+                break
 
-        # ── Validate ───────────────────────────────────────────────
+        train_loss /= max(1, n_train)
+
+        # ── Validate (optionally capped — the val split can be millions of windows) ──
         model.eval()
         val_loss = 0.0
+        n_val = 0
         with torch.no_grad():
             for batch in tqdm(val_loader, desc="Validating"):
                 val_loss += compute_loss(tokenizer, model, batch, device).item()
-        val_loss /= len(val_loader)
+                n_val += 1
+                if args.max_val_steps and n_val >= args.max_val_steps:
+                    break
+        val_loss /= max(1, n_val)
 
         elapsed = time.time() - t0
-        log.info("Epoch %d/%d  train_loss=%.4f  val_loss=%.4f  time=%.0fs",
-                 epoch, args.epochs, train_loss, val_loss, elapsed)
+        log.info("Epoch %d/%d  step=%d  train_loss=%.4f  val_loss=%.4f (n_val=%d)  time=%.0fs",
+                 epoch, args.epochs, global_step, train_loss, val_loss, n_val, elapsed)
 
-        history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
+        history.append({"epoch": epoch, "step": global_step,
+                        "train_loss": train_loss, "val_loss": val_loss})
 
         # Save best checkpoint
         if val_loss < best_val_loss:
@@ -266,12 +286,17 @@ def train(args):
         model.save_pretrained(output_dir / "latest")
         tokenizer.save_pretrained(output_dir / "latest")
 
+        if stop:
+            break
+
     # Save training history + config
     config = {
         "base_model":        args.model,
         "context_length":    args.context_length,
         "prediction_length": args.prediction_length,
         "epochs":            args.epochs,
+        "max_steps":         args.max_steps,
+        "trained_steps":     global_step,
         "batch_size":        args.batch_size,
         "lr":                args.lr,
         "best_val_loss":     best_val_loss,
@@ -333,6 +358,16 @@ def main():
     ap.add_argument("--tokenizer",         default="NeoQuasar/Kronos-Tokenizer-base",
                     help="Tokenizer HF repo — SEPARATE from --model (matches "
                          "config.kronos_tokenizer / core.kronos_signal)")
+    ap.add_argument("--max-steps",         type=int, default=0,
+                    help="Cap total optimizer steps (0=full epochs). Fine-tuning a "
+                         "pretrained model over a huge dataset (15M+ windows) does "
+                         "NOT need a full epoch — a shuffled subset of steps adapts "
+                         "it in hours instead of days. The LR schedule is scaled to "
+                         "this horizon so it's a proper short run, not a truncated one.")
+    ap.add_argument("--max-val-steps",     type=int, default=0,
+                    help="Cap validation batches (0=full val set). The val split can "
+                         "be millions of windows; a few hundred batches give a stable "
+                         "enough val_loss for checkpoint selection.")
     ap.add_argument("--data_path",         type=Path, required=True,
                     help="Train split directory from prepare_kronos_dataset.py")
     ap.add_argument("--val_path",          type=Path, required=True,
