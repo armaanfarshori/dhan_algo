@@ -171,14 +171,16 @@ function EquityCurve({ tradelog }) {
   const exits  = trades.filter(t => t.status === 'CLOSED' && t.pnl != null && t.exit_ts)
   const byDate = {}
   exits.forEach(t => { const d = istDateKey(t.exit_ts); byDate[d] = (byDate[d] ?? 0) + (t.pnl ?? 0) })
-  let cum = 0
-  const pts = Object.keys(byDate).sort().map(d => {
-    cum += byDate[d]
-    return { t: fmtDay(d), v: Math.round(cum) }
-  })
-  const last  = pts.length ? pts[pts.length - 1].v : 0
-  const days  = pts.length
-  const metaStr = `${last >= 0 ? '+' : ''}${INR0(last)} · ${days} trading day${days !== 1 ? 's' : ''}`
+  // Cumulative running sum without reassigning a captured var (react-hooks/
+  // immutability rule): each point sums all prior trading days' P&L.
+  const days = Object.keys(byDate).sort()
+  const pts = days.map((d, i) => ({
+    t: fmtDay(d),
+    v: Math.round(days.slice(0, i + 1).reduce((s, k) => s + byDate[k], 0)),
+  }))
+  const last     = pts.length ? pts[pts.length - 1].v : 0
+  const dayCount = days.length
+  const metaStr = `${last >= 0 ? '+' : ''}${INR0(last)} · ${dayCount} trading day${dayCount !== 1 ? 's' : ''}`
 
   return (
     <Panel>
