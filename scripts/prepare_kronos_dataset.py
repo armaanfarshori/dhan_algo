@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -128,22 +129,27 @@ def split_by_date(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
             for k, v in splits.items()}
 
 
-def load_parquet_local(data_dir: Path) -> list[tuple[str, pd.DataFrame]]:
-    """Load all .parquet files from a local directory."""
+def iter_parquet_local(data_dir: Path) -> Iterator[tuple[str, pd.DataFrame]]:
+    """Yield (security_id, df) for each local .parquet file, one at a time.
+
+    Each DataFrame is read lazily on demand and released by the caller before
+    the next is read — only one is held in memory at any moment.
+    """
     files = sorted(data_dir.glob("*.parquet"))
     log.info("Found %d Parquet files in %s", len(files), data_dir)
-    result = []
     for f in files:
-        security_id = f.stem
-        df = pd.read_parquet(f)
-        result.append((security_id, df))
-    return result
+        yield f.stem, pd.read_parquet(f)
 
 
-def load_parquet_s3() -> list[tuple[str, pd.DataFrame]]:
-    """Load all .parquet files directly from S3."""
+def iter_parquet_s3() -> Iterator[tuple[str, pd.DataFrame]]:
+    """Yield (security_id, df) for each S3 .parquet object, one at a time.
+
+    Keys are listed up front (cheap), then each object is fetched, parsed, and
+    yielded individually — only one DataFrame is held in memory at any moment.
+    """
+    import io
+
     import boto3
-    from tqdm import tqdm
     s3 = boto3.client("s3")
     paginator = s3.get_paginator("list_objects_v2")
     keys = []
@@ -153,15 +159,10 @@ def load_parquet_s3() -> list[tuple[str, pd.DataFrame]]:
                 keys.append(obj["Key"])
 
     log.info("Found %d Parquet files on S3", len(keys))
-    result = []
-    for key in tqdm(keys, desc="Downloading from S3"):
-        security_id = Path(key).stem
+    for key in keys:
         resp = s3.get_object(Bucket=S3_BUCKET, Key=key)
         buf = resp["Body"].read()
-        import io
-        df = pd.read_parquet(io.BytesIO(buf))
-        result.append((security_id, df))
-    return result
+        yield Path(key).stem, pd.read_parquet(io.BytesIO(buf))
 
 
 # ── Core processing ───────────────────────────────────────────────────────────
@@ -284,17 +285,22 @@ def main():
 
     args.out.mkdir(parents=True, exist_ok=True)
 
-    # Load
+    # Stream instruments one at a time — each DataFrame is read, processed, and
+    # released before the next, so memory stays bounded regardless of universe
+    # size (1,674 files / ~630M rows would OOM a load-everything approach).
     if args.s3:
-        instruments = load_parquet_s3()
+        instruments = iter_parquet_s3()
     else:
-        instruments = load_parquet_local(args.data)
+        instruments = iter_parquet_local(args.data)
 
     if args.limit:
-        instruments = instruments[:args.limit]
+        # islice caps the stream BEFORE the (N+1)th file is read/fetched, so
+        # --limit still means "stop after N instruments" with no wasted I/O.
+        import itertools
+        instruments = itertools.islice(instruments, args.limit)
         log.info("Limiting to %d instruments (--limit)", args.limit)
 
-    log.info("Processing %d instruments → %s", len(instruments), args.out)
+    log.info("Processing instruments → %s", args.out)
 
     all_stats = []
     skipped   = 0
@@ -304,6 +310,8 @@ def main():
         stats = process_instrument(security_id, df, args.out,
                                    timeframe=args.timeframe,
                                    context_len=context_len, pred_len=pred_len)
+        # Release this instrument's DataFrame before reading the next one.
+        del df
         if stats is None:
             skipped += 1
             continue
