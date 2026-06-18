@@ -27,3 +27,19 @@ def test_sell_receives_less():
 def test_rejects_zero_price():
     ex = PaperExecutor()
     assert asyncio.run(ex.submit(intent("BUY"), ref_price=0.0)) is None
+
+
+def qty_intent(qty):
+    return OrderIntent(security_id="999", exchange_segment="NSE_EQ",
+                       side="BUY", qty=qty, strategy="ORB")
+
+
+def test_rejects_zero_qty():
+    """A direct/zero-qty call must not journal a 0-qty paper fill."""
+    ex = PaperExecutor()
+    assert asyncio.run(ex.submit(qty_intent(0), ref_price=100.0)) is None
+
+
+def test_rejects_negative_qty():
+    ex = PaperExecutor()
+    assert asyncio.run(ex.submit(qty_intent(-5), ref_price=100.0)) is None

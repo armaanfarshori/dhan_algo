@@ -40,6 +40,21 @@ def fast_executor(client):
     return ex
 
 
+def test_rejects_zero_qty_no_order_sent():
+    """A zero-qty intent must short-circuit before any broker call."""
+    broker = FakeDhan(["TRADED"])
+    ex = fast_executor(broker)
+    assert asyncio.run(ex.submit(intent(qty=0), ref_price=100.0)) is None
+    assert broker.placed == []          # no order was placed
+
+
+def test_rejects_negative_qty_no_order_sent():
+    broker = FakeDhan(["TRADED"])
+    ex = fast_executor(broker)
+    assert asyncio.run(ex.submit(intent(qty=-3), ref_price=100.0)) is None
+    assert broker.placed == []
+
+
 def test_confirmed_fill_uses_broker_avg_price():
     client = FakeDhan(["TRADED"], avg_price=101.25)
     f = asyncio.run(fast_executor(client).submit(intent(), ref_price=100.0))

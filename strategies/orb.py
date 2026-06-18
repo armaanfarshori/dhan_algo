@@ -17,11 +17,16 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time as dtime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("dhan.strategy.orb")
 
+IST = ZoneInfo("Asia/Kolkata")
 MARKET_OPEN = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 30)
+# A tick stamped further than this ahead of the wall clock is implausible —
+# we ignore it rather than trust it to date a session or widen the OR.
+MAX_FUTURE_SKEW = timedelta(minutes=2)
 
 
 @dataclass
@@ -78,6 +83,18 @@ class ORB:
         """now must be IST. high/low are the current intrabar extremes if known."""
         if price <= 0:
             return None
+
+        # Defense-in-depth: a tick whose timestamp is implausibly in the future
+        # (vs the wall clock) must NOT reset the session (it would derive a
+        # future session date and wipe a locked OR) nor widen the OR. Compare in
+        # IST; tolerate either naive (assumed IST) or tz-aware timestamps.
+        wall = datetime.now(IST)
+        ref = wall if now.tzinfo is not None else wall.replace(tzinfo=None)
+        if now - ref > MAX_FUTURE_SKEW:
+            logger.warning("[ORB %s] ignoring future-stamped tick %s (now %s) — skew > %s",
+                           self.security_id, now, ref, MAX_FUTURE_SKEW)
+            return None
+
         today = now.date()
         t = now.time()
 

@@ -37,6 +37,10 @@ class PaperExecutor(OrderExecutor):
         self._slippage_bps = slippage_bps
 
     async def submit(self, intent: OrderIntent, ref_price: float) -> Optional[Fill]:
+        if intent.qty <= 0:
+            logger.warning("PaperExecutor: non-positive qty %d for %s — rejecting",
+                           intent.qty, intent.security_id)
+            return None
         if ref_price <= 0:
             logger.warning("PaperExecutor: no reference price for %s — rejecting", intent.security_id)
             return None
@@ -75,6 +79,10 @@ class LiveExecutor(OrderExecutor):
         self._run_id = run_id
 
     async def submit(self, intent: OrderIntent, ref_price: float) -> Optional[Fill]:
+        if intent.qty <= 0:
+            logger.warning("LiveExecutor: non-positive qty %d for %s — rejecting (no order sent)",
+                           intent.qty, intent.security_id)
+            return None
         correlation_id: Optional[str] = None
         try:
             result = await self._client.place_order(
