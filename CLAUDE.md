@@ -3,6 +3,12 @@
 **Last updated:** 2026-06-17
 **Current phase:** ENGINE LIVE (paper) · BACKFILL DONE · M2.5 CLEAN-DB BUILD RUNNING · S3 PIPELINE WIRED · GATE IN SHADOW
 
+> **F&O research track (Phase 0, 2026-06-19):** separate effort on branch `feat/fno-data-foundation`
+> building a NIFTY index-options data foundation (futures/VIX/ATM-IV in TimescaleDB → vol-regime gate
+> → hedged-options backtest). Research-only, PAPER, no live order paths. See `docs/fno-handoff.md`;
+> schema lands in Alembic **009** (`009_fno_foundation.py`). New gate is `ml/fno_vol_gate.py` (NOT the
+> live equity `ml/kronos_gate.py`). Stops at backtest go/no-go before any strategy/live build.
+
 ---
 
 ## 💻 This is the LOCAL MAC clone
