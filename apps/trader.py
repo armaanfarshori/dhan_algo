@@ -314,6 +314,13 @@ async def main():
                 logger.warning("Watchlist += %s (open position, not in screener)", p.security_id)
         logger.info("Watchlist (%d): %s", len(watchlist_ids), watchlist_ids)
 
+        # Audit log: persist today's screened set + which names made the final
+        # tradeable watchlist. Best-effort — record_daily_screen never raises.
+        from core.screen_log import record_daily_screen
+        await asyncio.get_running_loop().run_in_executor(
+            None, lambda: record_daily_screen(
+                screener_results, selected_ids=watchlist_ids))
+
         eq_sids = [int(s) for s in watchlist_ids if s.isdigit()]
         if eq_sids:
             feed.subscribe({cfg.watchlist_exchange_segment: eq_sids})

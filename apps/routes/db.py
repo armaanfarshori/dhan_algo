@@ -6,12 +6,30 @@ Use approximate_row_count() / hypertable_size() / chunk-catalog ranges.
 """
 import json
 import logging
+from datetime import date, datetime
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 from aiohttp import web
 
 logger = logging.getLogger("dhan.api")
 _IST = ZoneInfo("Asia/Kolkata")   # equity-curve x-axis labels render in IST
+
+
+def _safe_date(value: str) -> Optional[date]:
+    """Parse a YYYY-MM-DD date string, returning None on any malformed input.
+
+    Defence-in-depth: the parsed value is only ever used as a bound parameter
+    (never string-interpolated into SQL), and datetime.strptime rejects
+    anything that isn't an exact ISO date — so injection is impossible. The
+    strict format also rejects junk like '2026-13-99' or '1; DROP TABLE'.
+    """
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
 
 
 async def equity_handler(_r: web.Request) -> web.Response:
@@ -353,3 +371,51 @@ async def rate_limits_handler(_r: web.Request) -> web.Response:
     except Exception:
         logger.exception("rate_limits_handler failed")
         return web.json_response({"ok": False, "error": "internal error"}, status=500)
+
+
+async def screen_handler(request: web.Request) -> web.Response:
+    """The daily screened-stock audit log for one trading day.
+
+    GET /api/screen?date=YYYY-MM-DD  (default = today IST).
+    Returns the day's rows (selected first, then by rank).
+    """
+    from apps.api import _db_query
+
+    raw = request.rel_url.query.get("date", "")
+    if raw:
+        day = _safe_date(raw)
+        if day is None:
+            return web.json_response(
+                {"ok": False, "error": "date must be YYYY-MM-DD"}, status=400)
+    else:
+        day = datetime.now(_IST).date()
+
+    def _query():
+        from core.screen_log import get_screen_for_day
+        return get_screen_for_day(day)
+
+    try:
+        rows = await _db_query(_query)
+        return web.json_response({
+            "ok": True, "date": day.isoformat(),
+            "count": len(rows), "rows": rows,
+        })
+    except Exception:
+        logger.exception("screen_handler failed")
+        return web.json_response({"ok": False, "error": "internal error", "rows": []})
+
+
+async def screen_days_handler(_r: web.Request) -> web.Response:
+    """GET /api/screen/days — distinct trading days available in the audit log."""
+    from apps.api import _db_query
+
+    def _query():
+        from core.screen_log import list_screen_days
+        return list_screen_days()
+
+    try:
+        days = await _db_query(_query)
+        return web.json_response({"ok": True, "count": len(days), "days": days})
+    except Exception:
+        logger.exception("screen_days_handler failed")
+        return web.json_response({"ok": False, "error": "internal error", "days": []})

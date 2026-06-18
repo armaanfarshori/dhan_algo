@@ -226,6 +226,8 @@ from apps.routes.db import (  # noqa: E402
     kronos_signals_handler,
     kronos_screener_handler,
     rate_limits_handler,
+    screen_handler,
+    screen_days_handler,
 )
 from apps.routes.market import (  # noqa: E402
     funds_handler,
@@ -347,6 +349,8 @@ def build_app() -> web.Application:
     app.router.add_get("/api/kronos/screener", kronos_screener_handler)
     app.router.add_get("/api/kronos/live", kronos_live_handler)
     app.router.add_get("/api/rate-limits", rate_limits_handler)
+    app.router.add_get("/api/screen", screen_handler)
+    app.router.add_get("/api/screen/days", screen_days_handler)
     app.router.add_get("/api/backfill/status", backfill_status_handler)
     app.router.add_get("/api/system/health", system_health_handler)
     app.router.add_get("/api/backtest/runs", backtest_runs_handler)
