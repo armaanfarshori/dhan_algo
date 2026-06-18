@@ -127,6 +127,12 @@ class FakePortfolio:
 
     async def apply_fill(self, fill: Fill, *, strategy: str = "ORB") -> float:
         self.fills_applied.append((fill, strategy))
+        # Reflect the fill in the position (real Portfolio does this) so the runner's
+        # post-fill `get().qty` check sees the true residual — e.g. a partial exit.
+        signed = fill.qty if fill.side == "BUY" else -fill.qty
+        self._pos = Position(security_id=self._pos.security_id,
+                             qty=self._pos.qty + signed,
+                             avg_price=self._pos.avg_price)
         return self.realized_pnl
 
 
@@ -320,6 +326,27 @@ def test_exit_happy_path_short():
     exit_intent, _ = executor.submitted[0]
     assert exit_intent.side == "BUY"
     assert exit_intent.qty == 3
+
+
+def test_exit_partial_fill_keeps_slot():
+    """A PARTIAL exit fill leaves a residual position → keep the risk slot booked
+    and do NOT notify flat (retry the remainder next poll). Releasing here would
+    leave a live position with zero booked risk + a strategy that thinks it's flat."""
+    decision = Decision(action="EXIT", reason="target hit")
+    open_pos = Position(security_id="42", qty=5, avg_price=102.0)
+    port = FakePortfolio(position=open_pos)
+
+    runner, strategy, gate, risk, executor, _ = make_runner(
+        decision=decision, portfolio=port
+    )
+    # Executor fills only 3 of the 5 requested — a partial exit
+    executor._fill = Fill(security_id="42", side="SELL", qty=3, price=101.0)
+
+    asyncio.run(runner._poll_once(ist(10, 0)))
+
+    assert port.get("42").qty == 2          # 3 of 5 sold → 2 remain
+    assert risk.released == []              # slot NOT released
+    assert strategy.flats_notified == 0     # strategy NOT told it's flat
 
 
 # ─── 6. Exit when already flat (resync) ──────────────────────────────────────

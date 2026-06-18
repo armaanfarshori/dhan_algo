@@ -79,7 +79,10 @@ function KpiRow({ data }) {
   const ck  = bf?.checkpoint ?? {}
   // Compute pct client-side from index/total — the API rounds pct to 0.1%
   // (~9 securities), so it only ticks every few minutes; 2-decimal here moves visibly.
-  const pct = (ck.index != null && ck.total) ? (ck.index / ck.total * 100) : (ck.pct ?? 0)
+  // Clamp to [0,100] so a transient index>total (or a bad pct) can't render a
+  // negative "% left" (line below shows 100 - pct).
+  const pct = Math.min(100, Math.max(0,
+    (ck.index != null && ck.total) ? (ck.index / ck.total * 100) : (ck.pct ?? 0)))
 
   // API calls today: sum total across all capped + uncapped categories
   const cats = data.rateLimitsData?.data?.categories ?? {}
