@@ -7,7 +7,9 @@ into each test that needs it via a module-level try/except + pytest.importorskip
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import date
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -821,4 +823,331 @@ class TestAllStandAsideRun:
         result = self._run()
         ok, reason = result["go_no_go"]
         assert ok is False
+        assert isinstance(reason, str)
+
+
+# ===========================================================================
+# SECTION 7 — cycles_from_db (DB loader, monkeypatched)
+# ===========================================================================
+
+
+@needs_condor
+class TestCyclesFromDb:
+    """Verify cycles_from_db assembles cycles correctly from canned DB rows.
+
+    get_session is monkeypatched to return a fake session whose execute()
+    returns scripted result sets:
+      1st call  → expiry_calendar weekly rows for NIFTY
+      2nd call  → index_bars NIFTY (security_id="13")
+      3rd call  → index_bars VIX   (security_id="21")
+
+    Canned data (all dates are Python date objects):
+      Expiries:  2026-01-08, 2026-01-15, 2026-01-22
+      NIFTY bars:
+        2026-01-08 close=23000.0 rvol=0.12
+        2026-01-15 close=23200.0 rvol=0.13
+        2026-01-22 close=23400.0 rvol=0.14   ← only needed as expiry_spot for last pair
+      VIX bars:
+        2026-01-08 close=14.0  → straddle_iv = 0.14
+        2026-01-15 close=15.0  → straddle_iv = 0.15
+        2026-01-22 close=16.0  ← not needed as an entry (no E_{i+2})
+      Missing VIX at 2026-01-15 in the "skip" variant to test skip logic.
+
+    Expected cycles (all present variant):
+      Cycle 0: entry=2026-01-08, expiry=2026-01-15, spot=23000, rvol=0.12,
+               straddle_iv=0.14, dte=7, expiry_spot=23200
+      Cycle 1: entry=2026-01-15, expiry=2026-01-22, spot=23200, rvol=0.13,
+               straddle_iv=0.15, dte=7, expiry_spot=23400
+    """
+
+    # ── Canned data ──────────────────────────────────────────────────────────
+
+    _EXPIRY_DATES = [date(2026, 1, 8), date(2026, 1, 15), date(2026, 1, 22)]
+
+    _NIFTY_ROWS = [
+        (date(2026, 1, 8),  23000.0, 0.12),
+        (date(2026, 1, 15), 23200.0, 0.13),
+        (date(2026, 1, 22), 23400.0, 0.14),
+    ]
+
+    _VIX_ROWS = [
+        (date(2026, 1, 8),  14.0),
+        (date(2026, 1, 15), 15.0),
+        (date(2026, 1, 22), 16.0),
+    ]
+
+    # ── Helpers ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _make_session(expiry_rows, nifty_rows, vix_rows):
+        """Return a context-manager that yields a fake SQLAlchemy session.
+
+        execute() returns result sets in call order:
+          call 0 → expiry_calendar weekly rows (or empty → triggers fallback call 1)
+          call 1 → (fallback) expiry_calendar all rows  [only when call 0 is empty]
+          next   → nifty index_bars rows
+          next   → vix index_bars rows
+
+        When expiry_rows is non-empty we need exactly 3 execute() calls.
+        When empty (weekly fallback test) we need 4.
+        """
+
+        def _make_result(rows):
+            result = MagicMock()
+            result.fetchall.return_value = rows
+            return result
+
+        session = MagicMock()
+        session.execute.side_effect = [
+            _make_result(expiry_rows),          # expiry_calendar weekly
+            _make_result(nifty_rows),            # index_bars NIFTY
+            _make_result(vix_rows),              # index_bars VIX
+        ]
+
+        @contextmanager
+        def fake_get_session():
+            yield session
+
+        return fake_get_session
+
+    @staticmethod
+    def _make_session_with_fallback(nifty_rows, vix_rows, all_expiry_rows):
+        """Session where the weekly query returns empty → fallback is triggered."""
+
+        def _make_result(rows):
+            result = MagicMock()
+            result.fetchall.return_value = rows
+            return result
+
+        session = MagicMock()
+        session.execute.side_effect = [
+            _make_result([]),               # weekly expiry query → empty
+            _make_result(all_expiry_rows),  # fallback all-expiries query
+            _make_result(nifty_rows),
+            _make_result(vix_rows),
+        ]
+
+        @contextmanager
+        def fake_get_session():
+            yield session
+
+        return fake_get_session
+
+    # ── Tests ────────────────────────────────────────────────────────────────
+
+    def _run_with_canned(self, vix_rows=None):
+        from research.backtest.fno_condor import cycles_from_db
+
+        expiry_rows = [(d,) for d in self._EXPIRY_DATES]
+        nifty_rows = self._NIFTY_ROWS
+        vix = vix_rows if vix_rows is not None else self._VIX_ROWS
+        fake_gs = self._make_session(expiry_rows, nifty_rows, vix)
+
+        with patch("research.backtest.fno_condor.get_session", new=fake_gs, create=True), \
+             patch("db.get_session", new=fake_gs):
+            return cycles_from_db()
+
+    def test_correct_number_of_cycles(self):
+        """Three expiries → two consecutive pairs → two cycles."""
+        cycles = self._run_with_canned()
+        assert len(cycles) == 2
+
+    def test_consecutive_pairing(self):
+        """Cycle 0 entry=E_0, expiry=E_1; cycle 1 entry=E_1, expiry=E_2."""
+        cycles = self._run_with_canned()
+        assert cycles[0]["entry_date"] == date(2026, 1, 8)
+        assert cycles[0]["expiry_date"] == date(2026, 1, 15)
+        assert cycles[1]["entry_date"] == date(2026, 1, 15)
+        assert cycles[1]["expiry_date"] == date(2026, 1, 22)
+
+    def test_straddle_iv_is_vix_divided_by_100(self):
+        """straddle_iv = VIX close / 100 for the ENTRY date of each cycle."""
+        cycles = self._run_with_canned()
+        # Cycle 0: VIX at 2026-01-08 = 14.0 → 0.14
+        assert cycles[0]["straddle_iv"] == pytest.approx(14.0 / 100.0)
+        # Cycle 1: VIX at 2026-01-15 = 15.0 → 0.15
+        assert cycles[1]["straddle_iv"] == pytest.approx(15.0 / 100.0)
+
+    def test_dte_is_days_between_entry_and_expiry(self):
+        """dte = (expiry_date - entry_date).days."""
+        cycles = self._run_with_canned()
+        assert cycles[0]["dte"] == 7
+        assert cycles[1]["dte"] == 7
+
+    def test_expiry_spot_is_nifty_close_at_expiry_date(self):
+        """expiry_spot = NIFTY close on E_{i+1}, not E_i."""
+        cycles = self._run_with_canned()
+        assert cycles[0]["expiry_spot"] == pytest.approx(23200.0)
+        assert cycles[1]["expiry_spot"] == pytest.approx(23400.0)
+
+    def test_spot_and_rvol_are_from_entry_date(self):
+        """spot and realized_vol_20d are taken from the ENTRY date E_i."""
+        cycles = self._run_with_canned()
+        assert cycles[0]["spot"] == pytest.approx(23000.0)
+        assert cycles[0]["realized_vol_20d"] == pytest.approx(0.12)
+        assert cycles[1]["spot"] == pytest.approx(23200.0)
+        assert cycles[1]["realized_vol_20d"] == pytest.approx(0.13)
+
+    def test_missing_vix_skips_pair(self):
+        """When VIX is absent for an entry date the pair is silently skipped."""
+        # Remove VIX for 2026-01-15 → second cycle (entry 2026-01-15) must be skipped.
+        vix_partial = [
+            (date(2026, 1, 8),  14.0),
+            # 2026-01-15 deliberately absent
+            (date(2026, 1, 22), 16.0),
+        ]
+        cycles = self._run_with_canned(vix_rows=vix_partial)
+        # Only the first pair survives
+        assert len(cycles) == 1
+        assert cycles[0]["entry_date"] == date(2026, 1, 8)
+
+    def test_missing_nifty_close_at_expiry_skips_pair(self):
+        """When NIFTY close is absent at E_{i+1} the pair is silently skipped."""
+        from research.backtest.fno_condor import cycles_from_db
+
+        # Remove NIFTY bar for 2026-01-15 → cycle 0 (entry 01-08, expiry 01-15)
+        # loses its expiry_spot; cycle 1 (entry 01-15) also loses its spot/rvol.
+        # Both pairs should be skipped.
+        nifty_partial = [
+            # 2026-01-08 present (entry for cycle 0)
+            (date(2026, 1, 8), 23000.0, 0.12),
+            # 2026-01-15 absent → cycle 0 has no expiry_spot; cycle 1 has no spot
+            (date(2026, 1, 22), 23400.0, 0.14),
+        ]
+        expiry_rows = [(d,) for d in self._EXPIRY_DATES]
+        fake_gs = self._make_session(expiry_rows, nifty_partial, self._VIX_ROWS)
+
+        with patch("research.backtest.fno_condor.get_session", new=fake_gs, create=True), \
+             patch("db.get_session", new=fake_gs):
+            cycles = cycles_from_db()
+
+        # Cycle 0: expiry_spot on 2026-01-15 is missing → skip
+        # Cycle 1: spot/rvol on 2026-01-15 is missing → skip
+        assert len(cycles) == 0
+
+    def test_missing_rvol_skips_pair(self):
+        """When realized_vol_20d is None for the entry date the pair is skipped."""
+        from research.backtest.fno_condor import cycles_from_db
+
+        # rvol=None on 2026-01-08 → cycle 0 (entry 01-08) skipped;
+        # cycle 1 (entry 01-15) has rvol so it survives.
+        nifty_no_rvol = [
+            (date(2026, 1, 8),  23000.0, None),   # rvol missing
+            (date(2026, 1, 15), 23200.0, 0.13),
+            (date(2026, 1, 22), 23400.0, 0.14),
+        ]
+        expiry_rows = [(d,) for d in self._EXPIRY_DATES]
+        fake_gs = self._make_session(expiry_rows, nifty_no_rvol, self._VIX_ROWS)
+
+        with patch("research.backtest.fno_condor.get_session", new=fake_gs, create=True), \
+             patch("db.get_session", new=fake_gs):
+            cycles = cycles_from_db()
+
+        assert len(cycles) == 1
+        assert cycles[0]["entry_date"] == date(2026, 1, 15)
+
+    def test_weekly_fallback_when_no_weekly_rows(self):
+        """If expiry_calendar has no weekly rows, fall back to all expiries."""
+        from research.backtest.fno_condor import cycles_from_db
+
+        all_expiry_rows = [(d,) for d in self._EXPIRY_DATES]
+        fake_gs = self._make_session_with_fallback(
+            self._NIFTY_ROWS, self._VIX_ROWS, all_expiry_rows
+        )
+
+        with patch("research.backtest.fno_condor.get_session", new=fake_gs, create=True), \
+             patch("db.get_session", new=fake_gs):
+            cycles = cycles_from_db()
+
+        assert len(cycles) == 2
+
+    def test_fewer_than_two_expiries_returns_empty(self):
+        """A single expiry date → no consecutive pairs → empty list."""
+        from research.backtest.fno_condor import cycles_from_db
+
+        expiry_rows = [(date(2026, 1, 8),)]
+        fake_gs = self._make_session(expiry_rows, self._NIFTY_ROWS, self._VIX_ROWS)
+
+        with patch("research.backtest.fno_condor.get_session", new=fake_gs, create=True), \
+             patch("db.get_session", new=fake_gs):
+            cycles = cycles_from_db()
+
+        assert cycles == []
+
+    def test_cycle_dict_has_required_keys(self):
+        """Every cycle dict must carry all keys run_backtest expects."""
+        cycles = self._run_with_canned()
+        required = {"entry_date", "expiry_date", "spot", "straddle_iv",
+                    "realized_vol_20d", "dte", "expiry_spot"}
+        for i, c in enumerate(cycles):
+            assert required.issubset(c.keys()), f"cycle {i} missing keys: {required - c.keys()}"
+
+
+# ===========================================================================
+# SECTION 8 — cycles_from_db → run_backtest end-to-end
+# ===========================================================================
+
+
+@needs_condor
+class TestCyclesFromDbEndToEnd:
+    """Feed cycles_from_db output directly into run_backtest and assert no crash."""
+
+    def test_run_backtest_on_db_cycles_returns_metrics_dict(self):
+        """Smoke test: canned DB cycles → run_backtest → valid metrics dict."""
+        from research.backtest.fno_condor import cycles_from_db, run_backtest
+
+        # Build two SELL-gate-passing cycles from the canned data above.
+        # straddle_iv=0.14, realized_vol_20d=0.12  → 0.12 < 0.9*0.14=0.126 → SELL
+        expiry_dates = [date(2026, 1, 8), date(2026, 1, 15), date(2026, 1, 22)]
+        nifty_rows = [
+            (date(2026, 1, 8),  23400.0, 0.10),   # rvol well below 0.9*IV → SELL gate fires
+            (date(2026, 1, 15), 23400.0, 0.10),
+            (date(2026, 1, 22), 23400.0, 0.10),
+        ]
+        vix_rows = [
+            (date(2026, 1, 8),  15.0),   # straddle_iv=0.15, rvol=0.10 < 0.9*0.15=0.135
+            (date(2026, 1, 15), 15.0),
+            (date(2026, 1, 22), 15.0),
+        ]
+        expiry_rows = [(d,) for d in expiry_dates]
+
+        def _make_result(rows):
+            result = MagicMock()
+            result.fetchall.return_value = rows
+            return result
+
+        session = MagicMock()
+        session.execute.side_effect = [
+            _make_result(expiry_rows),
+            _make_result(nifty_rows),
+            _make_result(vix_rows),
+        ]
+
+        @contextmanager
+        def fake_get_session():
+            yield session
+
+        with patch("research.backtest.fno_condor.get_session", new=fake_get_session, create=True), \
+             patch("db.get_session", new=fake_get_session):
+            cycles = cycles_from_db()
+
+        assert len(cycles) == 2, f"expected 2 cycles, got {len(cycles)}"
+
+        metrics = run_backtest(cycles, k=0.9, move_mult=1.0, capital=200_000.0)
+
+        # Must return a dict with the standard metrics keys
+        required_keys = {
+            "trades", "n_cycles", "n_trades", "win_rate",
+            "profit_factor", "sharpe", "max_drawdown", "net_pnl",
+            "return_on_capital", "go_no_go",
+        }
+        assert required_keys.issubset(metrics.keys()), (
+            f"metrics missing: {required_keys - metrics.keys()}"
+        )
+        # Both cycles are SELL-gate-passing → at least some trades expected
+        assert metrics["n_cycles"] == 2
+        assert metrics["n_trades"] >= 0   # gate may filter some; just assert no crash
+        assert isinstance(metrics["go_no_go"], tuple)
+        ok, reason = metrics["go_no_go"]
+        assert isinstance(ok, bool)
         assert isinstance(reason, str)

@@ -163,6 +163,50 @@ def compute_realized_vol(symbol: str, timeframe: str = "1d", window: int = 20) -
     return n
 
 
+def compute_index_realized_vol(
+    security_id: str, timeframe: str = "1d", window: int = 20
+) -> int:
+    """Recompute realized_vol_20d for one index security/timeframe and write it back
+    to index_bars in a single bulk UPDATE. Returns the number of rows updated.
+
+    Targets the ``index_bars`` table (keyed by security_id/timeframe/time).
+    The canonical NIFTY 50 spot security_id is ``"13"``; India VIX is ``"21"``.
+    """
+    from sqlalchemy import text
+
+    from db import get_session
+
+    with get_session() as session:
+        rows = session.execute(
+            text(
+                "SELECT time, close FROM index_bars "
+                "WHERE security_id = :s AND timeframe = :tf ORDER BY time"
+            ),
+            {"s": security_id, "tf": timeframe},
+        ).all()
+    if not rows:
+        return 0
+    times = [r[0] for r in rows]
+    closes = [float(r[1]) for r in rows]
+    vols = realized_vol_series(closes, window=window)
+    payload = [
+        (security_id, timeframe, t, v) for t, v in zip(times, vols) if v is not None
+    ]
+    n = _bulk_update(
+        "UPDATE index_bars AS i SET realized_vol_20d = d.v "
+        "FROM (VALUES %s) AS d(s, tf, t, v) "
+        "WHERE i.security_id = d.s AND i.timeframe = d.tf AND i.time = d.t",
+        payload,
+    )
+    logger.info(
+        "realized_vol_20d (index): updated %d rows for security_id=%s/%s",
+        n,
+        security_id,
+        timeframe,
+    )
+    return n
+
+
 def compute_implied_move(symbol: str) -> int:
     """Recompute implied_move for one symbol and write it back to option_atm_iv
     in a single bulk UPDATE. Returns the number of rows updated."""

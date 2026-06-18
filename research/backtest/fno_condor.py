@@ -55,6 +55,9 @@ from core.fno_derived import implied_move as _implied_move
 from ml.fno_vol_gate import SELL_PREMIUM, gate_decision  # noqa: F401
 from research.backtest.fno_costs import NIFTY_LOT, condor_costs, slippage  # noqa: F401
 
+# db and sqlalchemy are lazy-imported inside cycles_from_db so that
+# the pure pricing / backtest functions remain DB-free.
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -615,3 +618,164 @@ def go_no_go(metrics: dict[str, Any], capital: float = 200_000.0) -> tuple[bool,
         )
 
     return go, reason
+
+
+# ---------------------------------------------------------------------------
+# DB loader (hydrates `cycles` for run_backtest from live tables)
+# ---------------------------------------------------------------------------
+
+
+def cycles_from_db(
+    symbol: str = "NIFTY",
+    *,
+    nifty_id: str = "13",
+    vix_id: str = "21",
+    timeframe: str = "1d",
+) -> list[dict]:
+    """Assemble weekly iron-condor cycles from the DB tables created in migrations 009/010.
+
+    This is the loader flagged as TODO in the fno_condor_report.  It reads:
+
+    * ``expiry_calendar`` for weekly NIFTY expiry dates (falls back to all
+      expiries for the symbol if no weekly rows are present).
+    * ``index_bars`` for daily NIFTY close + realized_vol_20d (security_id =
+      ``nifty_id``) and India VIX close (security_id = ``vix_id``).
+
+    For each consecutive expiry pair (E_i, E_{i+1}) it builds a cycle dict
+    that ``run_backtest`` can consume directly:
+
+    .. code-block:: python
+
+        {
+            "entry_date":       date,   # E_i  — the entry day
+            "expiry_date":      date,   # E_{i+1} — settlement day
+            "spot":             float,  # NIFTY close at E_i
+            "realized_vol_20d": float,  # NIFTY 20-day realised vol at E_i
+            "straddle_iv":      float,  # India VIX close at E_i / 100
+            "dte":              int,    # (E_{i+1} - E_i).days
+            "expiry_spot":      float,  # NIFTY close at E_{i+1}
+        }
+
+    A pair is silently skipped when any required value is absent (no NIFTY
+    close / rvol at E_i, no VIX close at E_i, no NIFTY close at E_{i+1}).
+
+    Parameters
+    ----------
+    symbol:     Ticker key in expiry_calendar (default ``"NIFTY"``).
+    nifty_id:   ``security_id`` of the NIFTY index row in index_bars.
+    vix_id:     ``security_id`` of the India VIX row in index_bars.
+    timeframe:  Bar timeframe stored in index_bars (default ``"1d"``).
+
+    Returns
+    -------
+    list of cycle dicts, ordered by entry_date ascending.
+    """
+    # Lazy imports — keep pure pricing functions free of DB dependencies.
+    from sqlalchemy import text  # noqa: PLC0415
+
+    from db import get_session  # noqa: PLC0415
+
+    tf = timeframe
+
+    with get_session() as session:
+        # ── 1. Expiry dates ──────────────────────────────────────────────────
+        rows = session.execute(
+            text(
+                "SELECT expiry_date FROM expiry_calendar "
+                "WHERE symbol = :sym AND expiry_type = 'weekly' "
+                "ORDER BY expiry_date ASC"
+            ),
+            {"sym": symbol},
+        ).fetchall()
+
+        if not rows:
+            # Fallback: no weekly flag — use all expiries for this symbol.
+            rows = session.execute(
+                text(
+                    "SELECT expiry_date FROM expiry_calendar "
+                    "WHERE symbol = :sym "
+                    "ORDER BY expiry_date ASC"
+                ),
+                {"sym": symbol},
+            ).fetchall()
+
+        expiry_dates: list[date] = [r[0] for r in rows]
+
+        if len(expiry_dates) < 2:
+            logger.warning(
+                "cycles_from_db: fewer than 2 expiry dates found for symbol=%s — "
+                "returning empty cycle list.",
+                symbol,
+            )
+            return []
+
+        # ── 2. NIFTY index bars → {date: (close, realized_vol_20d)} ─────────
+        nifty_rows = session.execute(
+            text(
+                "SELECT (time AT TIME ZONE 'UTC')::date AS d, close, realized_vol_20d "
+                "FROM index_bars "
+                "WHERE security_id = :nid AND timeframe = :tf"
+            ),
+            {"nid": nifty_id, "tf": tf},
+        ).fetchall()
+
+        nifty_map: dict[date, tuple[float, float | None]] = {}
+        for r in nifty_rows:
+            d, close, rvol = r[0], r[1], r[2]
+            nifty_map[d] = (float(close), float(rvol) if rvol is not None else None)
+
+        # ── 3. India VIX bars → {date: close} ───────────────────────────────
+        vix_rows = session.execute(
+            text(
+                "SELECT (time AT TIME ZONE 'UTC')::date AS d, close "
+                "FROM index_bars "
+                "WHERE security_id = :vid AND timeframe = :tf"
+            ),
+            {"vid": vix_id, "tf": tf},
+        ).fetchall()
+
+        vix_map: dict[date, float] = {r[0]: float(r[1]) for r in vix_rows}
+
+    # ── 4. Build cycles from consecutive expiry pairs ────────────────────────
+    cycles: list[dict] = []
+    for e_i, e_next in zip(expiry_dates[:-1], expiry_dates[1:]):
+        # Required: NIFTY close + rvol at entry, VIX close at entry,
+        # NIFTY close at expiry.
+        nifty_entry = nifty_map.get(e_i)
+        if nifty_entry is None or nifty_entry[1] is None:
+            logger.debug(
+                "cycles_from_db: skipping pair (%s, %s) — missing NIFTY close/rvol at %s",
+                e_i, e_next, e_i,
+            )
+            continue
+
+        vix_entry = vix_map.get(e_i)
+        if vix_entry is None:
+            logger.debug(
+                "cycles_from_db: skipping pair (%s, %s) — missing VIX close at %s",
+                e_i, e_next, e_i,
+            )
+            continue
+
+        nifty_expiry = nifty_map.get(e_next)
+        if nifty_expiry is None:
+            logger.debug(
+                "cycles_from_db: skipping pair (%s, %s) — missing NIFTY close at %s",
+                e_i, e_next, e_next,
+            )
+            continue
+
+        spot, rvol = nifty_entry
+        cycles.append(
+            {
+                "entry_date": e_i,
+                "expiry_date": e_next,
+                "spot": spot,
+                "realized_vol_20d": rvol,
+                "straddle_iv": vix_entry / 100.0,
+                "dte": (e_next - e_i).days,
+                "expiry_spot": nifty_expiry[0],
+            }
+        )
+
+    return cycles
