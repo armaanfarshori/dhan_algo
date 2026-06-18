@@ -104,7 +104,7 @@ def upgrade() -> None:
     op.create_table(
         "option_chain_snapshot",
         sa.Column("snapshot_time",    sa.TIMESTAMP(timezone=True), nullable=False),
-        sa.Column("underlying_scrip", sa.Integer(),  nullable=False),  # 13 = NIFTY
+        sa.Column("underlying_scrip", sa.Integer(),  nullable=False),  # Dhan option-chain UnderlyingScrip (13 = NIFTY, IDX_I). DISTINCT id-space from fno_instruments.underlying_security_id (e.g. 26000) — NOT join-compatible.
         sa.Column("underlying_seg",   sa.String(10), nullable=False, server_default="IDX_I"),
         sa.Column("expiry_date",      sa.Date(),     nullable=False),
         sa.Column("strike",           sa.Numeric(14, 4), nullable=False),
@@ -134,6 +134,11 @@ def upgrade() -> None:
     op.execute(
         "CREATE INDEX IF NOT EXISTS ix_ocs_underlying_expiry_time "
         "ON option_chain_snapshot (underlying_scrip, expiry_date, snapshot_time DESC)"
+    )
+    op.execute(
+        "COMMENT ON COLUMN option_chain_snapshot.iv IS "
+        "'Implied volatility as Dhan returns it — PERCENT scale (12.0 = 12%); "
+        "divide by 100 for a fraction. option_atm_iv stores the normalised fraction.'"
     )
 
     # ── drop india_vix (009) — folded into index_bars ─────────────────────────

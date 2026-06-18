@@ -290,3 +290,73 @@ def test_sync_smoke(monkeypatch):
     nse = counts["NSE_FNO"]
     assert nse.get("FUTIDX", 0) == 1
     assert nse.get("OPTIDX", 0) == 1
+
+
+# ── New QA tests ──────────────────────────────────────────────────────────────
+
+def test_parse_row_blank_security_id_returns_none():
+    """(a) _parse_row returns None when SECURITY_ID is blank or missing."""
+    # Blank SECURITY_ID
+    row_blank = _csv_row(_FUTIDX_ROW)
+    row_blank["SECURITY_ID"] = ""
+    assert _parse_row(row_blank) is None
+
+    # Missing SECURITY_ID key entirely
+    row_missing = _csv_row(_FUTIDX_ROW)
+    del row_missing["SECURITY_ID"]
+    assert _parse_row(row_missing) is None
+
+    # Whitespace-only SECURITY_ID
+    row_ws = _csv_row(_FUTIDX_ROW)
+    row_ws["SECURITY_ID"] = "   "
+    assert _parse_row(row_ws) is None
+
+
+def test_opt_raw_security_id_verbatim():
+    """(b) raw['SECURITY_ID'] equals the verbatim CSV value — raw is not mutated."""
+    raw_row = _csv_row(_OPTIDX_ROW)
+    # The CSV value for SECURITY_ID in _OPTIDX_ROW is "49082"
+    original_sid = raw_row["SECURITY_ID"]
+    result = _parse_row(raw_row)
+    assert result is not None
+    # Parsed security_id is stripped; raw must preserve the original CSV string
+    assert result["raw"]["SECURITY_ID"] == original_sid
+    # Also confirm the raw value is "49082" verbatim (not coerced to int, not modified)
+    assert result["raw"]["SECURITY_ID"] == "49082"
+    # And that result["raw"] is a different dict from the input (no aliasing surprises)
+    assert result["raw"] is not raw_row
+
+
+def test_sync_all_equity_csv_yields_empty(monkeypatch):
+    """(c) sync_fno_instruments on an all-EQUITY CSV yields empty counts, zero captured rows."""
+    import core.fno_instruments as fi
+    import contextlib
+    import db as _db_mod
+
+    # Build a CSV with only the EQUITY row (no FUT/OPT rows)
+    all_equity_csv = "\n".join([_HEADER, _EQUITY_ROW])
+
+    captured: list[dict] = []
+
+    def fake_download(force=False):
+        return all_equity_csv
+
+    def fake_upsert(session, batch):
+        captured.extend(batch)
+        return len(batch)
+
+    @contextlib.contextmanager
+    def fake_session():
+        yield object()
+
+    monkeypatch.setattr(fi, "_download_csv", fake_download)
+    monkeypatch.setattr(fi, "_upsert_batch", fake_upsert)
+    monkeypatch.setattr(_db_mod, "get_session", fake_session)
+
+    counts = sync_fno_instruments()
+
+    # No rows captured — upsert must never be called
+    assert captured == []
+    # counts dict must be empty (no FUT/OPT segments at all)
+    assert counts == {}
+    # Must not raise any exception — verified by reaching here

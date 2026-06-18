@@ -52,6 +52,9 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 # 13 = NIFTY 50 (confirmed via core/live_feed.py IDX_I subscription).
 SYMBOL_SCRIP: dict[str, int] = {"NIFTY": 13}
 
+# IDX_I feed security ids used by backfill_index_bars.
+INDEX_SECURITY_IDS: dict[str, str] = {"NIFTY": "13", "INDIAVIX": "21"}
+
 # ATM strike step (₹) per underlying.
 SYMBOL_STRIKE_STEP: dict[str, int] = {"NIFTY": 50}
 
@@ -115,6 +118,18 @@ def _normalize_iv(v: Any) -> Optional[float]:
     return f / 100.0
 
 
+def _safe_float(v: Any) -> Optional[float]:
+    """Return float(v) or None on TypeError/ValueError/None. Used by history
+    parsers to guard against None or non-numeric elements in Dhan's parallel
+    arrays so we never write NULL into NOT-NULL OHLC columns."""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_futures_history(
     raw: dict[str, Any],
     symbol: str,
@@ -140,16 +155,26 @@ def parse_futures_history(
     ois = inner.get("open_interest") or inner.get("oi") or [None] * n
     rows: list[dict[str, Any]] = []
     for i, ts in enumerate(timestamps[:n]):
+        o = _safe_float(opens[i])
+        h = _safe_float(highs[i])
+        lo = _safe_float(lows[i])
+        c = _safe_float(closes[i])
+        if any(v is None for v in (o, h, lo, c)):
+            logger.debug(
+                "parse_futures_history: skipping bar %d (None in OHLC): o=%s h=%s l=%s c=%s",
+                i, o, h, lo, c,
+            )
+            continue
         rows.append(
             {
                 "time": datetime.fromtimestamp(int(ts), tz=timezone.utc),
                 "symbol": symbol,
                 "timeframe": timeframe,
-                "open": float(opens[i]),
-                "high": float(highs[i]),
-                "low": float(lows[i]),
-                "close": float(closes[i]),
-                "volume": int(volumes[i] or 0),
+                "open": o,
+                "high": h,
+                "low": lo,
+                "close": c,
+                "volume": int(_safe_float(volumes[i]) or 0),
                 "open_interest": (None if ois[i] is None else int(ois[i])),
                 "expiry_date": expiry_date,
             }
@@ -182,17 +207,27 @@ def parse_index_history(
     volumes = inner.get("volume") or [0] * n
     rows: list[dict[str, Any]] = []
     for i, ts in enumerate(timestamps[:n]):
+        o = _safe_float(opens[i])
+        h = _safe_float(highs[i])
+        lo = _safe_float(lows[i])
+        c = _safe_float(closes[i])
+        if any(v is None for v in (o, h, lo, c)):
+            logger.debug(
+                "parse_index_history: skipping bar %d (None in OHLC): o=%s h=%s l=%s c=%s",
+                i, o, h, lo, c,
+            )
+            continue
         rows.append(
             {
                 "time": datetime.fromtimestamp(int(ts), tz=timezone.utc),
                 "security_id": security_id,
                 "symbol": symbol,
                 "timeframe": timeframe,
-                "open": float(opens[i]),
-                "high": float(highs[i]),
-                "low": float(lows[i]),
-                "close": float(closes[i]),
-                "volume": int(volumes[i] or 0),
+                "open": o,
+                "high": h,
+                "low": lo,
+                "close": c,
+                "volume": int(_safe_float(volumes[i]) or 0),
             }
         )
     return rows
@@ -468,6 +503,7 @@ def _upsert_option_chain_snapshot(rows: list[dict[str, Any]]) -> int:
         "iv, delta, theta, gamma, vega, spot, raw) "
         "VALUES %s ON CONFLICT (snapshot_time, underlying_scrip, expiry_date, strike, option_type) "
         "DO UPDATE SET "
+        "underlying_seg=EXCLUDED.underlying_seg, "
         "security_id=EXCLUDED.security_id, ltp=EXCLUDED.ltp, prev_close=EXCLUDED.prev_close, "
         "volume=EXCLUDED.volume, oi=EXCLUDED.oi, prev_oi=EXCLUDED.prev_oi, "
         "prev_volume=EXCLUDED.prev_volume, "
@@ -599,6 +635,8 @@ async def snapshot_option_chain(
     Returns ``{"chain_rows": n, "atm": 0|1}``.
     """
     _assert_off_hours("snapshot_option_chain", now)
+    # Capture now once so snapshot_time and option_atm_iv.time are identical.
+    now = now or _now_ist()
     scrip = underlying_scrip if underlying_scrip is not None else SYMBOL_SCRIP[symbol]
     step = SYMBOL_STRIKE_STEP.get(symbol, 50)
 
@@ -606,21 +644,26 @@ async def snapshot_option_chain(
         raw_expiries = await client.get_fno_expiry_list(scrip, underlying_seg)
         data = raw_expiries.get("data", raw_expiries) if isinstance(raw_expiries, dict) else raw_expiries
         parsed = sorted({d for d in (_parse_date(x) for x in (data or [])) if d is not None})
-        if not parsed:
-            logger.warning("snapshot_option_chain: no expiries returned for %s", symbol)
+        today = now.astimezone(_IST).date()
+        future = [d for d in parsed if d >= today]
+        if not future:
+            logger.warning(
+                "snapshot_option_chain: no future expiries for %s (today=%s, all=%s)",
+                symbol, today, parsed,
+            )
             return {"chain_rows": 0, "atm": 0}
-        expiry_date = min(parsed)
+        expiry_date = min(future)
 
     chain = await client.get_fno_option_chain(scrip, expiry_date.isoformat(), underlying_seg)
 
-    # Full capture
+    # Full capture — pass the same `now` so snapshot_time is consistent.
     snap_rows = parse_option_chain(chain, scrip, underlying_seg, expiry_date, now)
     n = _upsert_option_chain_snapshot(snap_rows)
     logger.info(
         "option_chain_snapshot: upserted %d rows for %s %s", n, symbol, expiry_date
     )
 
-    # Project ATM IV into option_atm_iv (keep that table current)
+    # Project ATM IV into option_atm_iv (keep that table current) — same `now`.
     atm_row = extract_atm_iv(chain, symbol, expiry_date, expiry_type, step, now)
     atm_count = 0
     if atm_row is not None:
@@ -637,13 +680,14 @@ async def build_expiry_calendar(
     symbol: str,
     *,
     underlying_scrip: Optional[int] = None,
+    underlying_seg: str = "IDX_I",
     now: Optional[datetime] = None,
 ) -> int:
     """Fetch the live NIFTY expiry list, classify weekly/monthly, upsert
     expiry_calendar. Off-hours only."""
     _assert_off_hours("build_expiry_calendar", now)
     scrip = underlying_scrip if underlying_scrip is not None else SYMBOL_SCRIP[symbol]
-    raw = await client.get_fno_expiry_list(scrip)
+    raw = await client.get_fno_expiry_list(scrip, underlying_seg)
     data = raw.get("data", raw) if isinstance(raw, dict) else raw
     expiries = sorted({d for d in (_parse_date(x) for x in (data or [])) if d is not None})
     rows = [

@@ -19,7 +19,7 @@ Rates (post-April-2026 NSE/SEBI notifications):
     Stamp duty      0.003% on the BUY side premium
     GST             18% on (brokerage + exchange fee + SEBI fee)
 
-NIFTY lot size = 75 units (as at June 2026); callers must pass qty in units.
+NIFTY lot size = 65 units (as at June 2026); callers must pass qty in units.
 
 Reference: handoff §7; the transaction-charge rationalisation was directed by
 a SEBI circular dated Jul 2024 and implemented by NSE from Oct 2024 — the
@@ -82,8 +82,8 @@ class OptionTradeCosts:
 def leg_turnover(premium: float, qty: int) -> float:
     """Premium turnover for one leg: premium (₹/unit) * qty (units).
 
-    NIFTY standard lot = 75 units; callers are responsible for passing the
-    correct qty (multiples of 75 for whole lots).
+    NIFTY standard lot = 65 units; callers are responsible for passing the
+    correct qty (multiples of 65 for whole lots).
     """
     return premium * qty
 
@@ -115,7 +115,7 @@ def condor_costs(
         ``side`` must be ``"BUY"`` or ``"SELL"``.
         An iron condor entry is 4 legs (2 SELL short strikes + 2 BUY long
         wings); exit reverses them — callers pass all executed legs.
-        ``qty_units`` should already reflect lot size (e.g. 75 for 1 NIFTY lot).
+        ``qty_units`` should already reflect lot size (e.g. 65 for 1 NIFTY lot).
     exercise_intrinsic:
         Aggregate intrinsic value (₹) on any ITM legs that are exercised or
         assigned.  Pass 0.0 for trades closed in the market (no exercise STT).

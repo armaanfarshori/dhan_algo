@@ -546,7 +546,9 @@ def test_snapshot_option_chain_off_hours_full_capture(monkeypatch):
 
 def test_snapshot_option_chain_picks_nearest_expiry_when_none(monkeypatch):
     """If expiry_date is None, snapshot_option_chain calls get_fno_expiry_list
-    and picks the MINIMUM (nearest) expiry."""
+    and picks the MINIMUM FUTURE expiry (past expiries are filtered out).
+    Fake client returns ["2026-06-26", "2026-06-04", "2026-07-31"]; now=2026-06-20
+    so 2026-06-04 is in the past → nearest future = 2026-06-26."""
     chain_captured = {}
     atm_captured = {}
     monkeypatch.setattr(fb, "_upsert_option_chain_snapshot", _capture(chain_captured))
@@ -554,13 +556,13 @@ def test_snapshot_option_chain_picks_nearest_expiry_when_none(monkeypatch):
 
     client = _FakeClient()
     now = datetime(2026, 6, 20, 18, 0, tzinfo=_IST)
-    # Expiry list returns ["2026-06-26", "2026-06-04", "2026-07-31"] → nearest is 2026-06-04
     result = asyncio.run(fb.snapshot_option_chain(client, "NIFTY", now=now))
 
     expiry_call = next(c for c in client.calls if c[0] == "expiry")
     chain_call = next(c for c in client.calls if c[0] == "chain")
     assert expiry_call is not None
-    assert chain_call[2] == "2026-06-04"  # nearest expiry picked
+    # 2026-06-04 is in the past relative to now=2026-06-20; nearest FUTURE = 2026-06-26
+    assert chain_call[2] == "2026-06-26"
     assert result["chain_rows"] == 4
 
 
@@ -573,3 +575,117 @@ def test_snapshot_option_chain_refuses_in_market_hours(monkeypatch):
             fb.snapshot_option_chain(client, "NIFTY", expiry_date=date(2026, 6, 26), now=now)
         )
     assert client.calls == []
+
+
+# ── new QA-driven tests ──────────────────────────────────────────────────────────
+
+
+def test_snapshot_option_chain_picks_nearest_FUTURE_expiry_not_past(monkeypatch):
+    """Nearest-expiry auto-pick must exclude past dates.
+
+    Expiry list mixes a past date (2026-06-10), today (2026-06-20, boundary
+    included), and future dates (2026-06-26, 2026-07-31).  now = 2026-06-20 so
+    'today' is 2026-06-20.  Dates >= today = [2026-06-20, 2026-06-26, 2026-07-31];
+    nearest = 2026-06-20.  The chain call must use 2026-06-20, NOT 2026-06-10.
+    """
+    chain_captured = {}
+    atm_captured = {}
+    monkeypatch.setattr(fb, "_upsert_option_chain_snapshot", _capture(chain_captured))
+    monkeypatch.setattr(fb, "_upsert_atm_iv", _capture(atm_captured))
+
+    class _FakeClientMixed(_FakeClient):
+        async def get_fno_expiry_list(self, scrip, underlying_seg="IDX_I"):
+            self.calls.append(("expiry", scrip, underlying_seg))
+            # deliberately has a past date first so naive min() would pick it
+            return {"data": ["2026-06-10", "2026-06-20", "2026-06-26", "2026-07-31"]}
+
+    client = _FakeClientMixed()
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=_IST)
+    result = asyncio.run(fb.snapshot_option_chain(client, "NIFTY", now=now))
+
+    chain_call = next(c for c in client.calls if c[0] == "chain")
+    # 2026-06-10 is in the past; nearest future (>= today 2026-06-20) = 2026-06-20
+    assert chain_call[2] == "2026-06-20"
+    assert result["chain_rows"] == 4
+
+
+def test_snapshot_option_chain_all_past_expiries_returns_empty(monkeypatch):
+    """If ALL expiries are in the past, return {"chain_rows": 0, "atm": 0}
+    without calling get_fno_option_chain."""
+    monkeypatch.setattr(fb, "_upsert_option_chain_snapshot", lambda rows: 1 / 0)
+    monkeypatch.setattr(fb, "_upsert_atm_iv", lambda rows: 1 / 0)
+
+    class _FakeClientAllPast(_FakeClient):
+        async def get_fno_expiry_list(self, scrip, underlying_seg="IDX_I"):
+            self.calls.append(("expiry", scrip, underlying_seg))
+            return {"data": ["2026-06-01", "2026-06-10", "2026-06-15"]}
+
+    client = _FakeClientAllPast()
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=_IST)
+    result = asyncio.run(fb.snapshot_option_chain(client, "NIFTY", now=now))
+
+    assert result == {"chain_rows": 0, "atm": 0}
+    # get_fno_option_chain must NOT have been called
+    assert not any(c[0] == "chain" for c in client.calls)
+
+
+def test_parse_option_chain_only_pe_node_present():
+    """A node that has only 'pe' (no 'ce' key) emits exactly one PE row."""
+    chain = {
+        "data": {
+            "last_price": 23400.0,
+            "oc": {
+                "23400.000000": {
+                    "pe": {"last_price": 85.0, "implied_volatility": 13.0},
+                    # ce key absent
+                }
+            },
+        }
+    }
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=_IST)
+    rows = fb.parse_option_chain(chain, 13, "IDX_I", date(2026, 6, 26), now=now)
+    assert len(rows) == 1
+    assert rows[0]["option_type"] == "PE"
+    assert rows[0]["ltp"] == pytest.approx(85.0)
+    assert rows[0]["iv"] == pytest.approx(13.0)
+
+
+def test_parse_option_chain_non_dict_side_is_skipped():
+    """If a side value (ce or pe) is a non-dict (e.g. a string), it must be
+    silently skipped — no crash, no partial row emitted."""
+    chain = {
+        "data": {
+            "last_price": 23400.0,
+            "oc": {
+                "23400.000000": {
+                    "ce": "bad",          # non-dict CE — must be skipped
+                    "pe": {"last_price": 85.0},  # valid PE — must produce one row
+                }
+            },
+        }
+    }
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=_IST)
+    rows = fb.parse_option_chain(chain, 13, "IDX_I", date(2026, 6, 26), now=now)
+    assert len(rows) == 1
+    assert rows[0]["option_type"] == "PE"
+
+
+def test_parse_index_history_skips_bar_with_none_close():
+    """A bar where close is None or '' must be skipped entirely — no crash,
+    row count is reduced by one for each bad bar."""
+    raw = {
+        "data": {
+            "timestamp": [1718000000, 1718086400, 1718172800],
+            "open":  [23000, 23100, 23200],
+            "high":  [23200, 23250, 23300],
+            "low":   [22950, 23050, 23150],
+            "close": [23150, None, 23250],   # middle bar has None close
+            "volume": [500, 600, 700],
+        }
+    }
+    rows = fb.parse_index_history(raw, "13", "NIFTY", "1d")
+    # The second bar (None close) must be skipped → only 2 rows
+    assert len(rows) == 2
+    closes = [r["close"] for r in rows]
+    assert 23150.0 in closes
+    assert 23250.0 in closes

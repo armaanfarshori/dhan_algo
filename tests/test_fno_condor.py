@@ -17,6 +17,7 @@ import pytest
 from research.backtest.fno_costs import (
     BROKERAGE_PER_ORDER,
     GST_PCT,
+    NIFTY_LOT,
     OPTION_EXERCISE_STT_PCT,
     OPTION_STT_SELL_PCT,
     condor_costs,
@@ -54,13 +55,13 @@ needs_condor = pytest.mark.skipif(not _HAS_CONDOR, reason="fno_condor not yet wr
 
 class TestLegTurnover:
     def test_basic_multiplication(self):
-        assert leg_turnover(100.0, 75) == pytest.approx(7500.0)
+        assert leg_turnover(100.0, NIFTY_LOT) == pytest.approx(100.0 * NIFTY_LOT)
 
     def test_zero_premium(self):
-        assert leg_turnover(0.0, 75) == pytest.approx(0.0)
+        assert leg_turnover(0.0, NIFTY_LOT) == pytest.approx(0.0)
 
     def test_fractional_premium(self):
-        assert leg_turnover(12.5, 75) == pytest.approx(937.5)
+        assert leg_turnover(12.5, NIFTY_LOT) == pytest.approx(12.5 * NIFTY_LOT)
 
 
 class TestSlippage:
@@ -82,30 +83,30 @@ class TestSlippage:
 class TestCondorCosts:
     """Hand-computed reference numbers for a 4-leg iron condor entry.
 
-    Legs (NIFTY, 1 lot = 75 units):
-        short put  (SELL)  premium=50  qty=75  → turnover = 3750
-        short call (SELL)  premium=45  qty=75  → turnover = 3375
-        long put   (BUY)   premium=20  qty=75  → turnover = 1500
-        long call  (BUY)   premium=18  qty=75  → turnover = 1350
+    Legs (NIFTY, 1 lot = 65 units):
+        short put  (SELL)  premium=50  qty=65  → turnover = 3250
+        short call (SELL)  premium=45  qty=65  → turnover = 2925
+        long put   (BUY)   premium=20  qty=65  → turnover = 1300
+        long call  (BUY)   premium=18  qty=65  → turnover = 1170
 
     Derived:
-        sell_turnover = 3750 + 3375  = 7125
-        buy_turnover  = 1500 + 1350  = 2850
-        total_turnover = 9975
+        sell_turnover = 3250 + 2925  = 6175
+        buy_turnover  = 1300 + 1170  = 2470
+        total_turnover = 8645
         brokerage     = 20 * 4       = 80.00
-        STT           = 0.0015 * 7125 = 10.6875
-        exchange_fee  = 0.0003503 * 9975 ≈ 3.4942
-        sebi_fee      = 0.000001 * 9975 = 0.009975
-        stamp_duty    = 0.00003 * 2850  = 0.0855
-        gst           = 0.18 * (80 + 3.4942... + 0.009975...) ≈ 15.03
-        total         ≈ 80 + 10.69 + 3.49 + 0.01 + 0.09 + 15.03
+        STT           = 0.0015 * 6175 = 9.2625
+        exchange_fee  = 0.0003553 * 8645 ≈ 3.0706
+        sebi_fee      = 0.000001 * 8645 = 0.008645
+        stamp_duty    = 0.00003 * 2470  = 0.0741
+        gst           = 0.18 * (80 + 3.0706... + 0.008645...) ≈ 14.95
+        total         ≈ 80 + 9.26 + 3.07 + 0.01 + 0.07 + 14.95
     """
 
     _LEGS = [
-        (50.0, 75, "SELL"),  # short put
-        (45.0, 75, "SELL"),  # short call
-        (20.0, 75, "BUY"),  # long put
-        (18.0, 75, "BUY"),  # long call
+        (50.0, NIFTY_LOT, "SELL"),  # short put
+        (45.0, NIFTY_LOT, "SELL"),  # short call
+        (20.0, NIFTY_LOT, "BUY"),  # long put
+        (18.0, NIFTY_LOT, "BUY"),  # long call
     ]
 
     def _costs(self, **kw):
@@ -120,7 +121,7 @@ class TestCondorCosts:
     # --- STT — SELL side only ------------------------------------------------
 
     def test_stt_sell_legs_only(self):
-        sell_turnover = leg_turnover(50.0, 75) + leg_turnover(45.0, 75)  # 7125
+        sell_turnover = leg_turnover(50.0, NIFTY_LOT) + leg_turnover(45.0, NIFTY_LOT)
         expected_stt = OPTION_STT_SELL_PCT * sell_turnover  # 10.6875
         c = self._costs()
         # condor_costs rounds stt to 2 dp; allow abs tolerance of ₹0.01
@@ -128,8 +129,8 @@ class TestCondorCosts:
 
     def test_buy_only_legs_produce_zero_stt(self):
         buy_only = [
-            (20.0, 75, "BUY"),
-            (18.0, 75, "BUY"),
+            (20.0, NIFTY_LOT, "BUY"),
+            (18.0, NIFTY_LOT, "BUY"),
         ]
         c = condor_costs(buy_only)
         assert c.stt == pytest.approx(0.0)
@@ -146,7 +147,7 @@ class TestCondorCosts:
 
         condor_costs rounds stt to 2 dp, so compare with abs=0.01 tolerance.
         """
-        sell_turnover = leg_turnover(50.0, 75) + leg_turnover(45.0, 75)
+        sell_turnover = leg_turnover(50.0, NIFTY_LOT) + leg_turnover(45.0, NIFTY_LOT)
         c = self._costs()
         assert c.stt == pytest.approx(OPTION_STT_SELL_PCT * sell_turnover, abs=0.01)
 
@@ -155,7 +156,9 @@ class TestCondorCosts:
     def test_gst_formula(self):
         c = self._costs()
         gst_base = c.brokerage + c.exchange_fee + c.sebi_fee
-        assert c.gst == pytest.approx(GST_PCT * gst_base, rel=1e-4)
+        # exchange_fee and sebi_fee are stored rounded to 4 dp; gst is computed
+        # from unrounded intermediates, so allow abs ₹0.01 tolerance.
+        assert c.gst == pytest.approx(GST_PCT * gst_base, abs=0.01)
 
     # --- total == sum of components ------------------------------------------
 
@@ -167,17 +170,17 @@ class TestCondorCosts:
     # --- edge: single SELL leg -----------------------------------------------
 
     def test_single_sell_leg(self):
-        legs = [(100.0, 75, "SELL")]
+        legs = [(100.0, NIFTY_LOT, "SELL")]
         c = condor_costs(legs)
         assert c.brokerage == pytest.approx(BROKERAGE_PER_ORDER)
-        assert c.stt == pytest.approx(OPTION_STT_SELL_PCT * leg_turnover(100.0, 75))
+        assert c.stt == pytest.approx(OPTION_STT_SELL_PCT * leg_turnover(100.0, NIFTY_LOT))
         assert c.stamp_duty == pytest.approx(0.0)  # no BUY leg
 
     # --- bad side raises ------------------------------------------------------
 
     def test_bad_side_raises(self):
         with pytest.raises(ValueError, match="BUY.*SELL"):
-            condor_costs([(50.0, 75, "SHORT")])
+            condor_costs([(50.0, NIFTY_LOT, "SHORT")])
 
 
 # ===========================================================================

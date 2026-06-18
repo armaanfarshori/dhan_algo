@@ -67,7 +67,9 @@ go_no_go: (True, 'GO — all criteria pass …')
 
 1. **Ingest data** (PR2, off-hours): `python -m core.fno_backfill --futures --symbol NIFTY
    --security-id <front-month id> --from 2022-06-01 --to <today>`; `--expiry-calendar`;
-   begin the daily `--atm-iv` post-close cron (forward-only); `--india-vix <NSE csv>`.
+   begin the daily `--atm-iv` post-close cron (forward-only);
+   `--index --security-id 13 --symbol NIFTY --from 2022-06-01 --to <today>` (NIFTY 50 index bars via Dhan charts);
+   `--index --security-id 21 --symbol INDIAVIX --from 2022-06-01 --to <today>` (India VIX via Dhan charts — replaces the old `--india-vix <NSE csv>` approach).
    - Resolve **Open Q#2** first: store one **continuous** front-month series under
      `symbol="NIFTY"` (roll-stitched) — multiple raw contracts under one symbol collide on
      the PK and corrupt `realized_vol_20d`.

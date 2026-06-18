@@ -87,7 +87,9 @@ Reuse the equity backfill's rate-limiter + retry + screen-session pattern. Suspe
 Four hypertables (additive; `IF NOT EXISTS`; no changes to existing tables):
 - **futures_bars**(time, symbol, timeframe, open, high, low, close, volume, open_interest, expiry_date, realized_vol_20d) — hypertable on time; index (symbol, timeframe, time DESC).
 - **option_atm_iv**(time, symbol, expiry_date, expiry_type, atm_strike, call_iv, put_iv, straddle_iv, dte, spot_ref, implied_move) — hypertable on time; index (symbol, expiry_date, time DESC).
-- **india_vix**(time, close, high, low) — hypertable on time.
+- **index_bars**(time, security_id, symbol, timeframe, open, high, low, close) — hypertable on time; covers NIFTY 50 (security_id=13) and India VIX (security_id=21) via Dhan charts (IDX_I segment), plus any other index symbols ingested with `--index`. Replaces the earlier `india_vix` single-column table.
+- **option_chain_snapshot**(time, security_id, symbol, expiry_date, strike, option_type, open, high, low, close, volume, open_interest, iv, delta, theta) — full chain snapshots; hypertable on time.
+- **fno_instruments**(security_id, symbol, instrument_type, expiry_date, strike, option_type, lot_size, tick_size, segment) — detailed F&O scrip master from the Dhan instruments file; PK (security_id).
 - **expiry_calendar**(symbol, expiry_date, expiry_type, PK(symbol, expiry_date)).
 
 Decimal/types: confirm against the existing `bars` table style before applying. Provide a
@@ -95,7 +97,7 @@ downgrade that drops only these four tables.
 
 ### 5. Code to scaffold (new modules)
 ```
-core/fno_backfill.py   backfill_futures_bars() · backfill_atm_iv() · ingest_india_vix() · build_expiry_calendar()   (off-hours only)
+core/fno_backfill.py   backfill_futures_bars() · backfill_index_bars() · snapshot_option_chain() · build_expiry_calendar()   (off-hours only)
 core/fno_derived.py    compute_realized_vol() (20d rolling c2c → futures_bars) · compute_implied_move() (from option_atm_iv)
 ml/fno_vol_gate.py     calibrate_threshold() (realized-vs-implied spread → k, target ~70% pass) · gate_decision(bar) → SELL_PREMIUM | STAND_ASIDE | BUY_PREMIUM   [NEW module — NOT ml/kronos_gate.py]
 tests/                 test_fno_backfill.py (mock Dhan; assert no calls in mkt hours) · test_fno_derived.py (numeric checks) · test_fno_vol_gate.py (gate truth table)
@@ -138,7 +140,7 @@ DD > 20% in paper → halve size before any live consideration.
 
 ### 9. Suggested PR sequence (small, reviewable; on feat/fno-data-foundation)
 1. PR1 — Alembic 009 migration (+downgrade) — schema only.
-2. PR2 — `core/fno_backfill.py` + `ingest_india_vix` + tests — data in, off-hours guard.
+2. PR2 — `core/fno_backfill.py` + `backfill_index_bars` (NIFTY 50 via security_id=13, India VIX via security_id=21) + `snapshot_option_chain` + tests — data in, off-hours guard.
 3. PR3 — `core/fno_derived.py` (realized vol, implied move) + tests.
 4. PR4 — `ml/fno_vol_gate.py` calibrate + decision + tests.
 5. PR5 — backtest harness + go/no-go report on NIFTY. **Stop and report before Phase 2.**

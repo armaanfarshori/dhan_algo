@@ -20,15 +20,16 @@ Header (31 cols, comma-sep):
   BUY_BO_PROFIT_RANGE_MIN_PERC, MTF_LEVERAGE, SM_UPPER_LIMIT, SM_LOWER_LIMIT,
   SM_FREEZE_QTY
 """
+from __future__ import annotations
 
 import csv
 import io
 import json
 import logging
 import time
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 import requests
 
@@ -77,7 +78,6 @@ def _parse_expiry(value: str | None) -> date | None:
     # Accept both 'YYYY-MM-DD' and 'YYYY-MM-DD HH:MM:SS'
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
         try:
-            from datetime import datetime
             return datetime.strptime(v, fmt).date()
         except ValueError:
             continue
@@ -221,7 +221,7 @@ _ROW_TEMPLATE = (
 )
 
 
-def _upsert_batch(session, batch: list[dict]) -> int:
+def _upsert_batch(session: Any, batch: list[dict]) -> int:
     """
     Upsert a batch of parsed rows into fno_instruments.
 
@@ -332,9 +332,8 @@ def nearest_nifty_future() -> dict | None:
     """
     from db import get_session
     from sqlalchemy import text
-    from datetime import date as _date
 
-    today = _date.today().isoformat()
+    today = date.today().isoformat()
     with get_session() as session:
         row = session.execute(
             text("""
