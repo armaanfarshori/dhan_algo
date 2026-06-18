@@ -177,7 +177,11 @@ def train(args):
     log.info("Loading %s from HuggingFace…", args.model)
     from kronos.kronos import KronosTokenizer, Kronos
 
-    tokenizer = KronosTokenizer.from_pretrained(args.model)
+    # Tokenizer and model are SEPARATE HuggingFace repos (the tokenizer is a
+    # pretrained VQ network with its own config); loading the tokenizer from the
+    # MODEL repo fails — KronosTokenizer.__init__ needs args the model config
+    # doesn't carry. Mirror the live loader (core/kronos_signal.py).
+    tokenizer = KronosTokenizer.from_pretrained(args.tokenizer)
     model     = Kronos.from_pretrained(args.model)
 
     tokenizer = tokenizer.to(device).eval()   # tokenizer stays frozen
@@ -326,6 +330,9 @@ def _upload_checkpoint_s3(local_dir: Path, name: str) -> str | None:
 def main():
     ap = argparse.ArgumentParser(description="Fine-tune Kronos-base on NSE data")
     ap.add_argument("--model",             default="NeoQuasar/Kronos-base")
+    ap.add_argument("--tokenizer",         default="NeoQuasar/Kronos-Tokenizer-base",
+                    help="Tokenizer HF repo — SEPARATE from --model (matches "
+                         "config.kronos_tokenizer / core.kronos_signal)")
     ap.add_argument("--data_path",         type=Path, required=True,
                     help="Train split directory from prepare_kronos_dataset.py")
     ap.add_argument("--val_path",          type=Path, required=True,
