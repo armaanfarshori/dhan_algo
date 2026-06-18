@@ -262,16 +262,20 @@ class RiskEngine:
     # ── Pre-trade gate ────────────────────────────────────────────────────────
 
     def check_intent(self, intent: OrderIntent, ref_price: float) -> tuple[bool, str]:
-        if self.state.kill_switch or self.state.halted:
-            return False, f"Trading halted: {self.state.halt_reason or 'kill switch active'}"
-        if intent.qty <= 0:
-            return False, "Quantity sized to 0 — risk budget too small for this stop distance"
-
+        # Exits/closes must NEVER be blocked — not by a kill switch, not by a
+        # daily-loss halt, not by exposure limits. A halt that swallowed an EOD
+        # square-off would leave a naked position open past close. Determine
+        # is_exit from the live position BEFORE any halt/kill-switch guard.
         pos = self._portfolio.get(intent.security_id)
         is_exit = pos.qty != 0 and (
             (pos.qty > 0 and intent.side == "SELL") or (pos.qty < 0 and intent.side == "BUY"))
         if is_exit:
-            return True, "OK"   # exits are never blocked by exposure limits
+            return True, "OK"   # exits are never blocked (halt, kill switch, or exposure)
+
+        if self.state.kill_switch or self.state.halted:
+            return False, f"Trading halted: {self.state.halt_reason or 'kill switch active'}"
+        if intent.qty <= 0:
+            return False, "Quantity sized to 0 — risk budget too small for this stop distance"
 
         if self._portfolio.open_count() >= self.params.max_open_positions:
             return False, f"Max open positions ({self.params.max_open_positions}) reached"

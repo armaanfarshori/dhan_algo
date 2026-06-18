@@ -113,6 +113,52 @@ async def seed_opening_ranges(runners, dhan, segment: str, orb_minutes: int):
                     seeded, len(runners))
 
 
+def reregister_position_risk(runners, portfolio, risk):
+    """After seed_opening_ranges() rebuilds each ORB's OR, replace the flat
+    placeholder risk (booked at boot before stops were known) with the TRUE
+    stop-distance risk for every reconciled position. A wrong placeholder
+    mis-sizes the daily budget; the real stop is the ORB's SL edge. If the OR
+    never recovered (seed failed / too early) the placeholder is kept so the
+    slot is never under-counted."""
+    for r in runners:
+        pos = portfolio.get(r.sid)
+        if pos.qty == 0:
+            continue
+        orb = r.strategy
+        if orb.or_locked:
+            if pos.qty > 0:
+                stop = orb.or_low * (1 - orb.p.sl_buffer_pct)
+            else:
+                stop = orb.or_high * (1 + orb.p.sl_buffer_pct)
+            risk.register_risk(
+                r.sid, risk.position_risk(pos.avg_price, stop, abs(pos.qty)))
+            logger.info("Re-registered real risk for %s: stop=%.2f", r.sid, stop)
+        else:
+            logger.warning("Runner %s: OR not locked after seed — keeping "
+                           "placeholder risk budget (real stop unknown)", r.sid)
+
+
+async def flatten_all(runners, portfolio, executor, risk, reason: str, segment: str):
+    """Flatten every open position on a halt, then UNCONDITIONALLY release each
+    risk slot. A halt blocks new entries regardless, so the slot serves no
+    purpose; a failed flatten must not leak committed risk forever. apply_fill +
+    notify_flat only run when the executor actually returned a fill."""
+    from engine.types import OrderIntent
+    for r in runners:
+        pos = portfolio.get(r.sid)
+        if pos.qty != 0 and r.last_price > 0:
+            side = "SELL" if pos.qty > 0 else "BUY"
+            fill = await executor.submit(OrderIntent(
+                security_id=r.sid, exchange_segment=segment,
+                side=side, qty=abs(pos.qty), strategy="ORB",
+                reason=f"risk halt: {reason}"), ref_price=r.last_price)
+            if fill:
+                await portfolio.apply_fill(fill, strategy="ORB")
+                r.strategy.notify_flat()
+            # Release UNCONDITIONALLY (even when the flatten produced no fill).
+            risk.release_risk(r.sid)
+
+
 async def write_heartbeat(*, runners, portfolio, risk, feed, bar_builder,
                           kronos_scanner, start_time, client=None, names=None):
     """Atomically export trader state for the api process."""
@@ -337,8 +383,9 @@ async def main():
             ),
             portfolio, ltp_lookup, db_backend=db)
         # Restart-proofing: restore an in-scope loss halt, seed the DB-backed
-        # P&L cache, and conservatively book one full risk budget against
-        # each reconciled position (their stops are recomputed by ORB).
+        # P&L cache, and conservatively book one full risk budget against each
+        # reconciled position as a PLACEHOLDER. The real stop-distance risk is
+        # re-registered after seed_opening_ranges() rebuilds each ORB's stop.
         risk.load_persisted_halt()
         # Discard any resume flag left on disk from before this boot: it must NOT
         # auto-clear a halt that load_persisted_halt() just restored (a persisted
@@ -357,19 +404,8 @@ async def main():
             from core.notify import send_async
             await send_async(f"⛔ TRADING HALTED ({portfolio.mode})\n{reason}\n"
                              f"Open positions are being flattened.")
-            for r in runners:
-                pos = portfolio.get(r.sid)
-                if pos.qty != 0 and r.last_price > 0:
-                    from engine.types import OrderIntent
-                    side = "SELL" if pos.qty > 0 else "BUY"
-                    fill = await executor.submit(OrderIntent(
-                        security_id=r.sid, exchange_segment=cfg.watchlist_exchange_segment,
-                        side=side, qty=abs(pos.qty), strategy="ORB",
-                        reason=f"risk halt: {reason}"), ref_price=r.last_price)
-                    if fill:
-                        await portfolio.apply_fill(fill, strategy="ORB")
-                        r.strategy.notify_flat()
-                        risk.release_risk(r.sid)
+            await flatten_all(runners, portfolio, executor, risk, reason,
+                              cfg.watchlist_exchange_segment)
 
         @risk.on_resume
         async def on_resume():
@@ -405,6 +441,10 @@ async def main():
         await seed_opening_ranges(runners, dhan,
                                   cfg.watchlist_exchange_segment,
                                   cfg.orb_range_minutes)
+
+        # Now that each ORB has its real OR back, swap the flat placeholder risk
+        # booked at boot for the true stop-distance risk per reconciled position.
+        reregister_position_risk(runners, portfolio, risk)
 
         # ── Optional Kronos live scanner ───────────────────────────────────────
         kronos_scanner = None
