@@ -21,17 +21,24 @@ const RATE_LIMIT_LABELS = {
 
 const RATE_LIMIT_KEYS = ['orders', 'data', 'quote', 'non_trading']
 
+// NOTE: instance types are static config (no live EC2-metadata source in the
+// heartbeat) — keep in sync with infra/terraform.tfvars. The DB is on r7g.2xlarge
+// temporarily for the M2.5 build; it reverts to t4g.medium after the downgrade.
+// 'schema head' is overridden live from db_stats.alembic in InfraPanel; '008'
+// here is only the offline fallback.
 const INFRA_ROWS = [
-  { k: 'agent',         v: 't4g.small · 2 vCPU · 2 GB' },
-  { k: 'db',            v: 't4g.medium · 2 vCPU · 4 GB' },
+  { k: 'agent',         v: 't4g.large · 2 vCPU · 8 GB' },
+  { k: 'db',            v: 'r7g.2xlarge · 64 GB (M2.5; → t4g.medium)' },
+  { k: 'db engine',     v: 'PostgreSQL 16 + TimescaleDB (bare-metal)' },
   { k: 'EBS snapshots', v: 'DLM daily' },
   { k: 'TF state',      v: 'S3 + DynamoDB lock' },
-  { k: 'schema head',   v: '007' },
+  { k: 'schema head',   v: '008' },
   { k: 'region',        v: 'ap-south-1' },
 ]
 
 const MIGRATION_ROWS = [
-  { id: '007', desc: 'api_usage table',               head: true  },
+  { id: '008', desc: 'daily_screen audit table',      head: true  },
+  { id: '007', desc: 'api_usage table',               head: false },
   { id: '006', desc: 'features_snapshot jsonb + GIN', head: false },
   { id: '005', desc: 'drop ohlcv_1min mirror',        head: false },
   { id: '004', desc: 'engine_positions + signals',    head: false },
@@ -514,7 +521,7 @@ function InfraPanel({ dbStats }) {
 
 function SchemaPanel({ dbStats }) {
   const db      = dbStats?.data
-  const dbHead  = db?.alembic ?? '007'
+  const dbHead  = db?.alembic ?? '008'
 
   return (
     <Panel>
