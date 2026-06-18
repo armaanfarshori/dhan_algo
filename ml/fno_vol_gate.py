@@ -75,6 +75,27 @@ Both realized_vol and implied_vol are annualised fractions (e.g. 0.12 = 12 %
 annualised vol). This matches how realized_vol_20d is written by
 core/fno_derived.compute_realized_vol() and how straddle_iv is stored in
 option_atm_iv (stored as a fraction by core/fno_backfill).
+
+HISTORICAL REALIZED-VOL BASE
+-----------------------------
+The realized-vol baseline in both ``samples_from_db`` paths comes from the
+**NIFTY 50 SPOT INDEX** (``index_bars``, security_id ``"13"``), specifically the
+``realized_vol_20d`` column populated by core/fno_derived.  This is consistent
+with ``cycles_from_db``, which also reads the spot index.  The underlying series
+is NOT futures bars.
+
+HISTORICAL IMPLIED BASELINE (source="vix")
+------------------------------------------
+Until forward ATM-IV from option_atm_iv accrues sufficient history, the
+``samples_from_db`` helper defaults to ``source="vix"``, which uses India VIX
+(security_id="21" in index_bars) as the implied-vol proxy.
+
+India VIX is quoted in percent (e.g. 13.5 = 13.5 % annualised); dividing by 100
+gives an annualised fraction directly comparable to realized_vol_20d.  This is
+the Phase-0 historical backtest path — it is NOT the live forward-IV path.
+
+Once option_atm_iv rows accumulate, switch to ``source="atm"`` to use the live
+ATM straddle IV instead.
 """
 from __future__ import annotations
 
@@ -294,16 +315,49 @@ def calibrate_threshold(
 # ── Optional DB helper ────────────────────────────────────────────────────────
 
 def samples_from_db(
-    symbol: str = "NIFTY",
+    source: str = "vix",
+    *,
+    nifty_id: str = "13",
+    vix_id: str = "21",
     timeframe: str = "1d",
+    symbol: str = "NIFTY",
 ) -> list[tuple[float, float]]:
     """Load (realized_vol, implied_vol) pairs from TimescaleDB.
 
-    For each row in option_atm_iv for `symbol` with a non-null straddle_iv, this
-    pairs it with the realized_vol_20d of the futures_bars row for the SAME
-    trading date (matched on date(time)) and same symbol + timeframe.
+    Two data sources are supported via the ``source`` parameter:
 
-    Rows missing either value are silently dropped.
+    ``source="vix"`` (DEFAULT — historical backtest path)
+        Joins ``index_bars`` (security_id=nifty_id, alias ``a``) with
+        ``index_bars`` (security_id=vix_id, alias ``b``) on the same calendar
+        date and timeframe.
+
+        * ``realized_vol`` = ``a.realized_vol_20d`` (annualised fraction,
+          computed by core/fno_derived and stored in index_bars for the
+          **NIFTY 50 SPOT INDEX**, security_id ``"13"`` — consistent with
+          cycles_from_db; this is NOT futures bars).
+        * ``implied_vol``  = ``b.close / 100.0`` — India VIX is an annualised
+          volatility *quoted in percent* (e.g. 13.5 means 13.5 % p.a.);
+          dividing by 100 converts it to an annualised fraction directly
+          comparable to realized_vol_20d.  VIX/100 is the Phase-0 implied
+          baseline.
+
+        This is the Phase-0 historical path.  Rows where
+        ``a.realized_vol_20d IS NULL`` or ``b.close IS NULL`` or ``b.close <= 0``
+        are silently dropped by the SQL.  After the DB round-trip, any pair
+        where ``realized <= 0`` or ``implied <= 0`` is also dropped in Python
+        (defence-in-depth against mock data or future schema changes that bypass
+        the SQL filter).
+
+    ``source="atm"`` (live / forward path)
+        Joins ``option_atm_iv`` (straddle IV for ``symbol``) with
+        ``index_bars`` (realized_vol_20d for the NIFTY 50 SPOT INDEX,
+        security_id ``"13"``) on the same trading date and timeframe.  This is
+        the forward path used once option_atm_iv rows accumulate.  The existing
+        DISTINCT ON de-duplication (nearest positive-dte expiry per date) is
+        preserved.  After the DB round-trip, any pair where ``realized <= 0``
+        or ``implied <= 0`` is silently dropped in Python.
+
+    Rows missing either value are silently dropped in both paths.
 
     DB imports are lazy (``from sqlalchemy import text`` + ``from db import
     get_session``) so the pure functions above work without a DB connection —
@@ -311,53 +365,95 @@ def samples_from_db(
 
     Parameters
     ----------
-    symbol:
-        Futures / options symbol, e.g. "NIFTY" or "BANKNIFTY".
+    source:
+        Data source: ``"vix"`` (default, historical) or ``"atm"`` (live/forward).
+        Any other value raises ``ValueError``.
+    nifty_id:
+        security_id of NIFTY 50 SPOT INDEX in index_bars (default ``"13"``).
+        Only used when ``source="vix"``.
+    vix_id:
+        security_id of India VIX in index_bars (default ``"21"``).
+        Only used when ``source="vix"``.
     timeframe:
-        futures_bars timeframe to join on, typically "1d".
+        Bar timeframe to join on (default ``"1d"``).
+    symbol:
+        Futures / options symbol for the ``"atm"`` path (default ``"NIFTY"``).
 
     Returns
     -------
-    list of (realized_vol, implied_vol) float tuples, newest-first order not
-    guaranteed (sorted ascending by date).
+    list of (realized_vol, implied_vol) float tuples sorted ascending by date.
+    Tuples where either value is <= 0 are excluded.
     """
     from sqlalchemy import text
 
     from db import get_session
 
-    sql = text("""
-        -- option_atm_iv can have MULTIPLE rows per trading date (weekly + monthly
-        -- expiries).  DISTINCT ON restricts to the nearest positive-dte expiry per
-        -- date so each (realized_vol, implied_vol) pair is not duplicated.
-        -- Date keys use AT TIME ZONE 'UTC' so the join is independent of DB server TZ.
-        SELECT
-            fb.realized_vol_20d  AS realized_vol,
-            oi.straddle_iv       AS implied_vol
-        FROM (
-            SELECT DISTINCT ON ((time AT TIME ZONE 'UTC')::date)
-                symbol,
-                (time AT TIME ZONE 'UTC')::date  AS trade_date,
-                straddle_iv
-            FROM option_atm_iv
-            WHERE symbol      = :sym
-              AND straddle_iv IS NOT NULL
-            ORDER BY (time AT TIME ZONE 'UTC')::date, dte ASC
-        ) oi
-        JOIN futures_bars fb
-          ON fb.symbol    = oi.symbol
-         AND fb.timeframe = :tf
-         AND (fb.time AT TIME ZONE 'UTC')::date = oi.trade_date
-        WHERE fb.realized_vol_20d IS NOT NULL
-        ORDER BY oi.trade_date
-    """)
+    if source == "vix":
+        sql = text("""
+            -- Join NIFTY index_bars (realized_vol_20d) with India VIX index_bars
+            -- (close / 100 = annualised vol fraction) on the same calendar date
+            -- and timeframe.  India VIX is quoted in percent, so /100 normalises
+            -- it to the same annualised-fraction units as realized_vol_20d.
+            SELECT
+                a.realized_vol_20d           AS realized_vol,
+                b.close / 100.0              AS implied_vol
+            FROM index_bars a
+            JOIN index_bars b
+              ON (a.time AT TIME ZONE 'UTC')::date
+                 = (b.time AT TIME ZONE 'UTC')::date
+             AND a.timeframe = b.timeframe
+            WHERE a.security_id        = :nifty_id
+              AND b.security_id        = :vix_id
+              AND a.timeframe          = :tf
+              AND a.realized_vol_20d   IS NOT NULL
+              AND b.close              IS NOT NULL
+              AND b.close              > 0
+            ORDER BY (a.time AT TIME ZONE 'UTC')::date
+        """)
+        params: dict = {"nifty_id": nifty_id, "vix_id": vix_id, "tf": timeframe}
+    elif source == "atm":
+        sql = text("""
+            -- option_atm_iv can have MULTIPLE rows per trading date (weekly + monthly
+            -- expiries).  DISTINCT ON restricts to the nearest positive-dte expiry per
+            -- date so each (realized_vol, implied_vol) pair is not duplicated.
+            -- Date keys use AT TIME ZONE 'UTC' so the join is independent of DB server TZ.
+            SELECT
+                fb.realized_vol_20d  AS realized_vol,
+                oi.straddle_iv       AS implied_vol
+            FROM (
+                SELECT DISTINCT ON ((time AT TIME ZONE 'UTC')::date)
+                    symbol,
+                    (time AT TIME ZONE 'UTC')::date  AS trade_date,
+                    straddle_iv
+                FROM option_atm_iv
+                WHERE symbol      = :sym
+                  AND straddle_iv IS NOT NULL
+                ORDER BY (time AT TIME ZONE 'UTC')::date, dte ASC
+            ) oi
+            JOIN futures_bars fb
+              ON fb.symbol    = oi.symbol
+             AND fb.timeframe = :tf
+             AND (fb.time AT TIME ZONE 'UTC')::date = oi.trade_date
+            WHERE fb.realized_vol_20d IS NOT NULL
+            ORDER BY oi.trade_date
+        """)
+        params = {"sym": symbol, "tf": timeframe}
+    else:
+        raise ValueError(f"samples_from_db: unknown source={source!r}; expected 'vix' or 'atm'")
 
     with get_session() as session:
-        rows = session.execute(sql, {"sym": symbol, "tf": timeframe}).fetchall()
+        rows = session.execute(sql, params).fetchall()
 
     result: list[tuple[float, float]] = []
     for rv, iv in rows:
         try:
-            result.append((float(rv), float(iv)))
+            rv_f = float(rv)
+            iv_f = float(iv)
         except (TypeError, ValueError):
             continue
+        # Python-side guard: skip degenerate pairs even if the SQL WHERE filter
+        # is somehow bypassed (e.g. test mocks, future schema changes).
+        if rv_f <= 0 or iv_f <= 0:
+            continue
+        result.append((rv_f, iv_f))
     return result

@@ -129,3 +129,113 @@ def test_implied_move_edge_cases():
     assert d.implied_move(23400, 0, 7) is None
     assert d.implied_move(23400, 0.12, -3) is None
     assert d.implied_move_pct(None, 7) is None
+
+
+# ── compute_index_realized_vol (DB wrapper, monkeypatched) ────────────────────────
+import datetime
+from unittest.mock import MagicMock, patch
+
+
+def _make_fake_session(rows):
+    """Return a context-manager mock whose .execute().all() returns ``rows``."""
+    result_mock = MagicMock()
+    result_mock.all.return_value = rows
+    session_mock = MagicMock()
+    session_mock.execute.return_value = result_mock
+    cm = MagicMock()
+    cm.__enter__ = MagicMock(return_value=session_mock)
+    cm.__exit__ = MagicMock(return_value=False)
+    return cm
+
+
+def test_compute_index_realized_vol_payload():
+    """Verify that compute_index_realized_vol assembles the correct bulk-update
+    payload: (security_id, timeframe, time, vol) tuples with None vols dropped,
+    and the returned count equals the number of non-None vols."""
+    security_id = "13"
+    timeframe = "1d"
+    window = 20
+
+    # Build 30 (time, close) rows — enough for 10 non-None vol values.
+    base = datetime.datetime(2024, 1, 2, tzinfo=datetime.timezone.utc)
+    closes = [100.0 * (1 + 0.005 * math.sin(i)) for i in range(30)]
+    fake_rows = [
+        (base + datetime.timedelta(days=i), closes[i]) for i in range(30)
+    ]
+
+    captured: list = []
+
+    def fake_bulk_update(sql, rows):
+        captured.extend(rows)
+        return len(rows)
+
+    fake_cm = _make_fake_session(fake_rows)
+
+    with (
+        patch("db.get_session", return_value=fake_cm),
+        patch("core.fno_derived._bulk_update", side_effect=fake_bulk_update),
+    ):
+        count = d.compute_index_realized_vol(security_id, timeframe, window)
+
+    # Compute expected non-None vols independently.
+    expected_vols = d.realized_vol_series(closes, window=window)
+    expected_payload = [
+        (security_id, timeframe, fake_rows[i][0], v)
+        for i, v in enumerate(expected_vols)
+        if v is not None
+    ]
+
+    assert count == len(expected_payload), (
+        f"count mismatch: got {count}, expected {len(expected_payload)}"
+    )
+    assert len(captured) == len(expected_payload)
+    for got, exp in zip(captured, expected_payload):
+        assert got[0] == exp[0]   # security_id
+        assert got[1] == exp[1]   # timeframe
+        assert got[2] == exp[2]   # time
+        assert got[3] == pytest.approx(exp[3])  # vol (float)
+
+
+def test_compute_index_realized_vol_empty_returns_zero():
+    """Empty DB result → return 0 without calling _bulk_update."""
+    fake_cm = _make_fake_session([])
+    with (
+        patch("db.get_session", return_value=fake_cm),
+        patch("core.fno_derived._bulk_update") as mock_bulk,
+    ):
+        result = d.compute_index_realized_vol("13")
+    assert result == 0
+    mock_bulk.assert_not_called()
+
+
+def test_compute_index_realized_vol_sql_targets_index_bars():
+    """The bulk-update SQL passed by compute_index_realized_vol must reference
+    index_bars — not futures_bars."""
+    security_id = "13"
+    timeframe = "1d"
+    window = 20
+
+    base = datetime.datetime(2024, 1, 2, tzinfo=datetime.timezone.utc)
+    closes = [100.0 * (1 + 0.005 * math.sin(i)) for i in range(30)]
+    fake_rows = [
+        (base + datetime.timedelta(days=i), closes[i]) for i in range(30)
+    ]
+
+    captured_sql: list[str] = []
+
+    def fake_bulk_update(sql, rows):
+        captured_sql.append(sql)
+        return len(rows)
+
+    fake_cm = _make_fake_session(fake_rows)
+
+    with (
+        patch("db.get_session", return_value=fake_cm),
+        patch("core.fno_derived._bulk_update", side_effect=fake_bulk_update),
+    ):
+        d.compute_index_realized_vol(security_id, timeframe, window)
+
+    assert len(captured_sql) == 1, "expected exactly one _bulk_update call"
+    sql = captured_sql[0]
+    assert "index_bars" in sql, f"SQL must reference index_bars; got: {sql!r}"
+    assert "futures_bars" not in sql, f"SQL must NOT reference futures_bars; got: {sql!r}"

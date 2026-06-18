@@ -4,10 +4,17 @@ Two derived quantities feed the volatility-regime gate (ml/fno_vol_gate.py) and
 the backtest:
 
   • realized_vol_20d — trailing 20-day close-to-close annualised volatility of
-        NIFTY index futures. Written back into ``futures_bars.realized_vol_20d``.
+        the **NIFTY 50 SPOT INDEX** (``index_bars`` table), computed by
+        ``compute_index_realized_vol``. Written back into
+        ``index_bars.realized_vol_20d``. This is the canonical realized-vol path
+        for the F&O gate — no futures stitching, no roll-gap bias.
   • implied_move     — the option market's expected move to expiry, derived from
         the ATM straddle IV: ``spot * straddle_iv * sqrt(dte / 365)``. Written
         back into ``option_atm_iv.implied_move``.
+
+``compute_realized_vol`` (on ``futures_bars``) is retained as an optional/basis
+path (e.g. for roll-spread or carry studies) but is NOT used by the vol-regime
+gate — use ``compute_index_realized_vol`` for that.
 
 The pure functions (``realized_vol_series``, ``implied_move``) are deterministic
 and DB-free so they unit-test without a database. The ``compute_*`` wrappers read
@@ -155,11 +162,55 @@ def compute_realized_vol(symbol: str, timeframe: str = "1d", window: int = 20) -
     payload = [(symbol, timeframe, t, v) for t, v in zip(times, vols) if v is not None]
     n = _bulk_update(
         "UPDATE futures_bars AS f SET realized_vol_20d = d.v "
-        "FROM (VALUES %s) AS d(s, tf, t, v) "
+        "FROM (VALUES %s) AS d(s text, tf text, t timestamptz, v double precision) "
         "WHERE f.symbol = d.s AND f.timeframe = d.tf AND f.time = d.t",
         payload,
     )
     logger.info("realized_vol_20d: updated %d rows for %s/%s", n, symbol, timeframe)
+    return n
+
+
+def compute_index_realized_vol(
+    security_id: str, timeframe: str = "1d", window: int = 20
+) -> int:
+    """Recompute realized_vol_20d for one index security/timeframe and write it back
+    to index_bars in a single bulk UPDATE. Returns the number of rows updated.
+
+    Targets the ``index_bars`` table (keyed by security_id/timeframe/time).
+    The canonical NIFTY 50 spot security_id is ``"13"``; India VIX is ``"21"``.
+    """
+    from sqlalchemy import text
+
+    from db import get_session
+
+    with get_session() as session:
+        rows = session.execute(
+            text(
+                "SELECT time, close FROM index_bars "
+                "WHERE security_id = :s AND timeframe = :tf ORDER BY time"
+            ),
+            {"s": security_id, "tf": timeframe},
+        ).all()
+    if not rows:
+        return 0
+    times = [r[0] for r in rows]
+    closes = [float(r[1]) for r in rows]
+    vols = realized_vol_series(closes, window=window)
+    payload = [
+        (security_id, timeframe, t, v) for t, v in zip(times, vols) if v is not None
+    ]
+    n = _bulk_update(
+        "UPDATE index_bars AS i SET realized_vol_20d = d.v "
+        "FROM (VALUES %s) AS d(s text, tf text, t timestamptz, v double precision) "
+        "WHERE i.security_id = d.s AND i.timeframe = d.tf AND i.time = d.t",
+        payload,
+    )
+    logger.info(
+        "realized_vol_20d (index): updated %d rows for security_id=%s/%s",
+        n,
+        security_id,
+        timeframe,
+    )
     return n
 
 
@@ -189,7 +240,7 @@ def compute_implied_move(symbol: str) -> int:
             payload.append((symbol, expiry, t, im))
     n = _bulk_update(
         "UPDATE option_atm_iv AS o SET implied_move = d.im "
-        "FROM (VALUES %s) AS d(s, e, t, im) "
+        "FROM (VALUES %s) AS d(s text, e date, t timestamptz, im double precision) "
         "WHERE o.symbol = d.s AND o.expiry_date = d.e AND o.time = d.t",
         payload,
     )

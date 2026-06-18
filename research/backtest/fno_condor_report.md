@@ -84,3 +84,62 @@ go_no_go: (True, 'GO — all criteria pass …')
 
 **Stop point:** this is the end of the Phase-0 → Phase-1 scope. No strategy/live build until
 the real go/no-go (step 3) passes.
+
+---
+
+## 5. Backtest fidelity caveats
+
+The VIX-based first-pass go/no-go uses several approximations. Readers must understand these
+before drawing any conclusions from a GO or NO-GO verdict.
+
+**(a) India VIX (30-day) as weekly straddle IV.**
+`straddle_iv = India VIX close / 100` is a 30-day variance-swap implied vol.  The true weekly
+(≈ 7-DTE) ATM straddle IV trades *above* the 30-day VIX due to term-structure convexity and
+the short-dated vol premium.  Using VIX understates the true weekly IV → the implied move is
+too small → short strikes are placed closer to ATM than a real trader would place them →
+recorded credit is understated and breach probability is overstated.  Net direction: **conservative**.
+
+**(b) Settlement = index daily CLOSE, not NSE FSP.**
+NSE's official Final Settlement Price (FSP) is the 30-minute volume-weighted average of NIFTY
+futures from 15:00–15:30 IST on expiry day.  OHLC "close" is the last tick and can differ from
+the FSP by several index points (occasionally 20–50 pts on volatile days).  Near-the-money
+expiries on volatile weeks may be mis-classified as a winning or losing cycle.  Direction:
+**ambiguous** (could inflate or deflate win rate depending on the specific week).
+
+**(c) Entry at prior-expiry CLOSE (idealized).**
+Each cycle's `spot` and `straddle_iv` are taken from the CLOSE of the prior expiry date (E_i),
+not the following morning's open.  A real trader enters Monday morning (09:30–10:00 IST); the
+overnight gap can be 50–200 pts on volatile weekends.  Direction: **slightly optimistic** (entry
+close is generally smoother than next-morning open).
+
+**(d) Realized vol = 20-day trailing vs VIX ≈ 30-day horizon.**
+The vol-regime gate compares `realized_vol_20d` (20-calendar-day backward) against
+`straddle_iv` (VIX, a 30-day forward measure).  These measure different horizons.  A more
+faithful comparison would use a 30-day realised vol or a forward-estimate.  Direction:
+**indeterminate** (the 20d/30d mismatch can cause the gate to fire slightly more or less
+frequently than the true vol-regime would warrant).
+
+**(e) move_mult default is now 1.5.**
+Short strikes are placed at ± 1.5 × expected_move (per handoff §7).  Earlier prototypes used
+1.0 ×.  The wider placement at 1.5 × reduces the credit collected but also reduces breach
+frequency; it is the intended production default.  Any result produced with `move_mult=1.0`
+is *not* comparable to one produced with 1.5 without re-running.
+
+**(f) Sharpe is on absolute ₹ P&L (scale-dependent).**
+The `sharpe` metric in `go_no_go` is computed as `mean_pnl / std_pnl × √52`, where P&L is
+in raw rupees for the fixed capital allocation (default ₹2,00,000).  This makes the Sharpe
+scale-dependent: doubling the position size doubles both mean and std, leaving Sharpe
+unchanged.  However, comparisons across different `capital` values or lot sizes are
+meaningless.  The metric is only informative within a single, consistent parameterisation.
+
+### Net interpretation
+
+Most biases are **conservative**: the VIX understates weekly IV (tight shorts), the 20d rvol
+may understate short-term vol persistence, and the daily-close settlement makes near-the-money
+weeks look slightly worse than they are.  Therefore:
+
+- A **GO** verdict from this loader is *preliminary but trustworthy* — it survived conservative
+  assumptions.  It must be re-validated with NSE FSP settlement data and real per-expiry ATM IV
+  (from Dhan option-chain snapshots accrued post-ingestion) before any live consideration.
+- A **NO-GO** verdict is *solid* — if the strategy cannot clear these conservative hurdles, it
+  will not improve with more realistic data.
