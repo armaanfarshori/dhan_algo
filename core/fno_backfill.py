@@ -36,12 +36,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import csv
 import io
 import logging
+import math
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
+
+import pandas as pd
 
 logger = logging.getLogger("dhan.fno_backfill")
 
@@ -67,8 +69,10 @@ def is_market_hours(now: Optional[datetime] = None) -> bool:
     """True iff ``now`` (default: real IST now) is within NSE trading hours —
     a weekday between 09:15 and 15:30 IST inclusive."""
     now = now or _now_ist()
-    if now.tzinfo is not None:
-        now = now.astimezone(_IST)
+    # A naive datetime is assumed to already be IST (the module's native zone);
+    # a tz-aware one is converted. This avoids mis-judging a naive UTC `now`
+    # (e.g. on a UTC-clocked box) as IST wall-clock.
+    now = now.replace(tzinfo=_IST) if now.tzinfo is None else now.astimezone(_IST)
     if now.weekday() >= 5:  # Sat/Sun
         return False
     return _MARKET_OPEN <= now.time() <= _MARKET_CLOSE
@@ -87,13 +91,20 @@ def _assert_off_hours(action: str, now: Optional[datetime] = None) -> None:
 
 # ── pure helpers (deterministic, DB-free) ───────────────────────────────────────
 def nifty_atm_strike(spot: float, step: int = 50) -> int:
-    """ATM strike = nearest ``step`` multiple to spot (NIFTY step = 50)."""
-    return int(round(spot / step) * step)
+    """ATM strike = nearest ``step`` multiple to spot (NIFTY step = 50).
+
+    Uses round-half-UP (exchange convention) rather than Python's round-half-even,
+    so a spot exactly on a half-step (e.g. 23425) rounds to 23450, not 23400.
+    """
+    return int(math.floor(spot / step + 0.5)) * step
 
 
 def _normalize_iv(v: Any) -> Optional[float]:
-    """Normalise an IV value to a fraction. Dhan returns IV in percent
-    (e.g. 13.5 → 0.135); pass through values that already look like fractions."""
+    """Normalise an IV value to a fraction. Dhan's v2 option chain returns IV in
+    PERCENT (e.g. 13.5 → 0.135), so divide by 100 unconditionally. (An earlier
+    >1.5 heuristic risked treating a genuine low percent reading as a fraction —
+    100× wrong — so it was removed.) This is the single place to revisit if a
+    live response ever shows fractional IV. Non-positive / unparseable → None."""
     if v is None:
         return None
     try:
@@ -102,7 +113,7 @@ def _normalize_iv(v: Any) -> Optional[float]:
         return None
     if f <= 0:
         return None
-    return f / 100.0 if f > 1.5 else f
+    return f / 100.0
 
 
 def parse_futures_history(
@@ -114,18 +125,22 @@ def parse_futures_history(
     """Parse a Dhan ``charts/historical|intraday`` response into futures_bars
     rows. Dhan returns parallel arrays (timestamp/open/high/low/close/volume,
     plus open_interest when ``oi=true``). Suspended/illiquid → empty → []."""
-    inner = raw.get("data", raw) if isinstance(raw, dict) else {}
+    inner = (raw.get("data") or raw) if isinstance(raw, dict) else {}
     timestamps = inner.get("timestamp") or []
-    if not timestamps:
+    opens = inner.get("open") or []
+    highs = inner.get("high") or []
+    lows = inner.get("low") or []
+    closes = inner.get("close") or []
+    # Truncate to the shortest OHLC array length so a malformed/partial payload
+    # (missing key, or mismatched array lengths) skips silently rather than
+    # raising KeyError/IndexError mid-backfill. Suspended/illiquid → 0 rows.
+    n = min(len(timestamps), len(opens), len(highs), len(lows), len(closes))
+    if n == 0:
         return []
-    opens = inner["open"]
-    highs = inner["high"]
-    lows = inner["low"]
-    closes = inner["close"]
-    volumes = inner.get("volume") or [0] * len(timestamps)
-    ois = inner.get("open_interest") or inner.get("oi") or [None] * len(timestamps)
+    volumes = inner.get("volume") or [0] * n
+    ois = inner.get("open_interest") or inner.get("oi") or [None] * n
     rows: list[dict[str, Any]] = []
-    for i, ts in enumerate(timestamps):
+    for i, ts in enumerate(timestamps[:n]):
         rows.append(
             {
                 "time": datetime.fromtimestamp(int(ts), tz=timezone.utc),
@@ -158,7 +173,7 @@ def extract_atm_iv(
     Returns one option_atm_iv row, or None if the ATM strike is missing.
     IV is normalised to a fraction; ``straddle_iv`` = mean(call_iv, put_iv).
     """
-    data = chain.get("data", chain) if isinstance(chain, dict) else {}
+    data = (chain.get("data") or chain) if isinstance(chain, dict) else {}
     spot = data.get("last_price")
     oc = data.get("oc") or {}
     if spot is None or not oc:
@@ -181,11 +196,13 @@ def extract_atm_iv(
         return None
     call_iv = _normalize_iv((node.get("ce") or {}).get("implied_volatility"))
     put_iv = _normalize_iv((node.get("pe") or {}).get("implied_volatility"))
-    ivs = [x for x in (call_iv, put_iv) if x is not None]
-    straddle_iv = sum(ivs) / len(ivs) if ivs else None
+    straddle_iv = (call_iv + put_iv) / 2 if (call_iv is not None and put_iv is not None) else None
 
     now = (now or _now_ist()).astimezone(_IST)
     dte = (expiry_date - now.date()).days
+    if dte < 0:
+        logger.warning("extract_atm_iv: expiry %s already past for %s", expiry_date, symbol)
+        return None
     return {
         "time": now.astimezone(timezone.utc),
         "symbol": symbol,
@@ -205,12 +222,22 @@ def parse_india_vix_csv(text: str) -> list[dict[str, Any]]:
     """Parse an NSE India-VIX history CSV into india_vix rows.
 
     NSE's CSV columns vary by export; we match case/space-insensitively on
-    Date + Close (High/Low optional). Date is ``DD-MMM-YYYY`` or ``YYYY-MM-DD``.
+    Date + Close (High/Low optional). Date formats ``DD-MMM-YYYY`` and
+    ``YYYY-MM-DD`` are both handled by pandas.
+
+    The ``time`` stored for each daily bar is the trading DATE at 00:00 UTC
+    (not midnight IST). This anchors the daily bar to its calendar date in UTC
+    so ``time::date`` joins correctly with futures_bars daily bars, which also
+    land on the same UTC date.
     """
-    reader = csv.DictReader(io.StringIO(text))
-    if not reader.fieldnames:
+    # Strip UTF-8 BOM if present (NSE CSVs sometimes include it).
+    text = text.lstrip("﻿")
+    df = pd.read_csv(io.StringIO(text), skipinitialspace=True)
+    if df.empty or df.columns.empty:
         return []
-    norm = {f: f.strip().lower().replace(" ", "").replace("_", "") for f in reader.fieldnames}
+
+    # Normalise column names: lower, strip, remove spaces and underscores.
+    norm = {c: c.strip().lower().replace(" ", "").replace("_", "") for c in df.columns}
 
     def col(*names: str) -> Optional[str]:
         for orig, n in norm.items():
@@ -223,19 +250,30 @@ def parse_india_vix_csv(text: str) -> list[dict[str, Any]]:
     c_high = col("high", "highvalue")
     c_low = col("low", "lowvalue")
     if not c_date or not c_close:
-        raise ValueError(f"India VIX CSV missing Date/Close columns: {reader.fieldnames}")
+        raise ValueError(
+            f"India VIX CSV missing Date/Close columns; found: {list(df.columns)}"
+        )
+
+    # Parse dates; dayfirst=True handles DD-MMM-YYYY and DD-MM-YYYY; errors→NaT.
+    dates = pd.to_datetime(df[c_date], dayfirst=True, errors="coerce")
+    closes = pd.to_numeric(df[c_close], errors="coerce")
 
     rows: list[dict[str, Any]] = []
-    for r in reader:
-        d = _parse_date(r[c_date])
-        if d is None:
+    for i in range(len(df)):
+        if pd.isna(dates.iloc[i]) or pd.isna(closes.iloc[i]):
             continue
+        d: date = dates.iloc[i].date()
+        # Store as calendar DATE at 00:00 UTC — not midnight IST — so that
+        # time::date comparisons align with other UTC-anchored daily bars.
+        t = datetime.combine(d, time(0, 0), tzinfo=timezone.utc)
+        high_raw = pd.to_numeric(df[c_high].iloc[i], errors="coerce") if c_high else float("nan")
+        low_raw = pd.to_numeric(df[c_low].iloc[i], errors="coerce") if c_low else float("nan")
         rows.append(
             {
-                "time": datetime.combine(d, time(0, 0), tzinfo=_IST).astimezone(timezone.utc),
-                "close": float(str(r[c_close]).replace(",", "")),
-                "high": _opt_float(r.get(c_high)) if c_high else None,
-                "low": _opt_float(r.get(c_low)) if c_low else None,
+                "time": t,
+                "close": float(closes.iloc[i]),
+                "high": None if pd.isna(high_raw) else float(high_raw),
+                "low": None if pd.isna(low_raw) else float(low_raw),
             }
         )
     return rows
@@ -245,6 +283,7 @@ def classify_expiry(expiry: date, all_expiries: Iterable[date]) -> str:
     """A monthly expiry is the last expiry within its calendar month; anything
     else is weekly. Derived from the actual expiry set (NIFTY's weekly expiry
     weekday changed in 2024–25, so never assume a fixed day)."""
+    all_expiries = list(all_expiries)
     same_month = [e for e in all_expiries if e.year == expiry.year and e.month == expiry.month]
     return "monthly" if same_month and expiry == max(same_month) else "weekly"
 
@@ -259,15 +298,6 @@ def _parse_date(s: Any) -> Optional[date]:
     return None
 
 
-def _opt_float(v: Any) -> Optional[float]:
-    if v is None or str(v).strip() == "":
-        return None
-    try:
-        return float(str(v).replace(",", ""))
-    except ValueError:
-        return None
-
-
 # ── DB upserts (mirror backfill.py: get_session + execute_values) ────────────────
 def _execute_values(sql: str, rows: list[tuple]) -> int:
     if not rows:
@@ -279,6 +309,7 @@ def _execute_values(sql: str, rows: list[tuple]) -> int:
     with get_session() as session:
         cur = session.connection().connection.cursor()
         execute_values(cur, sql, rows, page_size=1000)
+        cur.close()
     return len(rows)
 
 
@@ -353,7 +384,15 @@ async def backfill_futures_bars(
 ) -> int:
     """Fetch NSE_FNO index-futures OHLCV+OI for one contract and upsert into
     futures_bars. ``security_id`` is the futures contract id (from the
-    instruments master). Off-hours only."""
+    instruments master). Off-hours only.
+
+    WARNING: each ``symbol`` must be ONE continuous/front-month series — writing
+    two different physical expiry contracts under the same symbol collides on the
+    PK (symbol, timeframe, time) and silently contaminates realized_vol_20d
+    across roll gaps. For raw per-contract storage use distinct symbol values
+    (e.g. ``NIFTY-2406``, ``NIFTY-2407``). This is Open Q#2 from
+    docs/fno-handoff.md; the schema is unchanged.
+    """
     _assert_off_hours("backfill_futures_bars", now)
     raw = await client.get_daily_historical(
         security_id=security_id,
@@ -393,11 +432,17 @@ async def snapshot_atm_iv(
 
 def ingest_india_vix(csv_source: str | Path) -> int:
     """Ingest India VIX daily OHLC from an NSE CSV (path or raw CSV text)."""
-    text = (
-        Path(csv_source).read_text()
-        if (isinstance(csv_source, Path) or (isinstance(csv_source, str) and "\n" not in csv_source and Path(csv_source).exists()))
-        else str(csv_source)
-    )
+    if isinstance(csv_source, Path):
+        text = csv_source.read_text()
+    elif (
+        isinstance(csv_source, str)
+        and "\n" not in csv_source
+        and len(csv_source) < 4096
+        and Path(csv_source).exists()
+    ):
+        text = Path(csv_source).read_text()
+    else:
+        text = str(csv_source)
     rows = parse_india_vix_csv(text)
     n = _upsert_india_vix(rows)
     logger.info("india_vix: upserted %d rows", n)
@@ -449,10 +494,12 @@ async def _amain(args: argparse.Namespace) -> None:
 
     cfg = get_config()
     init_db(cfg.db_url)
-    async with DhanClient() as client:
+    async with DhanClient(cfg.dhan_client_id, cfg.dhan_access_token) as client:
         if args.futures:
             if not args.security_id:
                 raise SystemExit("--futures requires --security-id")
+            if not args.from_date or not args.to_date:
+                raise SystemExit("--futures requires --from and --to")
             await backfill_futures_bars(
                 client, args.symbol, args.security_id, args.from_date, args.to_date
             )
