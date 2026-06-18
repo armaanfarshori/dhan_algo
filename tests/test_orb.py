@@ -1,8 +1,8 @@
 """Pure ORB strategy — OR build/lock, breakouts, exits, square-off.
 The strategy is synchronous and IO-free, so tests construct timestamps directly."""
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from strategies.orb import ORB, ORBParams
+from strategies.orb import IST, ORB, ORBParams
 
 
 def ist(hh, mm):
@@ -135,3 +135,47 @@ def test_seed_rejects_garbage():
     s = ORB("999")
     s.seed_opening_range(ist(12, 0).date(), 0.0, float("inf"))
     assert not s.or_locked
+
+
+# ── Future-stamped tick guard (defense-in-depth) ──────────────────────────────
+
+def test_future_tick_ignored_no_reset_no_or_change():
+    """A tick stamped far in the future must NOT reset the session or widen
+    the OR — a future-dated tick would otherwise wipe a locked OR mid-day."""
+    s = ORB("999")
+    # Build a real OR for today against the wall clock so the guard's
+    # naive-IST comparison sees a plausible "now".
+    now = datetime.now(IST).replace(tzinfo=None)
+    s.on_tick(now, 101, high=102, low=100)
+    locked_high, locked_low = s.or_high, s.or_low
+    locked_date = s._session_date
+
+    # A tick ~1 hour in the future is implausible — ignore it.
+    future = now + timedelta(hours=1)
+    assert s.on_tick(future, 500, high=600, low=400) is None
+    # No reset: session date unchanged, OR untouched.
+    assert s._session_date == locked_date
+    assert s.or_high == locked_high and s.or_low == locked_low
+
+
+def test_future_tick_ignored_tz_aware():
+    """The guard also handles tz-aware (live-path) timestamps."""
+    s = ORB("999")
+    future = datetime.now(IST) + timedelta(minutes=10)
+    assert s.on_tick(future, 250, high=251, low=249) is None
+    # Nothing was built/reset from the bad tick.
+    assert not s.or_locked
+    assert s.or_high == 0.0
+
+
+def test_near_now_tick_within_skew_not_ignored():
+    """A tick a few seconds ahead (clock jitter) is within tolerance and
+    must follow the normal path."""
+    s = ORB("999")
+    now = datetime.now(IST).replace(tzinfo=None)
+    slightly_ahead = now + timedelta(seconds=30)
+    # During market hours this would build the OR; off-hours it simply does
+    # not error and is not rejected by the future guard. Either way, the tick
+    # is processed (session date gets set from it).
+    s.on_tick(slightly_ahead, 101, high=102, low=100)
+    assert s._session_date == slightly_ahead.date()
