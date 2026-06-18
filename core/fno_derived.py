@@ -161,9 +161,9 @@ def compute_realized_vol(symbol: str, timeframe: str = "1d", window: int = 20) -
     vols = realized_vol_series(closes, window=window)
     payload = [(symbol, timeframe, t, v) for t, v in zip(times, vols) if v is not None]
     n = _bulk_update(
-        "UPDATE futures_bars AS f SET realized_vol_20d = d.v "
-        "FROM (VALUES %s) AS d(s text, tf text, t timestamptz, v double precision) "
-        "WHERE f.symbol = d.s AND f.timeframe = d.tf AND f.time = d.t",
+        "UPDATE futures_bars AS f SET realized_vol_20d = d.v::double precision "
+        "FROM (VALUES %s) AS d(s, tf, t, v) "
+        "WHERE f.symbol = d.s AND f.timeframe = d.tf AND f.time = d.t::timestamptz",
         payload,
     )
     logger.info("realized_vol_20d: updated %d rows for %s/%s", n, symbol, timeframe)
@@ -200,9 +200,9 @@ def compute_index_realized_vol(
         (security_id, timeframe, t, v) for t, v in zip(times, vols) if v is not None
     ]
     n = _bulk_update(
-        "UPDATE index_bars AS i SET realized_vol_20d = d.v "
-        "FROM (VALUES %s) AS d(s text, tf text, t timestamptz, v double precision) "
-        "WHERE i.security_id = d.s AND i.timeframe = d.tf AND i.time = d.t",
+        "UPDATE index_bars AS i SET realized_vol_20d = d.v::double precision "
+        "FROM (VALUES %s) AS d(s, tf, t, v) "
+        "WHERE i.security_id = d.s AND i.timeframe = d.tf AND i.time = d.t::timestamptz",
         payload,
     )
     logger.info(
@@ -239,9 +239,9 @@ def compute_implied_move(symbol: str) -> int:
         if im is not None:
             payload.append((symbol, expiry, t, im))
     n = _bulk_update(
-        "UPDATE option_atm_iv AS o SET implied_move = d.im "
-        "FROM (VALUES %s) AS d(s text, e date, t timestamptz, im double precision) "
-        "WHERE o.symbol = d.s AND o.expiry_date = d.e AND o.time = d.t",
+        "UPDATE option_atm_iv AS o SET implied_move = d.im::double precision "
+        "FROM (VALUES %s) AS d(s, e, t, im) "
+        "WHERE o.symbol = d.s AND o.expiry_date = d.e::date AND o.time = d.t::timestamptz",
         payload,
     )
     logger.info("implied_move: updated %d rows for %s", n, symbol)

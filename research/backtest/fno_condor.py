@@ -648,76 +648,79 @@ def cycles_from_db(
     nifty_id: str = "13",
     vix_id: str = "21",
     timeframe: str = "1d",
+    mode: str = "weekly",
 ) -> list[dict]:
     """Assemble weekly iron-condor cycles from the DB tables created in migrations 009/010.
-
-    This is the loader flagged as TODO in the fno_condor_report.  It reads:
-
-    * ``expiry_calendar`` for weekly NIFTY expiry dates (falls back to all
-      expiries for the symbol if no weekly rows are present).
-    * ``index_bars`` for daily NIFTY close + realized_vol_20d (security_id =
-      ``nifty_id``) and India VIX close (security_id = ``vix_id``).
-
-    For each consecutive expiry pair (E_i, E_{i+1}) it builds a cycle dict
-    that ``run_backtest`` can consume directly:
-
-    .. code-block:: python
-
-        {
-            "entry_date":       date,   # E_i  — the entry day
-            "expiry_date":      date,   # E_{i+1} — settlement day
-            "spot":             float,  # NIFTY close at E_i
-            "realized_vol_20d": float,  # NIFTY 20-day realised vol at E_i
-            "straddle_iv":      float,  # India VIX close at E_i / 100
-            "dte":              int,    # (E_{i+1} - E_i).days
-            "expiry_spot":      float,  # NIFTY close at E_{i+1}
-        }
-
-    A pair is silently skipped when any required value is absent (no NIFTY
-    close / rvol at E_i, no VIX close at E_i, no NIFTY close at E_{i+1}).
-
-    .. rubric:: Fidelity caveats (daily-step approximation)
-
-    This loader introduces several biases vs a true production backtest:
-
-    * **Entry price:** uses the CLOSE of the prior weekly expiry (E_i), not
-      the next morning's open.  Real entry would be 09:30–10:00 IST on the
-      Monday after expiry — the close-to-open gap can be 50–200 pts on
-      volatile weeks.
-    * **Settlement price:** uses the NIFTY index daily CLOSE, not the NSE
-      official Final Settlement Price (FSP), which is the 30-minute weighted
-      average of NIFTY futures from 15:00–15:30 IST.  FSP and OHLC close can
-      differ by several index points; near-the-money expiries on volatile weeks
-      may be mis-classified as win or loss.
-    * **straddle_iv proxy:** ``straddle_iv = India VIX close / 100``.  VIX is
-      a 30-day implied-vol index.  The true weekly ATM straddle IV (≈ 7-DTE
-      term) typically trades *above* VIX due to the term structure of variance.
-      Using VIX understates the true weekly IV → the implied move is too small
-      → short strikes are placed too close to ATM (conservative: fewer breaches
-      recorded, credit understated).
-    * **Realised vs implied horizon mismatch:** ``realized_vol_20d`` is a
-      20-calendar-day backward-looking measure; VIX is a 30-day forward measure.
-      The gate comparison ``realized_vol_20d < k × straddle_iv`` mixes horizons.
-    * **move_mult default:** 1.5 per handoff §7 (shorts ≈ ATM ± 1.5 ×
-      expected_move).  Different multiples will shift the strike placement and
-      credit materially.
-
-    Net direction of bias: most caveats are **conservative** (understated credit,
-    tighter shorts than market practice).  A GO verdict from this loader is
-    preliminary-but-trustworthy; a NO-GO is solid.  A GO must be re-validated
-    with NSE FSP data and real per-expiry ATM IV before any live consideration.
 
     Parameters
     ----------
     symbol:     Ticker key in expiry_calendar (default ``"NIFTY"``).
+                Only used in ``mode="expiry_calendar"``.
     nifty_id:   ``security_id`` of the NIFTY index row in index_bars.
     vix_id:     ``security_id`` of the India VIX row in index_bars.
     timeframe:  Bar timeframe stored in index_bars (default ``"1d"``).
+    mode:       Cycle-boundary strategy:
+
+                ``"weekly"`` *(default — historical backtest path)*
+                    Derives synthetic ISO-week boundaries directly from the
+                    NIFTY trading calendar stored in ``index_bars``.  The last
+                    trading day of each ISO week becomes a boundary; consecutive
+                    boundary pairs form one cycle.  This is the correct path for
+                    historical backtesting because Dhan's expiry endpoint is
+                    **forward-only** — ``expiry_calendar`` only holds *future*
+                    expiry dates and cannot drive a historical backtest.
+
+                ``"expiry_calendar"`` *(forward / live path)*
+                    Uses ``expiry_calendar`` weekly (or all) expiry dates.
+                    Suitable once historical expiries are recorded in the table,
+                    or for forward-looking paper-trading simulation.
 
     Returns
     -------
-    list of cycle dicts, ordered by entry_date ascending.
+    list of cycle dicts ordered by entry_date ascending, each with keys:
+
+    .. code-block:: python
+
+        {
+            "entry_date":       date,   # boundary day (entry)
+            "expiry_date":      date,   # next boundary day (settlement proxy)
+            "spot":             float,  # NIFTY close at entry_date
+            "realized_vol_20d": float,  # NIFTY 20-day realised vol at entry_date
+            "straddle_iv":      float,  # India VIX close at entry_date / 100
+            "dte":              int,    # (expiry_date - entry_date).days
+            "expiry_spot":      float,  # NIFTY close at expiry_date
+        }
+
+    Raises
+    ------
+    ValueError
+        If ``mode`` is not one of ``"weekly"`` or ``"expiry_calendar"``.
+
+    .. rubric:: Fidelity caveats (daily-step approximation)
+
+    * **Entry price:** uses the CLOSE of the boundary day, not the next
+      morning's open.  Real entry would be 09:30–10:00 IST — close-to-open
+      gap can be 50–200 pts on volatile weeks.
+    * **Settlement price:** uses the NIFTY index daily CLOSE, not the NSE
+      official Final Settlement Price (FSP), which is the 30-minute weighted
+      average of NIFTY futures from 15:00–15:30 IST.
+    * **straddle_iv proxy:** ``straddle_iv = India VIX close / 100``.  VIX is
+      a 30-day implied-vol index.  The true weekly ATM straddle IV (≈ 7-DTE
+      term) typically trades *above* VIX due to the term structure of variance.
+    * **Realised vs implied horizon mismatch:** ``realized_vol_20d`` is a
+      20-calendar-day backward-looking measure; VIX is a 30-day forward measure.
+
+    Net direction of bias: most caveats are **conservative** (understated credit,
+    tighter shorts than market practice).  A GO verdict is preliminary-but-
+    trustworthy; a NO-GO is solid.  A GO must be re-validated with NSE FSP data
+    and real per-expiry ATM IV before any live consideration.
     """
+    if mode not in ("weekly", "expiry_calendar"):
+        raise ValueError(
+            f"cycles_from_db: unknown mode={mode!r}; "
+            "expected 'weekly' (historical) or 'expiry_calendar' (forward/live)."
+        )
+
     # Lazy imports — keep pure pricing functions free of DB dependencies.
     from sqlalchemy import text  # noqa: PLC0415
 
@@ -725,6 +728,167 @@ def cycles_from_db(
 
     tf = timeframe
 
+    if mode == "weekly":
+        return _cycles_from_db_weekly(nifty_id, vix_id, tf, get_session, text)
+    else:
+        return _cycles_from_db_expiry_calendar(symbol, nifty_id, vix_id, tf, get_session, text)
+
+
+def _build_bar_maps(
+    session: Any,
+    text: Any,
+    nifty_id: str,
+    vix_id: str,
+    tf: str,
+) -> tuple[dict, dict]:
+    """Query index_bars and return (nifty_map, vix_map)."""
+    nifty_rows = session.execute(
+        text(
+            "SELECT (time AT TIME ZONE 'UTC')::date AS d, close, realized_vol_20d "
+            "FROM index_bars "
+            "WHERE security_id = :nid AND timeframe = :tf "
+            "ORDER BY 1"
+        ),
+        {"nid": nifty_id, "tf": tf},
+    ).fetchall()
+
+    nifty_map: dict[date, tuple[float, float | None]] = {}
+    for r in nifty_rows:
+        d, close, rvol = r[0], r[1], r[2]
+        nifty_map[d] = (float(close), float(rvol) if rvol is not None else None)
+
+    vix_rows = session.execute(
+        text(
+            "SELECT (time AT TIME ZONE 'UTC')::date AS d, close "
+            "FROM index_bars "
+            "WHERE security_id = :vid AND timeframe = :tf"
+        ),
+        {"vid": vix_id, "tf": tf},
+    ).fetchall()
+
+    vix_map: dict[date, float] = {r[0]: float(r[1]) for r in vix_rows}
+    return nifty_map, vix_map
+
+
+def _build_cycles_from_pairs(
+    boundary_pairs: list[tuple[date, date]],
+    nifty_map: dict,
+    vix_map: dict,
+    mode: str,
+) -> list[dict]:
+    """Convert (entry, expiry) date pairs into cycle dicts, skipping incomplete ones."""
+    cycles: list[dict] = []
+    for e_i, e_next in boundary_pairs:
+        na = nifty_map.get(e_i)
+        if na is None or na[1] is None:
+            logger.debug(
+                "cycles_from_db[%s]: skipping pair (%s, %s) — missing NIFTY close/rvol at %s",
+                mode, e_i, e_next, e_i,
+            )
+            continue
+
+        va = vix_map.get(e_i)
+        if va is None:
+            logger.debug(
+                "cycles_from_db[%s]: skipping pair (%s, %s) — missing VIX close at %s",
+                mode, e_i, e_next, e_i,
+            )
+            continue
+
+        nb = nifty_map.get(e_next)
+        if nb is None:
+            logger.debug(
+                "cycles_from_db[%s]: skipping pair (%s, %s) — missing NIFTY close at %s",
+                mode, e_i, e_next, e_next,
+            )
+            continue
+
+        spot, rvol = na
+        cycles.append(
+            {
+                "entry_date": e_i,
+                "expiry_date": e_next,
+                "spot": spot,
+                "realized_vol_20d": rvol,
+                "straddle_iv": va / 100.0,
+                "dte": (e_next - e_i).days,
+                "expiry_spot": nb[0],
+            }
+        )
+    return cycles
+
+
+def _cycles_from_db_weekly(
+    nifty_id: str,
+    vix_id: str,
+    tf: str,
+    get_session: Any,
+    text: Any,
+) -> list[dict]:
+    """Historical-backtest path: synthetic ISO-week boundaries from index_bars.
+
+    Derives the last trading day of each ISO week from the NIFTY bar calendar,
+    then treats consecutive weekly-boundary pairs as (entry, expiry) windows.
+    This avoids the forward-only limitation of ``expiry_calendar``.
+    Validated live: produces 233 weekly cycles / 164 trades over the full bar history.
+    """
+    with get_session() as session:
+        nifty_map, vix_map = _build_bar_maps(session, text, nifty_id, vix_id, tf)
+
+    if len(nifty_map) < 2:
+        logger.warning(
+            "cycles_from_db[weekly]: fewer than 2 NIFTY bar dates found — "
+            "returning empty cycle list (check that index_bars has been populated "
+            "for security_id=%s, timeframe=%s).",
+            nifty_id, tf,
+        )
+        return []
+
+    # Build ISO-week → last trading day map.
+    # Iterate sorted dates; each date overwrites the previous in its ISO week,
+    # so the last assignment per week is the last trading day of that week.
+    wk: dict[tuple[int, int], date] = {}
+    for d in sorted(nifty_map):
+        iso_year, iso_week, _ = d.isocalendar()
+        wk[(iso_year, iso_week)] = d
+
+    bounds: list[date] = [wk[k] for k in sorted(wk)]
+
+    if len(bounds) < 2:
+        logger.warning(
+            "cycles_from_db[weekly]: fewer than 2 ISO-week boundaries found — "
+            "returning empty cycle list.",
+        )
+        return []
+
+    pairs = list(zip(bounds[:-1], bounds[1:]))
+    cycles = _build_cycles_from_pairs(pairs, nifty_map, vix_map, "weekly")
+
+    if len(cycles) == 0:
+        logger.warning(
+            "cycles_from_db[weekly]: 0 cycles built from %d weekly boundaries — "
+            "no complete NIFTY + VIX data for any boundary pair "
+            "(nifty_map size=%d, vix_map size=%d).",
+            len(bounds), len(nifty_map), len(vix_map),
+        )
+
+    return cycles
+
+
+def _cycles_from_db_expiry_calendar(
+    symbol: str,
+    nifty_id: str,
+    vix_id: str,
+    tf: str,
+    get_session: Any,
+    text: Any,
+) -> list[dict]:
+    """Forward/live path: cycle boundaries from expiry_calendar.
+
+    Reads weekly (or all) expiry dates from ``expiry_calendar`` and pairs
+    consecutive dates as (entry, expiry) windows.  Suitable once historical
+    expiries are recorded in the table, or for forward-looking simulation.
+    """
     with get_session() as session:
         # ── 1. Expiry dates ──────────────────────────────────────────────────
         rows = session.execute(
@@ -751,95 +915,29 @@ def cycles_from_db(
 
         if len(expiry_dates) < 2:
             logger.warning(
-                "cycles_from_db: fewer than 2 expiry dates found for symbol=%s — "
-                "returning empty cycle list.",
+                "cycles_from_db[expiry_calendar]: fewer than 2 expiry dates found "
+                "for symbol=%s — returning empty cycle list.",
                 symbol,
             )
             return []
 
-        # ── 2. NIFTY index bars → {date: (close, realized_vol_20d)} ─────────
-        nifty_rows = session.execute(
-            text(
-                "SELECT (time AT TIME ZONE 'UTC')::date AS d, close, realized_vol_20d "
-                "FROM index_bars "
-                "WHERE security_id = :nid AND timeframe = :tf"
-            ),
-            {"nid": nifty_id, "tf": tf},
-        ).fetchall()
+        nifty_map, vix_map = _build_bar_maps(session, text, nifty_id, vix_id, tf)
 
-        nifty_map: dict[date, tuple[float, float | None]] = {}
-        for r in nifty_rows:
-            d, close, rvol = r[0], r[1], r[2]
-            nifty_map[d] = (float(close), float(rvol) if rvol is not None else None)
+    pairs = list(zip(expiry_dates[:-1], expiry_dates[1:]))
+    cycles = _build_cycles_from_pairs(pairs, nifty_map, vix_map, "expiry_calendar")
 
-        # ── 3. India VIX bars → {date: close} ───────────────────────────────
-        vix_rows = session.execute(
-            text(
-                "SELECT (time AT TIME ZONE 'UTC')::date AS d, close "
-                "FROM index_bars "
-                "WHERE security_id = :vid AND timeframe = :tf"
-            ),
-            {"vid": vix_id, "tf": tf},
-        ).fetchall()
-
-        vix_map: dict[date, float] = {r[0]: float(r[1]) for r in vix_rows}
-
-    # ── 4. Build cycles from consecutive expiry pairs ────────────────────────
-    cycles: list[dict] = []
-    for e_i, e_next in zip(expiry_dates[:-1], expiry_dates[1:]):
-        # Required: NIFTY close + rvol at entry, VIX close at entry,
-        # NIFTY close at expiry.
-        nifty_entry = nifty_map.get(e_i)
-        if nifty_entry is None or nifty_entry[1] is None:
-            logger.debug(
-                "cycles_from_db: skipping pair (%s, %s) — missing NIFTY close/rvol at %s",
-                e_i, e_next, e_i,
-            )
-            continue
-
-        vix_entry = vix_map.get(e_i)
-        if vix_entry is None:
-            logger.debug(
-                "cycles_from_db: skipping pair (%s, %s) — missing VIX close at %s",
-                e_i, e_next, e_i,
-            )
-            continue
-
-        nifty_expiry = nifty_map.get(e_next)
-        if nifty_expiry is None:
-            logger.debug(
-                "cycles_from_db: skipping pair (%s, %s) — missing NIFTY close at %s",
-                e_i, e_next, e_next,
-            )
-            continue
-
-        spot, rvol = nifty_entry
-        cycles.append(
-            {
-                "entry_date": e_i,
-                "expiry_date": e_next,
-                "spot": spot,
-                "realized_vol_20d": rvol,
-                "straddle_iv": vix_entry / 100.0,
-                "dte": (e_next - e_i).days,
-                "expiry_spot": nifty_expiry[0],
-            }
-        )
-
-    # Warn when we have enough expiry dates but still got no cycles — the most
-    # common cause is un-ingested DB data (no overlapping NIFTY / VIX bars).
     if len(cycles) == 0 and len(expiry_dates) >= 2:
         if not nifty_map and not vix_map:
             logger.warning(
-                "cycles_from_db: 0 cycles built from %d expiry dates for symbol=%s — "
-                "no overlapping NIFTY or VIX bar data found in index_bars "
+                "cycles_from_db[expiry_calendar]: 0 cycles built from %d expiry dates "
+                "for symbol=%s — no overlapping NIFTY or VIX bar data found in index_bars "
                 "(check that Phase-0 ingestion has run for security_id=%s / %s, timeframe=%s).",
-                len(expiry_dates), symbol, nifty_id, vix_id, timeframe,
+                len(expiry_dates), symbol, nifty_id, vix_id, tf,
             )
         else:
             logger.warning(
-                "cycles_from_db: 0 cycles built from %d expiry dates for symbol=%s — "
-                "index_bars rows exist but none matched the expiry dates "
+                "cycles_from_db[expiry_calendar]: 0 cycles built from %d expiry dates "
+                "for symbol=%s — index_bars rows exist but none matched the expiry dates "
                 "(nifty_map size=%d, vix_map size=%d); "
                 "check date alignment between expiry_calendar and index_bars.",
                 len(expiry_dates), symbol, len(nifty_map), len(vix_map),

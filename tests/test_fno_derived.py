@@ -239,3 +239,12 @@ def test_compute_index_realized_vol_sql_targets_index_bars():
     sql = captured_sql[0]
     assert "index_bars" in sql, f"SQL must reference index_bars; got: {sql!r}"
     assert "futures_bars" not in sql, f"SQL must NOT reference futures_bars; got: {sql!r}"
+    # Regression guard (live run, 2026-06-19): a VALUES alias may carry only
+    # column NAMES, not types — `AS d(s text, ...)` is a Postgres syntax error.
+    # Type safety comes from ::casts on the projected columns, not the alias.
+    alias = sql.split("AS d(")[1].split(")")[0]
+    for kw in ("text", "timestamptz", "double precision", "date"):
+        assert kw not in alias, f"VALUES alias must be untyped (no '{kw}'); got: {alias!r}"
+    assert "::double precision" in sql and "::timestamptz" in sql, (
+        f"projected columns must be explicitly cast; got: {sql!r}"
+    )

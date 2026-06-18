@@ -1,9 +1,24 @@
 # NIFTY Iron-Condor — Phase-1 Backtest Harness & Go/No-Go (status report)
 
-**Status:** harness complete + unit-tested; **the real go/no-go is BLOCKED on Phase-0
-data ingestion** (no F&O data exists in TimescaleDB yet). This document describes the
-harness, the cost stack, the gate it consumes, and the exact procedure to produce the
-real verdict on the trusted machine. See `docs/fno-handoff.md` §6–7.
+**Status (2026-06-19): FIRST REAL BACKTEST RUN — preliminary GO.** Data ingested into
+`dhan_trading` (NIFTY 50 + India VIX index bars via Dhan charts, detailed scrip master,
+expiry calendar). Realized vol computed; VIX used as the historical implied baseline.
+
+## 0. Headline result (after costs)
+
+NIFTY weekly iron condor, 2022-01 → 2026-06, synthetic ISO-week cycles, gate k=0.898
+(calibrated; VRP pass-rate ~70%, India VIX > NIFTY realized on 100% of SELL days, mean
+edge +3.8 vol pts). 164 trades after the gate, ₹2,00,000 capital:
+
+| `move_mult` | trades | win% | profit factor | Sharpe | max DD | net P&L | ROC | verdict |
+|---|---|---|---|---|---|---|---|---|
+| 1.0 | 164 | 78.7% | 1.29 | 0.78 | −₹22,550 | +₹44,302 | 22.2% | **GO** |
+| **1.5** (handoff default) | 164 | 90.9% | 1.74 | 1.22 | −₹8,451 | +₹36,420 | 18.2% | **GO** |
+
+**Read this as a PRELIMINARY GO** — positive expectancy after costs with max DD < 15% of
+capital under *deliberately conservative* assumptions (see §5 caveats). It is encouraging
+and clears the Phase-0→Phase-2 gate, but is **not live-ready**: re-validate with NSE final
+settlement prices + real per-expiry ATM IV (and ideally NIFTY-trained Kronos vol) first.
 
 ---
 
@@ -30,19 +45,19 @@ sanity — see the QA note in the PR.)
 
 ---
 
-## 2. Why there is no real verdict yet
+## 2. Data source (RESOLVED — ingestion done 2026-06-19)
 
 `run_backtest` consumes a list of **cycles** — dicts of
-`{entry_date, expiry_date, spot, straddle_iv, dte, realized_vol_20d, expiry_spot}`. Those
-fields come from `futures_bars`, `option_atm_iv`, and `expiry_calendar` — tables that
-**Alembic 009 created but that hold zero rows** until the Phase-0 ingestion runs. There is
-also no historical option IV from Dhan (Open Q#1: option chain is live-snapshot only), so
-`option_atm_iv` only accrues going-forward. **A real 2-year backtest therefore cannot run
-from this machine** (no creds, no data, off-hours-only).
+`{entry_date, expiry_date, spot, straddle_iv, dte, realized_vol_20d, expiry_spot}`.
 
-A `cycles_from_db()` loader is the one remaining wiring step (a documented TODO) — it joins
-the three tables per weekly expiry. The `samples_from_db()` join in `ml/fno_vol_gate.py` is
-the template for it.
+Realized vol comes from the **NIFTY 50 spot index** (`index_bars`, IDX_I id 13, ~7yr) and
+the implied baseline from **India VIX** (`index_bars`, id 21, ~4yr) — both ingested via Dhan
+charts. Cycles are assembled by `cycles_from_db(mode="weekly")`, which derives **synthetic
+ISO-week boundaries** from the index trading calendar. This is required because Dhan's expiry
+endpoint is **forward-only** (`expiry_calendar` holds no historical expiries), and Dhan exposes
+**no historical option IV** (Open Q#1) — so per-expiry ATM IV (`option_atm_iv`) and the full
+`option_chain_snapshot` only accrue going-forward (a post-close cron). `cycles_from_db(
+mode="expiry_calendar")` is the forward/live path for when historical expiries are recorded.
 
 ---
 
@@ -63,27 +78,29 @@ go_no_go: (True, 'GO — all criteria pass …')
 
 ---
 
-## 4. How to produce the REAL go/no-go (trusted machine, off-hours)
+## 4. How the §0 result was produced (and how to reproduce/extend)
 
-1. **Ingest data** (PR2, off-hours): `python -m core.fno_backfill --futures --symbol NIFTY
-   --security-id <front-month id> --from 2022-06-01 --to <today>`; `--expiry-calendar`;
-   begin the daily `--atm-iv` post-close cron (forward-only);
-   `--index --security-id 13 --symbol NIFTY --from 2022-06-01 --to <today>` (NIFTY 50 index bars via Dhan charts);
-   `--index --security-id 21 --symbol INDIAVIX --from 2022-06-01 --to <today>` (India VIX via Dhan charts — replaces the old `--india-vix <NSE csv>` approach).
-   - Resolve **Open Q#2** first: store one **continuous** front-month series under
-     `symbol="NIFTY"` (roll-stitched) — multiple raw contracts under one symbol collide on
-     the PK and corrupt `realized_vol_20d`.
-2. **Derive** (PR3): `compute_realized_vol("NIFTY")`, `compute_implied_move("NIFTY")`.
-3. **Build the cycles loader** (`cycles_from_db`, TODO) and run
-   `run_backtest(cycles, k=calibrate_threshold(samples_from_db()))`.
-4. **Verify-me cost inputs before quoting any verdict:** the NSE options exchange rate
-   (`OPTION_EXCHANGE_PCT`, currently ₹35.53/lakh) and the exact post-Apr-2026 STT circular
-   numbers (see `fno_costs.py` docstring).
-5. Apply the handoff's fallbacks: negative post-cost → widen wings / cut frequency / raise k;
-   spread < 0 regime → flip to debit/long-vol; paper DD > 20% → halve size.
+Run off-hours on a box with DB access + the cached Dhan token (read-only; never mint a
+session). The §0 result was produced exactly this way:
+1. `alembic upgrade head` (applies 009+010 to `dhan_trading`).
+2. Ingest: `sync_fno_instruments()`; `backfill_index_bars(c, "13", "NIFTY", "2018-01-01", today)`;
+   `backfill_index_bars(c, "21", "INDIAVIX", "2022-01-01", today)`; `build_expiry_calendar(c, "NIFTY")`;
+   one `snapshot_option_chain(c, "NIFTY")` to start the forward IV record.
+3. `compute_index_realized_vol("13")` → fills `index_bars.realized_vol_20d`.
+4. `k = calibrate_threshold(samples_from_db(source="vix"))`;
+   `run_backtest(cycles_from_db("NIFTY", mode="weekly"), k=k, move_mult=1.5)`.
 
-**Stop point:** this is the end of the Phase-0 → Phase-1 scope. No strategy/live build until
-the real go/no-go (step 3) passes.
+**Before any live consideration (the §5 caveats are why §0 is only *preliminary*):**
+- Replace VIX with **real per-expiry ATM IV** (`option_chain_snapshot`, once enough forward
+  history accrues — or Black-76-derived from currently-listed option contracts).
+- Use **NSE Final Settlement Price** (15:00–15:30 weighted avg) for `expiry_spot`, not the close.
+- Model **next-morning entry** rather than prior-expiry close.
+- Verify-me cost inputs: `OPTION_EXCHANGE_PCT` (₹35.53/lakh) + exact post-Apr-2026 STT circular.
+- Apply the handoff fallbacks: negative post-cost → widen wings / cut frequency / raise k;
+  spread < 0 regime → flip to debit/long-vol; paper DD > 20% → halve size.
+
+**Stop point:** this is the end of Phase-0 → Phase-1 scope. The preliminary GO clears the gate
+to *plan* Phase-2, but no strategy/live build until the caveats above are addressed.
 
 ---
 
