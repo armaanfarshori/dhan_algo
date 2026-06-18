@@ -463,3 +463,111 @@ class TestRoundTrip:
             assert gate_decision(None, 0.20, k=k) == STAND_ASIDE
             assert gate_decision(0.10, 0, k=k) == STAND_ASIDE
             assert gate_decision(0.10, None, k=k) == STAND_ASIDE
+
+
+# ===========================================================================
+# 6. NEW HIGH-VALUE COVERAGE TESTS
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# 6a. k>1 no-overlap: BUY_PREMIUM takes priority over SELL_PREMIUM when both
+#     conditions would be satisfied simultaneously.
+# ---------------------------------------------------------------------------
+
+
+class TestKGreaterThanOneOrdering:
+    """With k=1.5, the BUY and SELL ranges overlap:
+    SELL condition: rv < k*iv = 1.5*0.12 = 0.18
+    BUY  condition: rv > iv   = 0.12
+    Overlap: 0.12 < rv < 0.18 → BUY must win (evaluated first).
+    """
+
+    IV = 0.12
+    K = 1.5
+
+    @requires_module
+    def test_realized_above_implied_is_buy_even_with_large_k(self):
+        """rv=0.13 > 0.12=iv AND rv=0.13 < 1.5*0.12=0.18 → BUY_PREMIUM wins."""
+        rv = 0.13  # in the overlap zone
+        assert gate_decision(rv, self.IV, k=self.K) == BUY_PREMIUM
+
+    @requires_module
+    def test_realized_below_implied_and_below_threshold_is_sell(self):
+        """rv=0.11 < iv=0.12 AND rv=0.11 < 1.5*0.12=0.18 → SELL_PREMIUM."""
+        rv = 0.11  # below iv, so BUY condition fails; rv < k*iv → SELL
+        assert gate_decision(rv, self.IV, k=self.K) == SELL_PREMIUM
+
+
+# ---------------------------------------------------------------------------
+# 6b. realized_vol < 0 guard: must return STAND_ASIDE (fail-open)
+# ---------------------------------------------------------------------------
+
+
+class TestNegativeRealizedVolGuard:
+    """Negative realized_vol is physically impossible; gate must return STAND_ASIDE."""
+
+    @requires_module
+    def test_negative_realized_vol_is_stand_aside(self):
+        assert gate_decision(-0.01, 0.12) == STAND_ASIDE
+
+    @requires_module
+    def test_negative_realized_vol_does_not_raise(self):
+        try:
+            result = gate_decision(-0.01, 0.12)
+            assert result == STAND_ASIDE
+        except Exception as exc:
+            pytest.fail(f"gate_decision raised on negative realized_vol: {exc}")
+
+    @requires_module
+    def test_large_negative_realized_vol_is_stand_aside(self):
+        assert gate_decision(-999.0, 0.12) == STAND_ASIDE
+
+
+# ---------------------------------------------------------------------------
+# 6c. calibrate_threshold skips realized_vol<=0 (degenerate pairs)
+# ---------------------------------------------------------------------------
+
+
+class TestCalibrateThresholdSkipsDegeneratePairs:
+    """Degenerate pairs (rv<=0) must be excluded from the ratio set without
+    crashing, and the returned k must still be in [0.5, 1.5]."""
+
+    @requires_module
+    def test_zero_realized_vol_is_skipped_without_crash(self):
+        """A (0.0, 0.12) pair must be excluded (rv<=0) and not cause ZeroDivisionError."""
+        valid_pairs = [
+            (0.08, 0.12),
+            (0.09, 0.12),
+            (0.10, 0.12),
+            (0.11, 0.12),
+            (0.13, 0.12),
+        ]
+        degenerate = [(0.0, 0.12), (-0.1, 0.12)]
+        samples = degenerate + valid_pairs
+        # Must not raise
+        k = calibrate_threshold(samples, target_pass=0.70)
+        assert 0.5 <= k <= 1.5
+
+    @requires_module
+    def test_degenerate_pairs_do_not_change_result(self):
+        """Adding degenerate pairs to a clean set must not change the returned k."""
+        valid_pairs = [
+            (0.08, 0.12),
+            (0.09, 0.12),
+            (0.10, 0.12),
+            (0.11, 0.12),
+            (0.13, 0.12),
+        ]
+        degenerate = [(0.0, 0.12), (-0.1, 0.12)]
+        k_clean = calibrate_threshold(valid_pairs, target_pass=0.70)
+        k_dirty = calibrate_threshold(degenerate + valid_pairs, target_pass=0.70)
+        # Degenerate pairs must be excluded so result is identical
+        assert k_clean == pytest.approx(k_dirty, abs=1e-9)
+
+    @requires_module
+    def test_all_degenerate_pairs_returns_default_k(self):
+        """When ALL pairs are degenerate (rv<=0), must return DEFAULT_K."""
+        samples = [(0.0, 0.12), (-0.1, 0.12), (0.0, 0.20)]
+        k = calibrate_threshold(samples, target_pass=0.70)
+        assert k == pytest.approx(DEFAULT_K)

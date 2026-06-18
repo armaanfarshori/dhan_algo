@@ -17,12 +17,12 @@ Options imply a level of forward volatility (implied_vol = ATM straddle IV,
 annualised fraction). The market consistently *overprices* volatility relative to
 what subsequently realises — this spread is the Volatility Risk Premium (VRP).
 
-A simple gate:
+A simple gate (BUY checked before SELL — see gate_decision docstring for why):
 
-  1.  If predicted_realized_vol < k × implied_vol  →  SELL_PREMIUM
-      (implied is elevated vs what we expect to realise → harvest the premium)
-  2.  If predicted_realized_vol > implied_vol       →  BUY_PREMIUM
+  1.  If predicted_realized_vol > implied_vol       →  BUY_PREMIUM
       (realized likely to exceed implied → long vol)
+  2.  If predicted_realized_vol < k × implied_vol  →  SELL_PREMIUM
+      (implied is elevated vs what we expect to realise → harvest the premium)
   3.  Otherwise                                     →  STAND_ASIDE
       (regime unclear — do nothing)
 
@@ -37,6 +37,20 @@ Kronos training corpus; Phase-0 uses PERSISTENCE as the simplest unbiased proxy:
 This is the industry baseline: yesterday's realized vol is tomorrow's best naive
 guess. It has positive expected edge (VRP is a documented risk premium) but will
 miss vol-regime transitions.
+
+PROXY HORIZON MISMATCH (main source of proxy error)
+-----------------------------------------------------
+realized_vol_20d is a 20-trading-day BACKWARD-looking realized vol. The ATM
+straddle price, by contrast, embeds the market's expectation of volatility over
+the FORWARD period until expiry — typically ~5–10 trading days for the nearest
+weekly option. Using a 20-day backward vol as a proxy for a ~5–10-day forward
+vol is a deliberate simplification: it is stable and well-understood, but it will
+lag vol-regime changes and structurally over-smooth short-term spikes.
+
+A 5–10 day trailing realized vol (or an EWMA with a short half-life) would better
+match the straddle's pricing horizon and should be revisited once a NIFTY-trained
+Kronos checkpoint replaces the persistence proxy (Open Question #4). Until then,
+20-day persistence is the Phase-0 baseline.
 
 OPEN QUESTION #4 — Kronos NIFTY fine-tune
 ------------------------------------------
@@ -112,16 +126,28 @@ def gate_decision(
     str
         One of SELL_PREMIUM, BUY_PREMIUM, STAND_ASIDE.
         Never raises — fail-open returns STAND_ASIDE on degenerate inputs.
+
+    Notes
+    -----
+    BUY_PREMIUM is evaluated BEFORE SELL_PREMIUM.  When k > 1 (which
+    calibrate_threshold can return — the clamp ceiling is 1.5) the two
+    conditions overlap: a realized_vol that is simultaneously > implied_vol
+    and < k * implied_vol would satisfy both.  In that region the correct
+    signal is BUY_PREMIUM (we expect realized to exceed implied), so BUY
+    must take precedence.  For the default k = 0.9 (≤ 1) there is no
+    overlap and the ordering does not change observable behaviour.
     """
     try:
-        if realized_vol is None or implied_vol is None or implied_vol <= 0:
+        if realized_vol is None or implied_vol is None or implied_vol <= 0 or realized_vol < 0:
             return STAND_ASIDE
         rv = float(realized_vol)
         iv = float(implied_vol)
-        if rv < k * iv:
-            return SELL_PREMIUM
+        # Comparing annualised vols is equivalent to comparing implied vs predicted
+        # MOVES: the spot·√(dte/365) scaling factor cancels in the ratio rv/iv.
         if rv > iv:
             return BUY_PREMIUM
+        if rv < k * iv:
+            return SELL_PREMIUM
         return STAND_ASIDE
     except Exception as exc:  # noqa: BLE001
         logger.warning("gate_decision: unexpected error (%s) — returning STAND_ASIDE", exc)
@@ -245,7 +271,7 @@ def calibrate_threshold(
     """
     ratios: list[float] = []
     for rv, iv in samples:
-        if rv is None or iv is None or iv <= 0:
+        if rv is None or iv is None or iv <= 0 or rv <= 0:
             continue
         try:
             ratios.append(float(rv) / float(iv))
@@ -300,18 +326,29 @@ def samples_from_db(
     from db import get_session
 
     sql = text("""
+        -- option_atm_iv can have MULTIPLE rows per trading date (weekly + monthly
+        -- expiries).  DISTINCT ON restricts to the nearest positive-dte expiry per
+        -- date so each (realized_vol, implied_vol) pair is not duplicated.
+        -- Date keys use AT TIME ZONE 'UTC' so the join is independent of DB server TZ.
         SELECT
             fb.realized_vol_20d  AS realized_vol,
             oi.straddle_iv       AS implied_vol
-        FROM option_atm_iv oi
+        FROM (
+            SELECT DISTINCT ON ((time AT TIME ZONE 'UTC')::date)
+                symbol,
+                (time AT TIME ZONE 'UTC')::date  AS trade_date,
+                straddle_iv
+            FROM option_atm_iv
+            WHERE symbol      = :sym
+              AND straddle_iv IS NOT NULL
+            ORDER BY (time AT TIME ZONE 'UTC')::date, dte ASC
+        ) oi
         JOIN futures_bars fb
           ON fb.symbol    = oi.symbol
          AND fb.timeframe = :tf
-         AND date(fb.time) = date(oi.time)
-        WHERE oi.symbol      = :sym
-          AND oi.straddle_iv IS NOT NULL
-          AND fb.realized_vol_20d IS NOT NULL
-        ORDER BY oi.time
+         AND (fb.time AT TIME ZONE 'UTC')::date = oi.trade_date
+        WHERE fb.realized_vol_20d IS NOT NULL
+        ORDER BY oi.trade_date
     """)
 
     with get_session() as session:
