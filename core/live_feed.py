@@ -295,34 +295,38 @@ class LiveFeed:
 
     @staticmethod
     def _parse_ltt(ltt_str: str) -> Optional[datetime]:
-        """Convert exchange LTT ("HH:MM:SS" UTC string from dhanhq Quote/Ticker
-        packet) to an IST-aware datetime anchored to today's UTC date.
+        """Convert exchange LTT ("HH:MM:SS" from dhanhq Quote/Ticker packet) to an
+        IST-aware datetime anchored to today's IST date.
 
-        The dhanhq marketfeed library decodes the LTT epoch via
-        ``datetime.utcfromtimestamp(epoch).strftime('%H:%M:%S')``, yielding a
-        plain ``"HH:MM:SS"`` string in UTC (the raw epoch integer is no longer
-        accessible from the parsed dict).  We reconstruct it by combining
-        today's UTC date with the time component and then converting to IST.
+        IMPORTANT: the dhanhq marketfeed library decodes the LTT via
+        ``datetime.utcfromtimestamp(epoch).strftime('%H:%M:%S')``. The exchange
+        epoch is **IST-based** (seconds since the Unix epoch on the IST clock), so
+        ``utcfromtimestamp`` already yields the IST wall-clock time as the string
+        (e.g. a trade at 11:24 IST → "11:24:00"). The string is therefore the IST
+        time of the trade — NOT UTC.
 
-        Edge case: if the UTC time crosses midnight (e.g. LTT "18:31" on a day
-        where IST is "00:01" next day) we use today's UTC date which is correct
-        because market hours are 09:15–15:30 IST = 03:45–10:00 UTC (always same
-        UTC date).
+        The previous version treated this string as UTC and called
+        ``.astimezone(IST)``, which added a *second* +5:30 offset and pushed every
+        tick ~5.5h into the future. BarBuilder then opened a future-stamped bar and
+        dropped every real tick as "out-of-order", silently freezing the feed for
+        that security. We now build the datetime directly in IST (no conversion).
 
-        Returns None when the field is absent, empty, or unparsable so the
-        caller falls back to server-receive time.
+        Market hours (09:15–15:30 IST) never cross IST midnight, so today's IST
+        date is the correct anchor.
+
+        Returns None when the field is absent, empty, or unparsable so the caller
+        falls back to server-receive time.
         """
         if not ltt_str or not isinstance(ltt_str, str):
             return None
         try:
             t = datetime.strptime(ltt_str, "%H:%M:%S")
-            today_utc = datetime.now(timezone.utc).date()
-            ltt_utc = datetime(
-                today_utc.year, today_utc.month, today_utc.day,
+            today_ist = datetime.now(IST).date()
+            return datetime(
+                today_ist.year, today_ist.month, today_ist.day,
                 t.hour, t.minute, t.second,
-                tzinfo=timezone.utc,
+                tzinfo=IST,
             )
-            return ltt_utc.astimezone(IST)
         except ValueError:
             return None
 

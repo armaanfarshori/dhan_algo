@@ -8,13 +8,26 @@ M2 (Medium): on_tick stamps a bar with datetime.now(IST) by default — server
 M4 (Medium): On a sustained flush failure, _pending re-queues without bound.
 """
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 
 from engine.bar_builder import BarBuilder
 
 IST = ZoneInfo("Asia/Kolkata")
+
+
+def test_future_stamped_tick_is_dropped():
+    """Regression (2026-06-18 prod incident): a tick stamped far in the future
+    must be dropped, not used to open a bar — otherwise every subsequent real
+    tick looks 'out-of-order' and the feed freezes for that security."""
+    bb = BarBuilder()
+    future = datetime.now(IST) + timedelta(minutes=10)
+    bb.on_tick("999", 100.0, cum_volume=0, ts=future)
+    assert "999" not in bb._current, "future-stamped tick must not open a bar"
+    # a normal current-time tick right after still opens a bar
+    bb.on_tick("999", 101.0, cum_volume=0, ts=datetime.now(IST))
+    assert "999" in bb._current
 
 
 # ── M2: timestamp handling ──────────────────────────────────────────────────────

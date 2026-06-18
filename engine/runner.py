@@ -91,7 +91,20 @@ class StrategyRunner:
 
         price, high, low = await self._get_price()
         if price <= 0:
-            return
+            # Feed AND REST both failed. If we hold a position we MUST still run the
+            # strategy (stop/target/EOD square-off) — skipping the poll would leave
+            # the position naked/unstoppable until the feed recovers. Fall back to
+            # the last known good price so exit logic can still fire. (We only hit
+            # this branch with a position open, and ORB never ENTERs while in a
+            # position, so a stale price can't trigger a bad entry.)
+            pos = self._portfolio.get(self.sid)
+            if pos.qty != 0 and self.last_price > 0:
+                logger.warning(
+                    "Runner %s: no fresh price — running exit logic on last known ₹%.2f",
+                    self.sid, self.last_price)
+                price = high = low = self.last_price
+            else:
+                return
         self.last_price = price
 
         decision = self.strategy.on_tick(now, price, high, low)

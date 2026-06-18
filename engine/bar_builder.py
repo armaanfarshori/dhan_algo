@@ -12,7 +12,7 @@ volume is the delta between consecutive ticks (clamped at 0 for resets).
 """
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Optional
 from zoneinfo import ZoneInfo
 
@@ -64,6 +64,15 @@ class BarBuilder:
         if price <= 0:
             return
         now = ts or datetime.now(IST)
+        # Reject implausibly future-stamped ticks (>2 min ahead of wall clock).
+        # A single future tick would otherwise open a future bar and make every
+        # subsequent real tick look "out-of-order" — silently freezing the feed
+        # for this security until restart. Tolerate small clock skew.
+        if ts is not None and now > datetime.now(IST) + timedelta(minutes=2):
+            logger.warning(
+                "BarBuilder: dropping future-stamped tick for %s — tick %s is ahead "
+                "of now; ignoring (check feed timestamp parsing)", security_id, now)
+            return
         minute_start = now.replace(second=0, microsecond=0)
 
         last = self._last_cum_vol.get(security_id, cum_volume)

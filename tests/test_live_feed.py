@@ -143,6 +143,23 @@ def test_get_ltp_unknown_sid_returns_zero():
     assert feed.get_ltp("99999") == 0.0
 
 
+def test_parse_ltt_is_ist_not_double_offset():
+    """Regression (2026-06-18 prod incident): the dhanhq LTT "HH:MM:SS" string is
+    already the IST wall-clock time of the trade. _parse_ltt must build it directly
+    in IST — NOT treat it as UTC and astimezone(IST), which double-offset by +5:30
+    and pushed every tick ~5.5h into the future, freezing the BarBuilder."""
+    dt = LiveFeed._parse_ltt("11:24:00")
+    assert dt is not None
+    assert (dt.hour, dt.minute, dt.second) == (11, 24, 0)   # NOT 16:54
+    assert dt.utcoffset().total_seconds() == 5.5 * 3600     # IST-aware
+
+
+def test_parse_ltt_invalid_returns_none():
+    assert LiveFeed._parse_ltt("") is None
+    assert LiveFeed._parse_ltt(None) is None
+    assert LiveFeed._parse_ltt("not-a-time") is None
+
+
 def test_all_subscribed_sids_empty_initially():
     """Before subscribe() is called, the SID list must be empty."""
     feed = _make_feed()

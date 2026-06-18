@@ -64,11 +64,13 @@ function KpiPnl({ risk }) {
 function KpiOpenRisk({ risk, limits }) {
   const openPositions = risk?.data?.open_positions ?? 0
   const maxPos        = limits?.max_open_positions  ?? 10
-  const total         = risk?.data?.total_pnl       ?? 0
-  const limit         = limits?.max_daily_loss       ?? 5000
-  // "Open risk" is the loss consumed toward the daily limit
-  const riskConsumed  = Math.abs(Math.min(total, 0))
-  const budgetPct     = Math.min((riskConsumed / limit) * 100, 100)
+  // True open risk = Σ stop-distance ₹ committed across open positions (live,
+  // moves as positions open/close — never frozen at 0 while in profit, which is
+  // what the old "loss consumed" definition did).
+  const committed     = risk?.data?.committed_risk ?? 0
+  // Prefer the engine's runtime (equity-compounded) budget over the static config one.
+  const budget        = risk?.data?.daily_loss_budget ?? limits?.max_daily_loss ?? 5000
+  const budgetPct     = budget > 0 ? Math.min((committed / budget) * 100, 100) : 0
   const budgetColor   = budgetPct > 75
     ? 'hsl(var(--loss))'
     : budgetPct > 50
@@ -78,8 +80,8 @@ function KpiOpenRisk({ risk, limits }) {
     <StatCard
       label="Open Risk"
       right={<Pill tone="neu">{openPositions} / {maxPos} pos</Pill>}
-      value={<span className="text-foreground">{INR0(riskConsumed)}</span>}
-      sub={<span className="text-[11.5px] text-muted-foreground">of {INR0(limit)} daily budget</span>}
+      value={<span className="text-foreground">{INR0(committed)}</span>}
+      sub={<span className="text-[11.5px] text-muted-foreground">committed of {INR0(budget)} daily budget</span>}
       bar={{ value: budgetPct, color: budgetColor }}
     />
   )
