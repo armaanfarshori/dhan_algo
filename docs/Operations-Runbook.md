@@ -281,7 +281,7 @@ TimescaleDB image is **pinned** at `timescale/timescaledb:2.17.2-pg16` in
 
 State is stored in S3 (`dhan-trading/terraform.tfstate`, versioned + encrypted)
 with a DynamoDB lock table (`dhan-trading-tflock`). The bucket name embeds the
-AWS account ID and must not be committed to this public repo.
+AWS account ID and must not be committed to this repo (private since 2026-06-19, but treat as if public).
 
 **Working clone for Terraform:** `~/Documents/codecode/Tessera/infra`
 (holds `terraform.tfvars` + `backend.hcl`). Do **not** run Terraform from the
