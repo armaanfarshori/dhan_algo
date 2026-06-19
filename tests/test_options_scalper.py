@@ -20,7 +20,7 @@ on_tick.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from strategies.options_scalper import (
@@ -80,7 +80,7 @@ def _make_scalper(**kwargs) -> OptionsScalper:
 
 def _inject_session(scalper: OptionsScalper) -> None:
     """Set session_date to today and enable test-mode time-guard bypass."""
-    scalper._session_date = date.today()
+    scalper._session_date = _now().date()  # IST date — must match on_tick's now.date()
     scalper._bypass_time_guards = True
     # Satisfy bar-count requirement (max(ema_slow, mom_k+1, atr_window) = max(5,4,3)=5)
     scalper._bars_seen = 25
@@ -772,7 +772,7 @@ def test_unconditional_eod_squareoff():
 
         # No position → None
         scalper3 = _make_scalper(squareoff_before_close_min=5)
-        scalper3._session_date = date.today()
+        scalper3._session_date = _now().date()  # IST date — must match on_tick's now.date()
         r_no_pos = scalper3.on_tick(
             t_squareoff, 22100.0, option_premium=None,
             high=22105.0, low=22095.0,
@@ -812,7 +812,7 @@ def test_future_skew_guard():
     assert abs(scalper.vwap - 22000.0) < 0.01, (
         "Future tick must NOT change VWAP"
     )
-    assert scalper._session_date == date.today(), (
+    assert scalper._session_date == _now().date(), (
         "Future tick must NOT reset session"
     )
 
