@@ -16,9 +16,11 @@ edge +3.8 vol pts). 164 trades after the gate, ₹2,00,000 capital:
 | **1.5** (handoff default) | 164 | 90.9% | 1.74 | 1.22 | −₹8,451 | +₹36,420 | 18.2% | **GO** |
 
 **Read this as a PRELIMINARY GO** — positive expectancy after costs with max DD < 15% of
-capital under *deliberately conservative* assumptions (see §5 caveats). It is encouraging
-and clears the Phase-0→Phase-2 gate, but is **not live-ready**: re-validate with NSE final
-settlement prices + real per-expiry ATM IV (and ideally NIFTY-trained Kronos vol) first.
+capital under **preliminary assumptions whose bias directions are MIXED, not uniformly
+conservative** (see §5 — notably the VIX-as-weekly-IV proxy is likely *optimistic* in calm
+regimes). It clears the Phase-0→Phase-2 gate to *plan*, but is **not live-ready** and the real
+edge could be lower: re-validate with NSE final settlement prices + real per-expiry ATM IV
+(now accruing via the collector) — and ideally a NIFTY-trained Kronos vol — first.
 
 ---
 
@@ -112,12 +114,17 @@ to *plan* Phase-2, but no strategy/live build until the caveats above are addres
 The VIX-based first-pass go/no-go uses several approximations. Readers must understand these
 before drawing any conclusions from a GO or NO-GO verdict.
 
-**(a) India VIX (30-day) as weekly straddle IV.**
-`straddle_iv = India VIX close / 100` is a 30-day variance-swap implied vol.  The true weekly
-(≈ 7-DTE) ATM straddle IV trades *above* the 30-day VIX due to term-structure convexity and
-the short-dated vol premium.  Using VIX understates the true weekly IV → the implied move is
-too small → short strikes are placed closer to ATM than a real trader would place them →
-recorded credit is understated and breach probability is overstated.  Net direction: **conservative**.
+**(a) India VIX (30-day) as weekly straddle IV — bias direction is REGIME-DEPENDENT (corrected
+2026-06-19 by live data).**
+`straddle_iv = India VIX close / 100` is a 30-day implied vol used in place of the true weekly
+(≈ 4–7 DTE) ATM straddle IV. We initially assumed weekly IV trades *above* 30-day VIX (so VIX
+would understate it → conservative). **The first live chain snapshot refutes this**: on a calm
+day the real 4-DTE ATM IV was **9.89%** vs **India VIX 13.19%** (real/VIX = **0.75×**) — i.e. in
+calm / normal-contango regimes the short tenor sits *below* VIX, so VIX **OVER**states weekly IV
+→ the backtest placed shorts *too wide* and booked *too much* credit → **optimistic** in those
+regimes. VIX only *understates* weekly IV in stressed/backwardated regimes. So the direction of
+this bias is **not fixed and not reliably conservative** — it flips with the vol term-structure
+regime, and the real-IV revalidation (workstream A) could move the result **either way**.
 
 **(b) Settlement = index daily CLOSE, not NSE FSP.**
 NSE's official Final Settlement Price (FSP) is the 30-minute volume-weighted average of NIFTY
@@ -162,12 +169,16 @@ expiry alignment comes once per-expiry data accrues forward (`mode="expiry_calen
 
 ### Net interpretation
 
-Most biases are **conservative**: the VIX understates weekly IV (tight shorts), the 20d rvol
-may understate short-term vol persistence, and the daily-close settlement makes near-the-money
-weeks look slightly worse than they are.  Therefore:
+The bias directions are MIXED, not uniformly conservative (this is a correction to an earlier
+claim): the VIX-vs-weekly-IV bias is **regime-dependent** — *optimistic* in calm/contango
+regimes (real 4-DTE IV < VIX, per the 2026-06-19 snapshot: 0.75×) and only conservative in
+stress/backwardation; the daily-close-vs-FSP settlement can flip near-the-money weeks either
+way; entry-at-prior-close is mildly optimistic. Therefore:
 
-- A **GO** verdict from this loader is *preliminary but trustworthy* — it survived conservative
-  assumptions.  It must be re-validated with NSE FSP settlement data and real per-expiry ATM IV
-  (from Dhan option-chain snapshots accrued post-ingestion) before any live consideration.
+- A **GO** verdict from this loader is **PRELIMINARY ONLY — not assumed conservative**. Because the
+  dominant IV bias can be *optimistic* in calm regimes (which 2022–24 largely were), the real edge
+  could be **lower** than the headline. It MUST be re-validated with real per-expiry ATM IV
+  (workstream A — the collector is now accruing it) and NSE FSP settlement before any live
+  consideration; treat the result as "worth validating," not "validated."
 - A **NO-GO** verdict is *solid* — if the strategy cannot clear these conservative hurdles, it
   will not improve with more realistic data.

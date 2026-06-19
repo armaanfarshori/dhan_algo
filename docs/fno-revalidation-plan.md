@@ -16,13 +16,15 @@ session on the bus.
 
 | # | Approximation used | Bias | What it hides |
 |---|---|---|---|
-| 1 | India VIX (~30d) as the weekly straddle IV | conservative (understates weekly IV → tight shorts, low credit) | true per-expiry pricing & strike placement |
+| 1 | India VIX (~30d) as the weekly straddle IV | **regime-dependent** — *optimistic* in calm/contango (real 4-DTE IV < VIX, e.g. 0.75× on 2026-06-19) → shorts too wide, credit too high; conservative only in stress/backwardation | true per-expiry pricing & strike placement |
 | 2 | Settlement = index daily **close** (not NSE **FSP** 15:00–15:30 avg) | ambiguous | correct win/loss on near-the-money expiries |
 | 3 | Entry at **prior-expiry close** (not next-morning), synthetic ISO-week cycles | slightly optimistic | real entry fills + exact expiry alignment |
 | 4 | P&L reported on notional ₹2L (ROC ~3.8% CAGR) | wrong denominator | **return on deployed SPAN margin** — the real profitability |
 
-Net of 1–3 is *conservative*, so the real edge is plausibly ≥ measured — but unconfirmed. #4 is
-the one that actually answers "is this profitable?" — and it's not yet computed.
+Net of 1–3 is **mixed, not reliably conservative** (corrected by live data 2026-06-19): the #1
+IV bias is regime-dependent and was likely *optimistic* through the largely-calm 2022–24, so the
+real edge could be **lower** than measured, not higher. #4 is the one that actually answers
+"is this profitable?" — and it's not yet computed.
 
 ---
 
@@ -42,7 +44,9 @@ the one that actually answers "is this profitable?" — and it's not yet compute
   immediately (expired contracts are gone, so not 2yr). If no → rely solely on the forward
   collector accruing IV over time. Do not scope work against A-backward until the probe passes.
 - **Deliverable:** re-run the backtest with `samples_from_db(source="atm")` + cycles priced from
-  real ATM IV; quantify the VIX-proxy bias (expected: real edge ≥ VIX-based).
+  real ATM IV; quantify the VIX-proxy bias (direction is **regime-dependent** — likely *lower*
+  than the VIX-based result in calm regimes, since VIX overstates weekly IV there; see caveat
+  table row 1).
 
 ### B. NSE Final Settlement Price (FSP) for expiry resolution
 - Source the weekly NIFTY **FSP** series (NSE F&O bhavcopy / settlement files; the 15:00–15:30
