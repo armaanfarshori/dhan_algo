@@ -98,6 +98,82 @@ def load_day_bars(security_id: str, day: date) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+def load_prior_daily(
+    security_id: str, day: date
+) -> "Optional[tuple[float, float, float]]":
+    """Return (high, low, close) of the most recent prior trading session, derived
+    from 1-minute bars.
+
+    ``dhan_clean`` holds ONLY 1m bars (build_clean_db.py copies timeframe='1m'
+    only — there is no '1d' row to read), so the prior session's daily H/L/C is
+    AGGREGATED from that day's 1m bars:
+
+      * find the max IST session date strictly before *day* that has any 1m bars
+        for this security (bounded to a short look-back window so the huge bars
+        table is never scanned);
+      * within that session, return ``(max(high), min(low), close-of-last-bar)``.
+
+    Returns ``None`` when no prior session exists in the window (new listing,
+    long data gap, first day in the DB) so callers degrade gracefully.
+
+    Efficiency: the query is filtered by ``security_id`` and ``timeframe='1m'``
+    and bounded to ``[day_start - LOOKBACK_DAYS, day_start)`` so it rides the
+    ``(security_id, time)`` index over a ~10-calendar-day slice instead of the
+    whole history.  A 10-day look-back comfortably spans weekends + a stretch of
+    holidays while keeping the scan tiny.
+
+    This helper only executes during a real GPU/DB backtest run; locally it is
+    import-clean and tests pass synthetic bars directly so they never reach it.
+    """
+    from db import get_session
+
+    # day_start is 00:00 IST on the session date — any prior trading session's
+    # bars have time < this boundary regardless of DB session TZ. Bound the scan
+    # to a ~10-calendar-day window so we touch at most a couple of monthly chunks.
+    LOOKBACK_DAYS = 10
+    day_start = datetime(day.year, day.month, day.day, tzinfo=IST)
+    window_start = day_start - timedelta(days=LOOKBACK_DAYS)
+    with get_session() as s:
+        # Identify the most recent prior session date (IST calendar) that has
+        # 1m bars for this security within the bounded window.
+        prior_day = s.execute(
+            text("""
+                SELECT MAX((time AT TIME ZONE 'Asia/Kolkata')::date)
+                FROM bars
+                WHERE security_id = :sid
+                  AND timeframe = '1m'
+                  AND time >= :window_start
+                  AND time <  :day_start
+            """),
+            {"sid": security_id, "window_start": window_start,
+             "day_start": day_start},
+        ).scalar()
+        if prior_day is None:
+            return None
+        # Aggregate that session's 1m bars into daily H/L/C. The close is the
+        # close of the LAST bar of the session (ordered by time), so use a
+        # window/array trick that stays on the (security_id, time) index.
+        p0 = datetime(prior_day.year, prior_day.month, prior_day.day, tzinfo=IST)
+        p1 = p0 + timedelta(days=1)
+        row = s.execute(
+            text("""
+                SELECT
+                    MAX(high)                                   AS day_high,
+                    MIN(low)                                    AS day_low,
+                    (ARRAY_AGG(close ORDER BY time DESC))[1]    AS day_close
+                FROM bars
+                WHERE security_id = :sid
+                  AND timeframe = '1m'
+                  AND time >= :p0
+                  AND time <  :p1
+            """),
+            {"sid": security_id, "p0": p0, "p1": p1},
+        ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return float(row[0]), float(row[1]), float(row[2])
+
+
 def _slip(price: float, side: str, bps: float, tick: float = 0.0) -> float:
     """Adverse slippage. Flat-bps by default; with a `tick` (e.g. NSE ₹0.05) the
     slippage is floored at half a tick, so cheap/thin names — where bps under-
@@ -198,6 +274,16 @@ async def replay_security_day(
                    max_notional_pct=params.max_notional_pct),
         Portfolio(mode="BACKTEST"), ltp_lookup=lambda _s: 0.0)
 
+    # Prior-day seed — additive hook for strategies that expose seed_prior_day.
+    # ORB does not expose this method, so this block is a no-op for ORB runs.
+    # Degrade gracefully (skip the call) when bars is supplied directly (test
+    # path with no DB access) or when no prior daily bar exists.
+    if hasattr(strategy, "seed_prior_day") and bars is None:
+        prior = load_prior_daily(security_id, day)
+        if prior is not None:
+            prior_high, prior_low, prior_close = prior
+            strategy.seed_prior_day(prior_high, prior_low, prior_close)
+
     trades: list[BTTrade] = []
     # pending ENTER carries (kind, decision) — qty is deferred to fill time so it
     # is sized off the ACTUAL fill price (next-bar open), not the signal-bar close.
@@ -285,7 +371,8 @@ async def replay_security_day(
                 # signals (e.g. the other direction) if the OR allows it.
 
         # 3. Let the strategy see the bar close (entry/EOD signals).
-        decision = strategy.on_tick(ts, bar_close, high=bar_high, low=bar_low)
+        decision = strategy.on_tick(ts, bar_close, high=bar_high, low=bar_low,
+                                    volume=float(bar["volume"]))
         if decision is None:
             continue
 

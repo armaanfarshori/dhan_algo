@@ -32,7 +32,7 @@ from zoneinfo import ZoneInfo
 from engine.portfolio import Portfolio
 from engine.risk import RiskEngine, RiskParams
 from research.backtest.costs import round_trip_costs
-from research.backtest.engine import BTTrade, _slip, load_day_bars
+from research.backtest.engine import BTTrade, _slip, load_day_bars, load_prior_daily
 from research.backtest.registry import STRATEGIES
 from strategies.orb import ORB, ORBParams, Decision
 
@@ -245,6 +245,18 @@ async def replay_portfolio(universe_by_day: dict[date, list[str]],
             orbs = {sid: strategy_cls(sid, params.orb) for sid in bars}
         else:
             orbs = {sid: strategy_cls(sid, params_cls()) for sid in bars}
+
+        # Prior-day seed — additive hook for strategies that expose seed_prior_day.
+        # ORB does not expose this method so this loop is a no-op for ORB runs.
+        # Degrade gracefully (skip the call) when no prior daily bar exists.
+        _sample_strat = next(iter(orbs.values())) if orbs else None
+        if _sample_strat is not None and hasattr(_sample_strat, "seed_prior_day"):
+            for sid, strat in orbs.items():
+                prior = load_prior_daily(sid, day)
+                if prior is not None:
+                    p_high, p_low, p_close = prior
+                    strat.seed_prior_day(p_high, p_low, p_close)
+
         entries_today = {sid: 0 for sid in bars}
         pending: dict[str, tuple] = {}
         last_idx = {sid: len(df) - 1 for sid, df in bars.items()}
@@ -364,7 +376,8 @@ async def replay_portfolio(universe_by_day: dict[date, list[str]],
 
             # 3. Strategy sees the bar (pure ORB).
             decision = orb.on_tick(ts, float(bar["close"]),
-                                   high=float(bar["high"]), low=float(bar["low"]))
+                                   high=float(bar["high"]), low=float(bar["low"]),
+                                   volume=float(bar["volume"]))
             if decision is None:
                 continue
 
@@ -425,13 +438,17 @@ async def replay_portfolio(universe_by_day: dict[date, list[str]],
                 logger.warning(
                     "[%s] EOD: %s has no bars today — force-closing at last known px %.2f",
                     day, sid, last_px)
-                # Build a stub ORB so _close can call orb.notify_flat() safely.
-                stub_orb = ORB(sid, params.orb)
-                stub_orb.position = pos["qty"] if pos["side"] == "LONG" else -pos["qty"]
+                # Flatten the REAL strategy instance so non-ORB session state is
+                # cleared via its own notify_flat(); fall back to a stub ORB only
+                # if (somehow) no instance exists for this sid.
+                inst = orbs.get(sid)
+                if inst is None:
+                    inst = ORB(sid, params.orb)
+                    inst.position = pos["qty"] if pos["side"] == "LONG" else -pos["qty"]
                 _close(book, trades, sid, day, last_px,
                        datetime.combine(day, dt_time(15, 30), tzinfo=IST),
                        "forced close — no bars (halt/suspension)",
-                       params.slippage_bps, stub_orb, params.tick_size)
+                       params.slippage_bps, inst, params.tick_size)
                 continue
             last = df.iloc[-1]
             _close(book, trades, sid, day, float(last["close"]),
