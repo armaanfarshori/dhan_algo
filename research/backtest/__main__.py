@@ -19,6 +19,8 @@ import argparse
 import asyncio
 import json
 import logging
+import os
+import pickle
 from dataclasses import asdict
 from datetime import datetime
 
@@ -78,23 +80,44 @@ async def run(args) -> int:
     logger.info("Backtest %s → %s: %d sessions, gate=%s, split=%s",
                 args.from_date, args.to_date, len(days), args.gate, args.split_date)
 
-    # Build the per-day universe (point-in-time, no look-ahead) once.
+    # Build the per-day universe (point-in-time, no look-ahead). This is the slow
+    # part (one screener-ranking query per day) and is IDENTICAL across the three-way
+    # runs (it doesn't depend on the gate), so --universe-cache lets the three runs
+    # share a single build instead of repeating it 3x.
     fixed_ids = [s.strip() for s in args.ids.split(",")] if args.ids else None
     universe_by_day: dict = {}
-    for i, day in enumerate(days):
-        if fixed_ids:
-            universe_by_day[day] = fixed_ids
+    cache_path = args.universe_cache
+    if cache_path and os.path.exists(cache_path) and not fixed_ids:
+        with open(cache_path, "rb") as f:
+            cached = pickle.load(f)
+        # Reuse only if it matches this run's universe definition AND covers every day.
+        if (cached.get("n") == args.n and cached.get("min_volume") == args.min_volume
+                and all(d in cached["universe_by_day"] for d in days)):
+            universe_by_day = {d: cached["universe_by_day"][d] for d in days}
+            logger.info("Loaded universe for %d days from cache %s", len(days), cache_path)
         else:
-            try:
-                universe_by_day[day] = [
-                    u["security_id"]
-                    for u in point_in_time_universe(day, n=args.n,
-                                                    min_avg_volume=args.min_volume)]
-            except Exception as exc:
-                logger.warning("%s: universe query failed (%s) — skipping day", day, exc)
-                universe_by_day[day] = []
-        if (i + 1) % 50 == 0 or i == len(days) - 1:
-            logger.info("  universe built %d/%d days", i + 1, len(days))
+            logger.info("Universe cache %s present but doesn't match (n/min_volume/range) "
+                        "— rebuilding", cache_path)
+    if not universe_by_day:
+        for i, day in enumerate(days):
+            if fixed_ids:
+                universe_by_day[day] = fixed_ids
+            else:
+                try:
+                    universe_by_day[day] = [
+                        u["security_id"]
+                        for u in point_in_time_universe(day, n=args.n,
+                                                        min_avg_volume=args.min_volume)]
+                except Exception as exc:
+                    logger.warning("%s: universe query failed (%s) — skipping day", day, exc)
+                    universe_by_day[day] = []
+            if (i + 1) % 50 == 0 or i == len(days) - 1:
+                logger.info("  universe built %d/%d days", i + 1, len(days))
+        if cache_path and not fixed_ids:
+            with open(cache_path, "wb") as f:
+                pickle.dump({"n": args.n, "min_volume": args.min_volume,
+                             "universe_by_day": universe_by_day}, f)
+            logger.info("Wrote universe cache %s (reuse across the three-way runs)", cache_path)
 
     trades, daily = await replay_portfolio(universe_by_day, pparams, gate_fn)
 
@@ -163,6 +186,9 @@ def main():
                    help="Universe avg-volume floor (default 50k = live screener)")
     p.add_argument("--kronos-seed", dest="kronos_seed", type=int, default=0,
                    help="Seed for Kronos sampling (reproducible gate runs; default 0)")
+    p.add_argument("--universe-cache", dest="universe_cache", default=None,
+                   help="Path to build/reuse the point-in-time universe (shared across "
+                        "the three-way runs so the slow per-day build happens once)")
     p.add_argument("--json", help="Write full results to this JSON file")
     args = p.parse_args()
     raise SystemExit(asyncio.run(run(args)))
