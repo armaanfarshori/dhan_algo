@@ -132,7 +132,8 @@ docs/
   Live-Readiness-Checklist.md  Pre-live gate: what must pass before PAPER_TRADING=false
   QA-Analysis-Report.md  Risk register, test gaps, live-path bugs
   CONTRIBUTING.md      Contribution guide
-LICENSE                MIT
+LICENSE                Proprietary — all rights reserved
+THIRD-PARTY-NOTICES.md vendored kronos/ is third-party MIT (not relicensed)
 tests/                 195 tests across 27 files, run in CI on every push
 ```
 

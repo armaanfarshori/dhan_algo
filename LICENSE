@@ -1,21 +1,28 @@
-MIT License
+Proprietary License
 
-Copyright (c) 2026 Armaan Farshori
+Copyright (c) 2026 Armaan Farshori. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This software and associated documentation files (the "Software") are the
+proprietary and confidential property of Armaan Farshori (the "Owner").
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+No license, right, or permission is granted to any person or entity to use,
+copy, modify, merge, publish, distribute, sublicense, sell, reverse-engineer, or
+create derivative works of the Software, in whole or in part, except under a
+separate written agreement signed by the Owner. Unauthorized access, use,
+reproduction, or distribution is strictly prohibited and may violate applicable
+copyright, trade-secret, contract, and other laws.
+
+THIRD-PARTY COMPONENTS. The Software incorporates third-party components that are
+licensed under their own terms and are NOT covered by this license. In
+particular, the vendored Kronos model under `kronos/` is the property of its
+respective authors and is distributed under the MIT License; those files remain
+subject to the MIT License and its attribution requirements. Python and
+JavaScript dependencies retain their respective licenses. See
+THIRD-PARTY-NOTICES.md.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE OWNER BE
+LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
