@@ -243,15 +243,21 @@ def train(args):
                               num_workers=2, pin_memory=True)
 
     # Optimizer + scheduler
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    # Official Kronos predictor recipe (finetune/config.py + train_predictor.py):
+    # AdamW betas (0.9, 0.95), weight_decay 0.1.
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr,
+                            betas=(0.9, 0.95), weight_decay=0.1)
     steps_per_epoch = len(train_loader)
     total_steps     = steps_per_epoch * args.epochs
-    # When --max-steps caps the run, decay the cosine schedule over the ACTUAL
-    # number of steps we'll take — otherwise the LR barely moves off its peak.
+    # When --max-steps caps the run, fit the schedule to the ACTUAL horizon.
     if args.max_steps:
         total_steps = min(total_steps, args.max_steps)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps,
-                                                      eta_min=args.lr * 0.1)
+    # Official recipe: OneCycleLR with 3% warmup + div_factor 10 (peak = --lr).
+    # Warmup matters when fine-tuning a pretrained model at the low predictor LR
+    # (4e-5) — a cold start at peak LR risks clobbering the pretrained weights.
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer, max_lr=args.lr, total_steps=total_steps,
+        pct_start=0.03, div_factor=10.0)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -273,7 +279,7 @@ def train(args):
             optimizer.zero_grad()
             loss = compute_loss(tokenizer, model, batch, device)
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            nn.utils.clip_grad_norm_(model.parameters(), 3.0)
             optimizer.step()
             scheduler.step()
             train_loss += loss.item()
@@ -413,7 +419,9 @@ def main():
                     help="Window stride (default: pred_length = non-overlapping predictions)")
     ap.add_argument("--epochs",            type=int,  default=3)
     ap.add_argument("--batch_size",        type=int,  default=32)
-    ap.add_argument("--lr",                type=float, default=1e-4)
+    ap.add_argument("--lr",                type=float, default=4e-5,
+                    help="Predictor LR. Official Kronos recipe = 4e-5; 1e-4 (the old "
+                         "default) is 2.5x too hot for a pretrained-model fine-tune.")
     # For the 5-min A/B variant, pass --context_length 480 --prediction_length 6
     # (matches config kronos_lookback/kronos_pred_len) against the 5min dataset.
     ap.add_argument("--upload-s3", action="store_true", dest="upload_s3",
