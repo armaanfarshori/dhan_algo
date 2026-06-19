@@ -157,10 +157,16 @@ def test_daily_loss_kill_switch_trips_and_blocks(monkeypatch):
     # Stop = or_low × (1 − 0.002) = 100 × 0.998 = 99.8.
     # Bar 17: bar_low=89.5 ≤ stop=99.8 → intrabar stop fires.
     # Gap-aware: fill_px = min(open=90, stop=99.8) = 90 (gapped through → fills at gap-open).
-    # With risk_per_trade=0.01, equity=100_000: trade_budget=1_000, dist=3.2, qty≈312.
-    # Realized loss = (90 − 103) × 312 = −4_056.
-    # Daily budget = 100_000 × 0.02 = 2_000.  −4_056 << −2_000 → kill-switch trips on bar 18
-    # kill-switch check (step 2): realized_today=−4_056 + unrealized=0 ≤ −budget → halt.
+    #
+    # Sizing (equity=100_000, risk_per_trade=0.01, max_notional_pct=0.20):
+    #   trade_budget = 100_000 × 0.01 = 1_000
+    #   dist = fill_px(103) − stop(99.8) = 3.2
+    #   risk_qty = floor(1_000 / 3.2) = 312
+    #   notional_cap = floor(100_000 × 0.20 / 103) = 194  ← BINDS (smaller)
+    #   actual qty = 194
+    # Realized loss = (90 − 103) × 194 = −2_522.
+    # Daily budget = 100_000 × 0.02 = 2_000.  −2_522 << −2_000 → kill-switch trips on bar 18
+    # kill-switch check (step 2): realized_today=−2_522 + unrealized=0 ≤ −budget → halt.
     _patch_bars(monkeypatch, {"1": _session(after_closes=[103.0, 103.0, 90.0, 90.0, 90.0])})
     params = PortfolioParams(slippage_bps=0.0, tick_size=0.0,
                              equity=100_000.0, risk_per_trade=0.01,

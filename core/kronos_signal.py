@@ -48,11 +48,22 @@ def scorer_version() -> str:
     Identifies the scoring configuration on every persisted gate verdict.
     Calibration must never pool outcomes across configs — a threshold tuned
     on one scorer says nothing about another.
+
+    When a fine-tuned checkpoint is active the last path segment is appended
+    so that zero-shot and fine-tuned verdicts are never pooled under the same
+    calibration key.  When KRONOS_CHECKPOINT is empty the string is
+    byte-identical to the pre-fix value.
     """
     from config import get_config
     c = get_config()
-    return (f"v2-{c.kronos_timeframe}-T{c.kronos_temperature}"
+    base = (f"v2-{c.kronos_timeframe}-T{c.kronos_temperature}"
             f"-N{c.kronos_samples}-L{c.kronos_lookback}-P{c.kronos_pred_len}")
+    ckpt = (c.kronos_checkpoint or "").strip()
+    if ckpt:
+        # Use the last non-empty path segment as a short, stable token.
+        token = [s for s in ckpt.rstrip("/").split("/") if s][-1]
+        return f"{base}-ckpt{token}"
+    return base
 
 
 def _aggregate_bars(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
@@ -208,6 +219,7 @@ class KronosSignalEngine:
         ohlcv_df: pd.DataFrame,
         pred_len: Optional[int] = None,
         sample_count: Optional[int] = None,
+        seed: Optional[int] = None,
     ) -> dict:
         """
         Generate a directional signal from a 1-min OHLCV DataFrame.
@@ -216,6 +228,11 @@ class KronosSignalEngine:
         5-min — Kronos's NSE pre-training granularity; it never saw 1-min
         NSE bars). ohlcv_df must have columns open/high/low/close/volume
         and a datetime index (or a 'ts' column).
+
+        seed: when provided, torch.manual_seed(seed) is called inside the
+        executor thread immediately before predictor.predict(), making
+        torch.multinomial deterministic for that call.  Default None leaves
+        live behavior unchanged (no seeding).
         """
         pred_len = pred_len or self._pred_len
         sample_count = sample_count or self._sample_count
@@ -244,13 +261,20 @@ class KronosSignalEngine:
             pd.Series(y_ts),
             pred_len,
             sample_count,
+            seed,
         )
 
-        result = _compute_signal(x_df, pred_df, pred_len)
+        result = _compute_signal(x_df, pred_df, pred_len,
+                                 signal_thresh=self._signal_thresh)
         result["scorer_version"] = scorer_version()
         return result
 
-    def _predict_sync(self, x_df, x_ts, y_ts, pred_len, sample_count):
+    def _predict_sync(self, x_df, x_ts, y_ts, pred_len, sample_count, seed):
+        # seed is threaded from score() for deterministic backtest replay.
+        # None (live default) = no seeding; torch RNG is left untouched.
+        if seed is not None:
+            import torch
+            torch.manual_seed(seed)
         # T/top_p follow the paper's price/return-forecasting protocol
         # (T=0.6, top_p=0.90) — see docs/Kronos-Model-Notes.md.
         return self._predictor.predict(
@@ -428,8 +452,19 @@ def _directional_confidence(pred_close: np.ndarray, current_price: float) -> flo
     return 1.0 - min(rel_std * 10, 1.0)
 
 
-def _compute_signal(x_df: pd.DataFrame, pred_df: pd.DataFrame, pred_len: int) -> dict:
-    """Turn a forecast DataFrame into a BUY/SELL/HOLD signal with score/confidence."""
+def _compute_signal(
+    x_df: pd.DataFrame,
+    pred_df: pd.DataFrame,
+    pred_len: int,
+    signal_thresh: float = _SIGNAL_THRESH,
+) -> dict:
+    """Turn a forecast DataFrame into a BUY/SELL/HOLD signal with score/confidence.
+
+    signal_thresh is passed in from the caller (KronosSignalEngine.score passes
+    self._signal_thresh, which is read from cfg.kronos_thresh).  The default
+    equals _SIGNAL_THRESH so direct callers that don't supply the argument get
+    identical output.
+    """
     current_price = float(x_df["close"].iloc[-1])
     if pred_df is None or pred_df.empty:
         return _hold("Empty forecast")
@@ -442,9 +477,9 @@ def _compute_signal(x_df: pd.DataFrame, pred_df: pd.DataFrame, pred_len: int) ->
     confidence = _directional_confidence(pred_close, current_price)
     score = abs(forecasted_return)
 
-    if forecasted_return > _SIGNAL_THRESH:
+    if forecasted_return > signal_thresh:
         side = "BUY"
-    elif forecasted_return < -_SIGNAL_THRESH:
+    elif forecasted_return < -signal_thresh:
         side = "SELL"
     else:
         side = "HOLD"

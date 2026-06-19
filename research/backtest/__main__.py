@@ -17,12 +17,13 @@ Run on the agent or DB-adjacent host (reads the bars hypertable):
 """
 import argparse
 import asyncio
+import inspect
 import json
 import logging
 import os
 import pickle
 from dataclasses import asdict
-from datetime import datetime
+from datetime import date, datetime
 
 from dotenv import load_dotenv
 
@@ -32,6 +33,22 @@ logging.basicConfig(level=logging.INFO,
                     datefmt="%H:%M:%S")
 logger = logging.getLogger("dhan.backtest")
 
+# Run-3 OOS contamination guard: fine-tuned Kronos was trained/selected on
+# pre-2026 data, so any split_date before this cutoff would produce a
+# contaminated OOS window.
+FINETUNE_OOS_CUTOFF = date(2026, 1, 1)
+
+
+def _universe_lookback_default() -> int:
+    """Read the actual default for ``lookback_days`` from point_in_time_universe's signature."""
+    from research.backtest.universe import point_in_time_universe
+
+    sig = inspect.signature(point_in_time_universe)
+    param = sig.parameters.get("lookback_days")
+    if param is not None and param.default is not inspect.Parameter.empty:
+        return int(param.default)
+    return 30  # fallback if signature ever changes
+
 
 async def run(args) -> int:
     from config import get_config
@@ -39,7 +56,7 @@ async def run(args) -> int:
     from research.backtest.engine import trading_days
     from research.backtest.portfolio_engine import PortfolioParams, replay_portfolio
     from research.backtest.report import Report, m3_panel
-    from research.backtest.provenance import provenance
+    from research.backtest.provenance import provenance, clean_db_build_dates
     from research.backtest.universe import point_in_time_universe
     from strategies.orb import ORBParams
 
@@ -48,6 +65,28 @@ async def run(args) -> int:
     # bars/universe query in the backtester goes through this engine.
     init_db(cfg.backtest_db_url)
     logger.info("Backtest DB = %s (clean replica)", cfg.backtest_db_name)
+
+    # OOS contamination guard for Run 3 (fine-tuned Kronos).
+    # The fine-tune was trained and early-stopped on pre-2026 bars, so any OOS
+    # window that overlaps the training data is contaminated.
+    if (
+        args.gate == "kronos"
+        and cfg.kronos_checkpoint
+        and args.split_date is not None
+        and args.split_date < FINETUNE_OOS_CUTOFF
+    ):
+        logger.error(
+            "CONTAMINATED OOS: --split-date %s is before FINETUNE_OOS_CUTOFF (%s). "
+            "The fine-tuned Kronos checkpoint was trained/selected on pre-%s data — "
+            "an OOS window starting before %s overlaps the training set and will "
+            "produce invalid results. Either use a later split date or remove "
+            "--gate kronos when evaluating this period.",
+            args.split_date,
+            FINETUNE_OOS_CUTOFF,
+            FINETUNE_OOS_CUTOFF.year,
+            FINETUNE_OOS_CUTOFF,
+        )
+        return 1
 
     # Portfolio-level params — finite capital + concurrent cap + daily kill-switch
     # mirror the live config (apps/trader.py shares one RiskEngine across runners).
@@ -80,6 +119,10 @@ async def run(args) -> int:
     logger.info("Backtest %s → %s: %d sessions, gate=%s, split=%s",
                 args.from_date, args.to_date, len(days), args.gate, args.split_date)
 
+    # Derive the universe lookback default directly from the function signature so
+    # the cache key and provenance stay in sync if the default ever changes.
+    _UNIVERSE_LOOKBACK_DAYS = _universe_lookback_default()
+
     # Build the per-day universe (point-in-time, no look-ahead). This is the slow
     # part (one screener-ranking query per day) and is IDENTICAL across the three-way
     # runs (it doesn't depend on the gate), so --universe-cache lets the three runs
@@ -92,13 +135,15 @@ async def run(args) -> int:
             with open(cache_path, "rb") as f:
                 cached = pickle.load(f)
             # Reuse only if it matches this run's universe definition AND covers every day.
-            if (cached.get("n") == args.n and cached.get("min_volume") == args.min_volume
+            if (cached.get("n") == args.n
+                    and cached.get("min_volume") == args.min_volume
+                    and cached.get("lookback_days") == _UNIVERSE_LOOKBACK_DAYS
                     and all(d in cached["universe_by_day"] for d in days)):
                 universe_by_day = {d: cached["universe_by_day"][d] for d in days}
                 logger.info("Loaded universe for %d days from cache %s", len(days), cache_path)
             else:
-                logger.info("Universe cache %s present but doesn't match (n/min_volume/range) "
-                            "— rebuilding", cache_path)
+                logger.info("Universe cache %s present but doesn't match (n/min_volume/"
+                            "lookback_days/range) — rebuilding", cache_path)
         except Exception as exc:
             logger.warning("Universe cache %s unreadable (%s) — rebuilding", cache_path, exc)
     if not universe_by_day:
@@ -125,10 +170,25 @@ async def run(args) -> int:
                 os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
                 with open(cache_path, "wb") as f:
                     pickle.dump({"n": args.n, "min_volume": args.min_volume,
+                                 "lookback_days": _UNIVERSE_LOOKBACK_DAYS,
                                  "universe_by_day": universe_by_day}, f)
                 logger.info("Wrote universe cache %s (reuse across the three-way runs)", cache_path)
 
     trades, daily = await replay_portfolio(universe_by_day, pparams, gate_fn)
+
+    # Gate failure visibility — must happen before JSON so error_rate is final.
+    if gate is not None:
+        gate.log_failure_summary()
+        if gate.error_rate is not None and gate.error_rate >= 0.10:
+            logger.error(
+                "DEGRADED RUN: Kronos gate error rate %.1f%% (%d/%d calls failed). "
+                "Run 3 likely degenerated to Run 1 (fail-open on every error). "
+                "This result MUST NOT be compared against valid ungated runs. "
+                "Inspect the warnings above for the root cause.",
+                gate.error_rate * 100,
+                gate.scoring_errors,
+                gate.scoring_attempts,
+            )
 
     panel = m3_panel(trades, args.equity, split_date=args.split_date)
     if args.gate == "kronos":
@@ -150,14 +210,45 @@ async def run(args) -> int:
                 ks_days)
 
     if args.json:
-        # Surface the gate engine's _loaded_from if accessible (set after lazy load).
+        # Determine whether the gate ever fired before trusting _loaded_from.
+        _gate_scoring_attempts: int | None = None
+        _gate_scoring_errors: int | None = None
+        _gate_error_rate: float | None = None
         _kronos_loaded_from: str | None = None
+        _gate_min_history: int | None = None
+        _kronos_scorer_version: str | None = None
+
         if gate is not None:
+            _gate_scoring_attempts = gate.scoring_attempts
+            _gate_scoring_errors = gate.scoring_errors
+            _gate_error_rate = gate.error_rate
+            _gate_min_history = gate.min_history
+
+            if gate.scoring_attempts == 0:
+                # Gate was constructed but never invoked — "" would falsely imply
+                # zero-shot; use a sentinel that makes the situation explicit.
+                _kronos_loaded_from = "<never invoked>"
+            else:
+                try:
+                    _kronos_loaded_from = getattr(gate._engine, "_loaded_from", None)
+                except Exception:
+                    pass
+
             try:
-                _kronos_loaded_from = getattr(gate._engine, "_loaded_from", None)
+                from core.kronos_signal import scorer_version
+                _kronos_scorer_version = scorer_version()
             except Exception:
                 pass
-        _UNIVERSE_LOOKBACK_DAYS = 30  # default in point_in_time_universe
+
+        # Gather dhan_clean build dates (best-effort; None when unavailable).
+        _build_dates = clean_db_build_dates()
+
+        _is_degraded = (
+            gate is not None
+            and _gate_error_rate is not None
+            and _gate_error_rate >= 0.10
+        )
+
         payload = {
             "provenance": provenance({
                 "cli": {
@@ -173,13 +264,21 @@ async def run(args) -> int:
                 "kronos_model": cfg.kronos_model if args.gate == "kronos" else None,
                 "kronos_checkpoint": cfg.kronos_checkpoint if args.gate == "kronos" else None,
                 "kronos_loaded_from": _kronos_loaded_from,
+                "kronos_scorer_version": _kronos_scorer_version,
                 "kronos_min_confidence": (cfg.kronos_min_confidence
                                           if args.gate == "kronos" else None),
                 "kronos_seed": gate.seed if gate else None,
+                "gate_min_history": _gate_min_history,
+                "gate_scoring_attempts": _gate_scoring_attempts,
+                "gate_scoring_errors": _gate_scoring_errors,
+                "gate_error_rate": _gate_error_rate,
                 "universe_lookback_days": _UNIVERSE_LOOKBACK_DAYS,
+                "dhan_clean_min_built_at": _build_dates["min_built_at"],
+                "dhan_clean_max_built_at": _build_dates["max_built_at"],
                 "db": cfg.backtest_db_name,
             }),
             "label": label,
+            "degraded": _is_degraded,
             "survivorship": "CEILING — universe from current scrip master; results are an upper bound",
             "panel": panel,
             "per_security": Report(trades, args.equity).per_security(),

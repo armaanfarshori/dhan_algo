@@ -25,7 +25,7 @@ zero-shot adapter for the three-way comparison.
 """
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Awaitable, Callable, Optional
 from zoneinfo import ZoneInfo
 
@@ -46,7 +46,7 @@ GateFn = Callable[[str, str, pd.DataFrame], Awaitable[bool]]
 @dataclass
 class BacktestParams:
     equity: float = 500_000.0
-    risk_per_trade: float = 0.01
+    risk_per_trade: float = 0.005      # matches live RiskParams/PortfolioParams default
     max_notional_pct: float = 0.20
     slippage_bps: float = 2.0
     tick_size: float = 0.05            # half-tick slippage floor (cheap/thin names)
@@ -72,6 +72,11 @@ class BTTrade:
 def load_day_bars(security_id: str, day: date) -> pd.DataFrame:
     """1-minute bars for one security/session, IST-indexed, time-ascending."""
     from db import get_session
+    # Use IST-aware datetime bounds so the day window is correct regardless of
+    # the DB session TZ. An implicit DATE→TIMESTAMPTZ coercion would be session-
+    # TZ-dependent and produce wrong results under a non-UTC session.
+    d0 = datetime(day.year, day.month, day.day, tzinfo=IST)
+    d1 = d0 + timedelta(days=1)
     with get_session() as s:
         rows = s.execute(text("""
             SELECT time, open, high, low, close, volume
@@ -79,7 +84,7 @@ def load_day_bars(security_id: str, day: date) -> pd.DataFrame:
             WHERE security_id = :sid AND timeframe = '1m'
               AND time >= :d0 AND time < :d1
             ORDER BY time
-        """), {"sid": security_id, "d0": day, "d1": day + pd.Timedelta(days=1)}).fetchall()
+        """), {"sid": security_id, "d0": d0, "d1": d1}).fetchall()
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close", "volume"])
@@ -286,10 +291,15 @@ async def replay_security_day(
 def trading_days(from_date: date, to_date: date) -> list[date]:
     """Distinct session dates present in the bars table for the range."""
     from db import get_session
+    # Use (time AT TIME ZONE 'Asia/Kolkata')::date so the date bucket matches the
+    # IST calendar that universe.py enforces, regardless of DB session TZ.
+    # Use IST-aware datetime bounds for the same reason as load_day_bars().
+    d0 = datetime(from_date.year, from_date.month, from_date.day, tzinfo=IST)
+    d1 = datetime(to_date.year, to_date.month, to_date.day, tzinfo=IST) + timedelta(days=1)
     with get_session() as s:
         rows = s.execute(text("""
-            SELECT DISTINCT time::date FROM bars
+            SELECT DISTINCT (time AT TIME ZONE 'Asia/Kolkata')::date FROM bars
             WHERE timeframe = '1m' AND time >= :d0 AND time < :d1
             ORDER BY 1
-        """), {"d0": from_date, "d1": to_date + pd.Timedelta(days=1)}).fetchall()
+        """), {"d0": d0, "d1": d1}).fetchall()
     return [r[0] for r in rows]

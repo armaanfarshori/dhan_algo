@@ -114,12 +114,23 @@ class KronosBacktestGate:
         # 1.  Prepend prior-day history to widen the scoring context window
         # ------------------------------------------------------------------
         entry_ts = _last_ts(bars_so_far)
-        history_df = _fetch_prior_bars(security_id, entry_ts) if entry_ts is not None else pd.DataFrame()
+        if entry_ts is not None:
+            # Fix P2: _fetch_prior_bars now returns (df, failed_flag) so we can
+            # record whether the DB fetch errored out (thin context is detectable).
+            # Fix P2 (fetch size): pass len(bars_so_far) as extra_rows so we
+            # overfetch by the number of same-day bars that _combine will add back
+            # — ensuring the prior-day context window is not thinned.
+            history_df, prior_bars_failed = _fetch_prior_bars(
+                security_id, entry_ts, extra_rows=len(bars_so_far)
+            )
+        else:
+            history_df, prior_bars_failed = pd.DataFrame(), False
         combined = _combine(history_df, bars_so_far)
 
         if len(combined) < self.min_history:
             self._record(security_id, direction, "ALLOW",
-                         f"insufficient history ({len(combined)} bars) — fail-open")
+                         f"insufficient history ({len(combined)} bars) — fail-open",
+                         prior_bars_failed=prior_bars_failed)
             return True
 
         df = combined.rename(columns={"time": "ts"})[
@@ -142,7 +153,12 @@ class KronosBacktestGate:
 
         self.scoring_attempts += 1
         try:
-            result = await self._engine.score(df)
+            # Pass the per-call seed INTO score() so torch.manual_seed runs inside
+            # the executor worker thread (where Kronos sampling happens) — the
+            # snapshot/seed above only covers the event-loop thread, whose torch
+            # RNG is thread-local and never reaches the worker. This is what makes
+            # the three-way runs byte-reproducible.
+            result = await self._engine.score(df, seed=call_seed)
         except Exception as exc:
             self.scoring_errors += 1
             logger.warning(
@@ -151,7 +167,8 @@ class KronosBacktestGate:
                 security_id, entry_ts, exc,
                 self.scoring_errors, self.scoring_attempts,
             )
-            self._record(security_id, direction, "ALLOW", f"error: {exc}")
+            self._record(security_id, direction, "ALLOW", f"error: {exc}",
+                         prior_bars_failed=prior_bars_failed)
             return True
         finally:
             # Always restore — even on exception — so the caller's RNG is untouched.
@@ -161,12 +178,15 @@ class KronosBacktestGate:
         conf = float(result.get("confidence", 0.0))
         agrees = side == direction and conf >= self.min_confidence
         self._record(security_id, direction, "ALLOW" if agrees else "BLOCK",
-                     f"model={side} conf={conf:.2f} ctx={len(combined)}")
+                     f"model={side} conf={conf:.2f} ctx={len(combined)}",
+                     prior_bars_failed=prior_bars_failed)
         return agrees
 
-    def _record(self, sid: str, direction: str, verdict: str, detail: str):
+    def _record(self, sid: str, direction: str, verdict: str, detail: str,
+                *, prior_bars_failed: bool = False):
         self.decisions.append({"security_id": sid, "direction": direction,
-                               "verdict": verdict, "detail": detail})
+                               "verdict": verdict, "detail": detail,
+                               "prior_bars_failed": prior_bars_failed})
 
 
 # ---------------------------------------------------------------------------
@@ -186,20 +206,58 @@ def _last_ts(bars_so_far: pd.DataFrame) -> Optional[pd.Timestamp]:
         return None
 
 
-def _fetch_prior_bars(security_id: str, before_ts: pd.Timestamp) -> pd.DataFrame:
+def _fetch_prior_bars(
+    security_id: str,
+    before_ts: pd.Timestamp,
+    extra_rows: int = 0,
+) -> tuple[pd.DataFrame, bool]:
     """
-    Fetch up to _HISTORY_1MIN_ROWS 1-min bars for *security_id* that are
-    strictly BEFORE *before_ts* from dhan_clean.bars.
+    Fetch 1-min bars for *security_id* strictly BEFORE *before_ts* from
+    dhan_clean.bars.
+
+    Parameters
+    ----------
+    security_id : str
+    before_ts : pd.Timestamp
+        Upper-exclusive bound.  MUST be timezone-aware.  If it is tz-naive a
+        ``ValueError`` is raised immediately (a tz-naive timestamp interpreted
+        as UTC would shift the IST wall-clock by +5:30 and pull in future bars
+        — catastrophic look-ahead).
+    extra_rows : int
+        Additional rows to fetch beyond *_HISTORY_1MIN_ROWS*.  Pass
+        ``len(bars_so_far)`` so that the LIMIT accounts for the same-day bars
+        that ``_combine`` will append — ensuring the prior-day context window
+        is never thinned by today's partial session.
+
+    Returns
+    -------
+    (df, failed) : tuple[pd.DataFrame, bool]
+        *df* is sorted ascending with columns [time, open, high, low, close,
+        volume].  *failed* is True when the fetch raised a DB exception (the
+        caller should record this in the audit entry so degraded runs are
+        detectable post-hoc).  *failed* is False on clean success or when
+        there simply are no prior bars.
 
     The shared db.get_engine() is already pointed at dhan_clean (set up by
     ``init_db(cfg.backtest_db_url)`` in the backtest __main__ before the gate
     is constructed), so no extra connection management is needed here.
-
-    Returns a DataFrame with columns [time, open, high, low, close, volume]
-    sorted ascending.  Empty DataFrame on any failure (gate fails open above).
     """
+    # --- Fix P1: tz-naive guard -----------------------------------------------
+    # pd.to_datetime(..., utc=True) on an IST-naive string interprets it as UTC,
+    # shifting the bound by −5:30.  We require the caller to pass an aware ts.
+    if before_ts.tzinfo is None:
+        raise ValueError(
+            f"_fetch_prior_bars: before_ts must be timezone-aware, got naive "
+            f"timestamp {before_ts!r}.  Wrap with "
+            f"pd.Timestamp(..., tz='Asia/Kolkata') or ensure _last_ts() returns "
+            f"a UTC-aware value."
+        )
+    # -------------------------------------------------------------------------
+
     from sqlalchemy import text
     from db import get_engine
+
+    lim = _HISTORY_1MIN_ROWS + max(0, extra_rows)
 
     sql = text("""
         SELECT time, open, high, low, close, volume
@@ -214,21 +272,24 @@ def _fetch_prior_bars(security_id: str, before_ts: pd.Timestamp) -> pd.DataFrame
         with get_engine().connect() as conn:
             rows = conn.execute(
                 sql,
-                {"sid": security_id, "before_ts": before_ts, "lim": _HISTORY_1MIN_ROWS},
+                {"sid": security_id, "before_ts": before_ts, "lim": lim},
             ).fetchall()
     except Exception as exc:
-        logger.warning("Kronos gate: prior-bar fetch failed for %s (%s) — scoring on today-only context",
-                       security_id, exc)
-        return pd.DataFrame()
+        logger.warning(
+            "Kronos gate: prior-bar fetch failed for %s (%s) — "
+            "scoring on today-only context (prior_bars_failed=True)",
+            security_id, exc,
+        )
+        return pd.DataFrame(), True   # (empty, failed=True)
 
     if not rows:
-        return pd.DataFrame()
+        return pd.DataFrame(), False  # (empty, failed=False — no data, not an error)
 
     df = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close", "volume"])
     df["time"] = pd.to_datetime(df["time"], utc=True)
     for col in ("open", "high", "low", "close", "volume"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df.sort_values("time").reset_index(drop=True)
+    return df.sort_values("time").reset_index(drop=True), False
 
 
 def _combine(history: pd.DataFrame, today: pd.DataFrame) -> pd.DataFrame:
@@ -319,10 +380,12 @@ def _rng_restore(state: dict) -> None:
             import torch
             torch.set_rng_state(state["torch"])
         except Exception as exc:
-            logger.debug("Kronos gate: could not restore torch RNG (%s)", exc)
+            # Fix P4: warn (not debug) — a failed restore means subsequent scoring
+            # calls share RNG state, breaking reproducibility across all three runs.
+            logger.warning("Kronos gate: could not restore torch RNG (%s)", exc)
     if "numpy" in state:
         try:
             import numpy as np
             np.random.set_state(state["numpy"])
         except Exception as exc:
-            logger.debug("Kronos gate: could not restore numpy RNG (%s)", exc)
+            logger.warning("Kronos gate: could not restore numpy RNG (%s)", exc)
