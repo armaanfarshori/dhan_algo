@@ -44,7 +44,9 @@ real edge could be **lower** than measured, not higher. #4 is the one that actua
   immediately (expired contracts are gone, so not 2yr). If no → rely solely on the forward
   collector accruing IV over time. Do not scope work against A-backward until the probe passes.
 - **Deliverable:** re-run the backtest with `samples_from_db(source="atm")` + cycles priced from
-  real ATM IV; quantify the VIX-proxy bias (expected: real edge ≥ VIX-based).
+  real ATM IV; quantify the VIX-proxy bias (direction is **regime-dependent** — likely *lower*
+  than the VIX-based result in calm regimes, since VIX overstates weekly IV there; see caveat
+  table row 1).
 
 ### B. NSE Final Settlement Price (FSP) for expiry resolution
 - Source the weekly NIFTY **FSP** series (NSE F&O bhavcopy / settlement files; the 15:00–15:30

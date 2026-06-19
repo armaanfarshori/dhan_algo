@@ -16,9 +16,11 @@ edge +3.8 vol pts). 164 trades after the gate, ₹2,00,000 capital:
 | **1.5** (handoff default) | 164 | 90.9% | 1.74 | 1.22 | −₹8,451 | +₹36,420 | 18.2% | **GO** |
 
 **Read this as a PRELIMINARY GO** — positive expectancy after costs with max DD < 15% of
-capital under *deliberately conservative* assumptions (see §5 caveats). It is encouraging
-and clears the Phase-0→Phase-2 gate, but is **not live-ready**: re-validate with NSE final
-settlement prices + real per-expiry ATM IV (and ideally NIFTY-trained Kronos vol) first.
+capital under **preliminary assumptions whose bias directions are MIXED, not uniformly
+conservative** (see §5 — notably the VIX-as-weekly-IV proxy is likely *optimistic* in calm
+regimes). It clears the Phase-0→Phase-2 gate to *plan*, but is **not live-ready** and the real
+edge could be lower: re-validate with NSE final settlement prices + real per-expiry ATM IV
+(now accruing via the collector) — and ideally a NIFTY-trained Kronos vol — first.
 
 ---
 

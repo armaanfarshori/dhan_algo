@@ -184,7 +184,7 @@ def record_paper_entry(
         rvol_row = session.execute(
             text(
                 "SELECT realized_vol_20d FROM index_bars "
-                "WHERE security_id = :nid ORDER BY time DESC LIMIT 1"
+                "WHERE security_id = :nid AND timeframe = '1d' ORDER BY time DESC LIMIT 1"
             ),
             {"nid": nifty_id},
         ).fetchone()
@@ -228,6 +228,16 @@ def record_paper_entry(
     sck_actual, sc_prem = _nearest_ce(sck)
     lpk_actual, lp_prem = _nearest_pe(lpk)
     lck_actual, lc_prem = _nearest_ce(lck)
+
+    # Bail out if any leg premium is missing or zero — avoids inflated credit on
+    # incomplete chain quotes (e.g. far-wing strike has no quote → ltp would be 0.0).
+    if any(p is None or p <= 0 for p in (sp_prem, sc_prem, lp_prem, lc_prem)):
+        logger.info(
+            "record_paper_entry: missing/zero leg premium(s) for %s %s "
+            "(sp=%.2f sc=%.2f lp=%.2f lc=%.2f) — no entry",
+            symbol, expiry, sp_prem, sc_prem, lp_prem, lc_prem,
+        )
+        return {"recorded": False, "reason": "missing leg premium"}
 
     credit = (sp_prem + sc_prem) - (lp_prem + lc_prem)
     wing_width = spk_actual - lpk_actual  # == lck_actual - sck_actual (approx)
@@ -419,6 +429,7 @@ def resolve_paper_trades(
                 text(
                     "SELECT close FROM index_bars "
                     "WHERE security_id = :nid "
+                    "  AND timeframe = '1d' "
                     "  AND (time AT TIME ZONE 'UTC')::date = :exp_date "
                     "ORDER BY time DESC LIMIT 1"
                 ),
@@ -457,9 +468,9 @@ def resolve_paper_trades(
         net_pnl = gross_pnl - entry_costs_f - exit_costs
         win = net_pnl > 0
 
-        # ── 6. UPDATE row ─────────────────────────────────────────────────────
+        # ── 6. UPDATE row (guard: only if still OPEN to prevent double-resolve) ──
         with get_session() as session:
-            session.execute(
+            update_result = session.execute(
                 text("""
                     UPDATE fno_paper_trades SET
                         status       = 'RESOLVED',
@@ -469,7 +480,7 @@ def resolve_paper_trades(
                         net_pnl      = :net_pnl,
                         win          = :win,
                         resolved_at  = :resolved_at
-                    WHERE id = :trade_id
+                    WHERE id = :trade_id AND status = 'OPEN'
                 """),
                 {
                     "expiry_spot": expiry_spot,
@@ -481,6 +492,15 @@ def resolve_paper_trades(
                     "trade_id": trade_id,
                 },
             )
+
+        # Only count this trade if the UPDATE actually claimed the row
+        if update_result.rowcount != 1:
+            logger.debug(
+                "resolve_paper_trades: UPDATE matched 0 rows for id=%d "
+                "(already resolved by a concurrent call?) — skipping",
+                trade_id,
+            )
+            continue
 
         resolved_count += 1
         logger.info(
@@ -517,7 +537,7 @@ def paper_summary(symbol: str = "NIFTY") -> dict[str, Any]:
                     COUNT(*) FILTER (WHERE status = 'RESOLVED')                  AS n_resolved,
                     COUNT(*) FILTER (WHERE status = 'RESOLVED' AND win = TRUE)   AS n_win,
                     SUM(net_pnl)   FILTER (WHERE status = 'RESOLVED')            AS total_net_pnl,
-                    SUM(max_loss)                                                 AS total_max_loss
+                    SUM(max_loss)  FILTER (WHERE status = 'OPEN')                AS total_max_loss
                 FROM fno_paper_trades
                 WHERE symbol = :sym
             """),

@@ -739,3 +739,237 @@ class TestResolvePaperTrades:
             count = resolve_paper_trades(symbol="NIFTY", nifty_id="13", now=resolve_now)
 
         assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# (e) Missing long-wing premium → record_paper_entry returns recorded=False
+# ---------------------------------------------------------------------------
+
+
+@requires_module
+class TestMissingLegPremium:
+    """record_paper_entry bails out when any leg premium is None/zero/missing."""
+
+    def _build_session_missing_long_wing(self) -> Any:
+        """Build a multi-session where the long-wing CE strike is absent from the chain.
+
+        We achieve this by removing the +200 CE row (one of the likely long-call
+        wing strikes).  build_condor may select a strike that has no CE entry,
+        causing _nearest_ce to return the nearest available strike whose ltp is
+        one of the very low OTM premiums — but we also add a chain where the far
+        OTM CE strike that build_condor would target has ltp=0.0 (zero premium),
+        which should trigger the bail-out guard.
+
+        To keep the test simple and deterministic, we craft a stripped chain that
+        has ATM CE/PE with valid IVs (so ATM iv check passes) but all CE strikes
+        beyond ATM have ltp=0.0, guaranteeing lc_prem==0.0 → bail out.
+        """
+        # Build base chain but zero out all CE ltps beyond ATM (simulating missing quotes)
+        base_rows = _build_chain_rows()
+        stripped_rows = []
+        for r in base_rows:
+            strike_i = int(float(r[0]))
+            opt_type = r[1]
+            iv = r[3]
+            spot = r[4]
+            # Zero out CE ltp for any strike > ATM (long-call wing will get 0.0)
+            if opt_type == "CE" and strike_i > _ATM:
+                stripped_rows.append((r[0], opt_type, 0.0, iv, spot))
+            else:
+                stripped_rows.append(r)
+
+        r_expiry = _make_result([(_EXPIRY,)])
+        r_snap = _make_result([(_NOW_IST,)])
+        r_chain = _make_result(stripped_rows)
+        r_rvol = _make_result([(0.05,)])  # realized_vol low → SELL_PREMIUM gate
+
+        _calls: list[int] = [0]
+
+        @contextmanager
+        def fake_gs():
+            idx = _calls[0]
+            _calls[0] += 1
+            if idx == 0:
+                sess = MagicMock()
+                sess.execute.side_effect = [r_expiry, r_snap, r_chain]
+                yield sess
+            elif idx == 1:
+                sess = MagicMock()
+                sess.execute.side_effect = [r_rvol]
+                yield sess
+            else:
+                # Should never reach INSERT; extra sessions return empty
+                sess = MagicMock()
+                sess.execute.return_value = _make_result([])
+                yield sess
+
+        return fake_gs
+
+    def test_returns_recorded_false_on_missing_long_wing(self):
+        """Chain has ATM ivs but long-call wing CE ltp=0.0 → recorded=False."""
+        fake_gs = self._build_session_missing_long_wing()
+        with patch("core.fno_paper.get_session", new=fake_gs), \
+             patch("db.get_session", new=fake_gs):
+            result = record_paper_entry(
+                symbol="NIFTY",
+                nifty_id="13",
+                k=_DEFAULT_K,
+                now=_NOW_IST,
+            )
+        assert result["recorded"] is False
+
+    def test_reason_is_missing_leg_premium(self):
+        """The reason key must indicate missing leg premium."""
+        fake_gs = self._build_session_missing_long_wing()
+        with patch("core.fno_paper.get_session", new=fake_gs), \
+             patch("db.get_session", new=fake_gs):
+            result = record_paper_entry(
+                symbol="NIFTY",
+                nifty_id="13",
+                k=_DEFAULT_K,
+                now=_NOW_IST,
+            )
+        assert "reason" in result
+        assert "missing leg premium" in result["reason"]
+
+    def test_no_insert_attempted_on_missing_leg(self):
+        """No DB INSERT should be attempted when bail-out fires."""
+        insert_called = [False]
+        fake_gs = self._build_session_missing_long_wing()
+
+        original_gs = fake_gs
+
+        _outer_calls: list[int] = [0]
+
+        @contextmanager
+        def intercepting_gs():
+            idx = _outer_calls[0]
+            _outer_calls[0] += 1
+            # Session 0: chain queries; Session 1: rvol; Session 2+ would be INSERT
+            with original_gs() as sess:
+                if idx >= 2:
+                    insert_called[0] = True
+                yield sess
+
+        with patch("core.fno_paper.get_session", new=intercepting_gs), \
+             patch("db.get_session", new=intercepting_gs):
+            record_paper_entry(
+                symbol="NIFTY",
+                nifty_id="13",
+                k=_DEFAULT_K,
+                now=_NOW_IST,
+            )
+
+        assert insert_called[0] is False
+
+
+# ---------------------------------------------------------------------------
+# (f) resolve_paper_trades double-resolve guard: second call returns 0
+# ---------------------------------------------------------------------------
+
+
+@requires_module
+class TestDoubleResolveGuard:
+    """resolve_paper_trades counts a trade at most once even when called twice."""
+
+    _PAST_EXPIRY = date(2026, 7, 2)
+    _TRADE_ID = 99
+    _SPK = 23900
+    _SCK = 24100
+    _LPK = 23800
+    _LCK = 24200
+    _CREDIT = 60.0
+    _ENTRY_COSTS = 120.0
+
+    def _open_row(self) -> tuple:
+        return (
+            self._TRADE_ID, "NIFTY", _LOT,
+            self._PAST_EXPIRY,
+            self._SPK, self._SCK, self._LPK, self._LCK,
+            self._CREDIT, self._ENTRY_COSTS,
+        )
+
+    def test_second_call_returns_zero(self):
+        """First call: UPDATE rowcount=1 → count=1.
+        Second call: the row is now RESOLVED so the initial SELECT returns no OPEN rows
+        (or UPDATE rowcount=0) → count=0.
+        """
+        resolve_now = datetime(2026, 7, 3, 17, 0, 0, tzinfo=_IST)
+
+        # ── First call: one OPEN row found, UPDATE succeeds (rowcount=1) ──────
+        _c1: list[int] = [0]
+
+        @contextmanager
+        def first_call_gs():
+            idx = _c1[0]
+            _c1[0] += 1
+            if idx == 0:
+                sess = MagicMock()
+                sess.execute.side_effect = [_make_result([self._open_row()])]
+                yield sess
+            elif idx == 1:
+                sess = MagicMock()
+                sess.execute.side_effect = [_make_result([(24000.0,)])]
+                yield sess
+            else:
+                update_mock = MagicMock()
+                update_mock.rowcount = 1
+                sess = MagicMock()
+                sess.execute.return_value = update_mock
+                yield sess
+
+        with patch("core.fno_paper.get_session", new=first_call_gs), \
+             patch("db.get_session", new=first_call_gs):
+            count1 = resolve_paper_trades(symbol="NIFTY", nifty_id="13", now=resolve_now)
+
+        assert count1 == 1
+
+        # ── Second call: SELECT returns no OPEN rows (row is now RESOLVED) ────
+        _c2: list[int] = [0]
+
+        @contextmanager
+        def second_call_gs():
+            _c2[0] += 1
+            sess = MagicMock()
+            # No OPEN rows returned → loop body never entered
+            sess.execute.side_effect = [_make_result([])]
+            yield sess
+
+        with patch("core.fno_paper.get_session", new=second_call_gs), \
+             patch("db.get_session", new=second_call_gs):
+            count2 = resolve_paper_trades(symbol="NIFTY", nifty_id="13", now=resolve_now)
+
+        assert count2 == 0
+
+    def test_update_rowcount_zero_not_counted(self):
+        """Even if SELECT finds the row (race window), rowcount=0 on UPDATE → not counted."""
+        resolve_now = datetime(2026, 7, 3, 17, 0, 0, tzinfo=_IST)
+
+        _c: list[int] = [0]
+
+        @contextmanager
+        def gs_with_zero_update():
+            idx = _c[0]
+            _c[0] += 1
+            if idx == 0:
+                # SELECT returns the row (it was OPEN when SELECT ran)
+                sess = MagicMock()
+                sess.execute.side_effect = [_make_result([self._open_row()])]
+                yield sess
+            elif idx == 1:
+                sess = MagicMock()
+                sess.execute.side_effect = [_make_result([(24000.0,)])]
+                yield sess
+            else:
+                # UPDATE matches 0 rows (concurrent process already resolved it)
+                update_mock = MagicMock()
+                update_mock.rowcount = 0
+                sess = MagicMock()
+                sess.execute.return_value = update_mock
+                yield sess
+
+        with patch("core.fno_paper.get_session", new=gs_with_zero_update), \
+             patch("db.get_session", new=gs_with_zero_update):
+            count = resolve_paper_trades(symbol="NIFTY", nifty_id="13", now=resolve_now)
+
+        assert count == 0
