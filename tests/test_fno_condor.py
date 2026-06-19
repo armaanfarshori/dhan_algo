@@ -32,7 +32,6 @@ from research.backtest.fno_costs import (
 # ---------------------------------------------------------------------------
 try:
     from research.backtest.fno_condor import (
-        NIFTY_LOT,
         black76_call,
         black76_put,
         build_condor,
@@ -1029,7 +1028,7 @@ class TestCyclesFromDb:
 
         with patch("research.backtest.fno_condor.get_session", new=fake_gs, create=True), \
              patch("db.get_session", new=fake_gs):
-            return cycles_from_db()
+            return cycles_from_db(mode="expiry_calendar")
 
     def test_correct_number_of_cycles(self):
         """Three expiries → two consecutive pairs → two cycles."""
@@ -1103,7 +1102,7 @@ class TestCyclesFromDb:
 
         with patch("research.backtest.fno_condor.get_session", new=fake_gs, create=True), \
              patch("db.get_session", new=fake_gs):
-            cycles = cycles_from_db()
+            cycles = cycles_from_db(mode="expiry_calendar")
 
         # Cycle 0: expiry_spot on 2026-01-15 is missing → skip
         # Cycle 1: spot/rvol on 2026-01-15 is missing → skip
@@ -1125,7 +1124,7 @@ class TestCyclesFromDb:
 
         with patch("research.backtest.fno_condor.get_session", new=fake_gs, create=True), \
              patch("db.get_session", new=fake_gs):
-            cycles = cycles_from_db()
+            cycles = cycles_from_db(mode="expiry_calendar")
 
         assert len(cycles) == 1
         assert cycles[0]["entry_date"] == date(2026, 1, 15)
@@ -1141,7 +1140,7 @@ class TestCyclesFromDb:
 
         with patch("research.backtest.fno_condor.get_session", new=fake_gs, create=True), \
              patch("db.get_session", new=fake_gs):
-            cycles = cycles_from_db()
+            cycles = cycles_from_db(mode="expiry_calendar")
 
         assert len(cycles) == 2
 
@@ -1154,7 +1153,7 @@ class TestCyclesFromDb:
 
         with patch("research.backtest.fno_condor.get_session", new=fake_gs, create=True), \
              patch("db.get_session", new=fake_gs):
-            cycles = cycles_from_db()
+            cycles = cycles_from_db(mode="expiry_calendar")
 
         assert cycles == []
 
@@ -1165,6 +1164,196 @@ class TestCyclesFromDb:
                     "realized_vol_20d", "dte", "expiry_spot"}
         for i, c in enumerate(cycles):
             assert required.issubset(c.keys()), f"cycle {i} missing keys: {required - c.keys()}"
+
+
+# ===========================================================================
+# SECTION 7b — cycles_from_db mode="weekly"
+# ===========================================================================
+
+
+@needs_condor
+class TestCyclesFromDbWeekly:
+    """Verify mode="weekly" builds ISO-week-boundary cycles from index_bars.
+
+    Canned trading calendar: 4 ISO weeks, 2-3 trading days each.
+    Week boundaries (last trading day per ISO week):
+
+        ISO week (2026, 1): Mon 2026-01-05, Tue 2026-01-06, Thu 2026-01-08
+            → last = 2026-01-08 (Thu)
+        ISO week (2026, 2): Mon 2026-01-12, Wed 2026-01-14, Fri 2026-01-16
+            → last = 2026-01-16 (Fri)
+        ISO week (2026, 3): Mon 2026-01-19, Thu 2026-01-22
+            → last = 2026-01-22 (Thu)
+        ISO week (2026, 4): Tue 2026-01-27, Fri 2026-01-30
+            → last = 2026-01-30 (Fri)
+
+    Boundaries: [2026-01-08, 2026-01-16, 2026-01-22, 2026-01-30]
+    Pairs: (01-08, 01-16), (01-16, 01-22), (01-22, 01-30)
+
+    VIX missing for 2026-01-16 → middle pair skipped → 2 cycles survive.
+    """
+
+    # All trading dates across 4 ISO weeks (2026 week numbers)
+    _NIFTY_ROWS = [
+        # ISO week 1
+        (date(2026, 1, 5),  22800.0, 0.11),
+        (date(2026, 1, 6),  22900.0, 0.11),
+        (date(2026, 1, 8),  23000.0, 0.12),   # boundary: last of week 1
+        # ISO week 2
+        (date(2026, 1, 12), 23050.0, 0.12),
+        (date(2026, 1, 14), 23100.0, 0.13),
+        (date(2026, 1, 16), 23200.0, 0.13),   # boundary: last of week 2
+        # ISO week 3
+        (date(2026, 1, 19), 23250.0, 0.13),
+        (date(2026, 1, 22), 23300.0, 0.14),   # boundary: last of week 3
+        # ISO week 4
+        (date(2026, 1, 27), 23350.0, 0.14),
+        (date(2026, 1, 30), 23400.0, 0.15),   # boundary: last of week 4
+    ]
+
+    _VIX_ROWS_FULL = [
+        (date(2026, 1, 5),  13.0),
+        (date(2026, 1, 6),  13.5),
+        (date(2026, 1, 8),  14.0),
+        (date(2026, 1, 12), 14.2),
+        (date(2026, 1, 14), 14.5),
+        (date(2026, 1, 16), 15.0),
+        (date(2026, 1, 19), 15.2),
+        (date(2026, 1, 22), 15.5),
+        (date(2026, 1, 27), 15.8),
+        (date(2026, 1, 30), 16.0),
+    ]
+
+    # VIX missing at 2026-01-16 (boundary of week 2 → entry of pair 2)
+    _VIX_ROWS_MISSING_W2 = [r for r in _VIX_ROWS_FULL if r[0] != date(2026, 1, 16)]
+
+    @staticmethod
+    def _make_weekly_session(nifty_rows, vix_rows):
+        """Return a fake get_session context-manager for mode="weekly".
+
+        mode="weekly" makes exactly 2 execute() calls:
+          call 0 → NIFTY index_bars (ORDER BY 1)
+          call 1 → VIX index_bars
+        """
+        def _make_result(rows):
+            result = MagicMock()
+            result.fetchall.return_value = rows
+            return result
+
+        session = MagicMock()
+        session.execute.side_effect = [
+            _make_result(nifty_rows),
+            _make_result(vix_rows),
+        ]
+
+        @contextmanager
+        def fake_get_session():
+            yield session
+
+        return fake_get_session
+
+    def _run(self, vix_rows=None):
+        from research.backtest.fno_condor import cycles_from_db
+
+        vix = vix_rows if vix_rows is not None else self._VIX_ROWS_FULL
+        fake_gs = self._make_weekly_session(self._NIFTY_ROWS, vix)
+
+        with patch("research.backtest.fno_condor.get_session", new=fake_gs, create=True), \
+             patch("db.get_session", new=fake_gs):
+            return cycles_from_db(mode="weekly")
+
+    def test_boundaries_are_last_trading_day_per_iso_week(self):
+        """The 4 ISO weeks produce exactly 4 boundaries; check their dates."""
+        cycles = self._run()
+        # boundaries = [01-08, 01-16, 01-22, 01-30]; pairs are consecutive
+        # Cycle 0: entry=01-08, expiry=01-16
+        assert cycles[0]["entry_date"] == date(2026, 1, 8)
+        assert cycles[0]["expiry_date"] == date(2026, 1, 16)
+        # Last cycle: entry=01-22, expiry=01-30
+        assert cycles[-1]["entry_date"] == date(2026, 1, 22)
+        assert cycles[-1]["expiry_date"] == date(2026, 1, 30)
+
+    def test_correct_number_of_cycles(self):
+        """4 boundaries → 3 consecutive pairs → 3 cycles (all data present)."""
+        cycles = self._run()
+        assert len(cycles) == 3
+
+    def test_straddle_iv_equals_vix_close_at_boundary_divided_by_100(self):
+        """straddle_iv = VIX close at the BOUNDARY (entry) date / 100."""
+        cycles = self._run()
+        # Cycle 0: boundary=01-08, VIX=14.0 → 0.14
+        assert cycles[0]["straddle_iv"] == pytest.approx(14.0 / 100.0)
+        # Cycle 1: boundary=01-16, VIX=15.0 → 0.15
+        assert cycles[1]["straddle_iv"] == pytest.approx(15.0 / 100.0)
+        # Cycle 2: boundary=01-22, VIX=15.5 → 0.155
+        assert cycles[2]["straddle_iv"] == pytest.approx(15.5 / 100.0)
+
+    def test_dte_equals_calendar_days_between_boundaries(self):
+        """dte = (expiry_date - entry_date).days for each cycle."""
+        cycles = self._run()
+        for c in cycles:
+            assert c["dte"] == (c["expiry_date"] - c["entry_date"]).days
+
+    def test_expiry_spot_is_nifty_close_at_next_boundary(self):
+        """expiry_spot is the NIFTY close on the NEXT boundary date."""
+        cycles = self._run()
+        # Cycle 0: expiry=01-16 → NIFTY close = 23200.0
+        assert cycles[0]["expiry_spot"] == pytest.approx(23200.0)
+        # Cycle 1: expiry=01-22 → NIFTY close = 23300.0
+        assert cycles[1]["expiry_spot"] == pytest.approx(23300.0)
+        # Cycle 2: expiry=01-30 → NIFTY close = 23400.0
+        assert cycles[2]["expiry_spot"] == pytest.approx(23400.0)
+
+    def test_spot_and_rvol_from_entry_boundary(self):
+        """spot and realized_vol_20d come from the ENTRY boundary date."""
+        cycles = self._run()
+        # Cycle 0: entry=01-08 → NIFTY close=23000.0, rvol=0.12
+        assert cycles[0]["spot"] == pytest.approx(23000.0)
+        assert cycles[0]["realized_vol_20d"] == pytest.approx(0.12)
+
+    def test_missing_vix_at_boundary_skips_that_pair(self):
+        """When VIX is absent for a boundary date, that pair is skipped."""
+        # VIX missing at 2026-01-16 (entry of pair 2: 01-16 → 01-22)
+        cycles = self._run(vix_rows=self._VIX_ROWS_MISSING_W2)
+        # Pair (01-08→01-16): VIX at 01-08=14.0 → survives
+        # Pair (01-16→01-22): VIX at 01-16=missing → SKIPPED
+        # Pair (01-22→01-30): VIX at 01-22=15.5 → survives
+        assert len(cycles) == 2
+        assert cycles[0]["entry_date"] == date(2026, 1, 8)
+        assert cycles[1]["entry_date"] == date(2026, 1, 22)
+
+    def test_missing_rvol_at_boundary_skips_pair(self):
+        """When rvol is None for a boundary date, that pair is skipped."""
+        nifty_no_rvol = list(self._NIFTY_ROWS)
+        # Set rvol=None on boundary 01-08 → pair (01-08→01-16) skipped
+        nifty_no_rvol[2] = (date(2026, 1, 8), 23000.0, None)
+        fake_gs = self._make_weekly_session(nifty_no_rvol, self._VIX_ROWS_FULL)
+
+        from research.backtest.fno_condor import cycles_from_db
+        with patch("research.backtest.fno_condor.get_session", new=fake_gs, create=True), \
+             patch("db.get_session", new=fake_gs):
+            cycles = cycles_from_db(mode="weekly")
+
+        # Pair starting 01-08 is skipped; pairs starting 01-16 and 01-22 survive
+        assert len(cycles) == 2
+        entry_dates = [c["entry_date"] for c in cycles]
+        assert date(2026, 1, 8) not in entry_dates
+
+    def test_cycle_dict_has_required_keys(self):
+        """Every weekly cycle dict must carry all keys run_backtest expects."""
+        cycles = self._run()
+        required = {"entry_date", "expiry_date", "spot", "straddle_iv",
+                    "realized_vol_20d", "dte", "expiry_spot"}
+        for i, c in enumerate(cycles):
+            assert required.issubset(c.keys()), f"cycle {i} missing keys: {required - c.keys()}"
+
+    def test_bad_mode_raises_value_error(self):
+        """Unknown mode string must raise ValueError immediately."""
+        from research.backtest.fno_condor import cycles_from_db
+
+        # No DB calls should occur — ValueError is raised before any session work.
+        with pytest.raises(ValueError, match="weekly.*expiry_calendar|expiry_calendar.*weekly"):
+            cycles_from_db(mode="nonsense")
 
 
 # ===========================================================================
@@ -1213,7 +1402,7 @@ class TestCyclesFromDbEndToEnd:
 
         with patch("research.backtest.fno_condor.get_session", new=fake_get_session, create=True), \
              patch("db.get_session", new=fake_get_session):
-            cycles = cycles_from_db()
+            cycles = cycles_from_db(mode="expiry_calendar")
 
         assert len(cycles) == 2, f"expected 2 cycles, got {len(cycles)}"
 
@@ -1231,6 +1420,81 @@ class TestCyclesFromDbEndToEnd:
         # Both cycles are SELL-gate-passing → at least some trades expected
         assert metrics["n_cycles"] == 2
         assert metrics["n_trades"] >= 0   # gate may filter some; just assert no crash
+        assert isinstance(metrics["go_no_go"], tuple)
+        ok, reason = metrics["go_no_go"]
+        assert isinstance(ok, bool)
+        assert isinstance(reason, str)
+
+
+# ===========================================================================
+# SECTION 9 — mode="weekly" → run_backtest end-to-end
+# ===========================================================================
+
+
+@needs_condor
+class TestCyclesFromDbWeeklyEndToEnd:
+    """mode="weekly" cycles feed directly into run_backtest → valid metrics dict."""
+
+    def test_weekly_cycles_into_run_backtest(self):
+        """Smoke test: canned ISO-week bar data → cycles_from_db(weekly) → run_backtest."""
+        from research.backtest.fno_condor import cycles_from_db, run_backtest
+
+        # Use two ISO weeks for simplicity:
+        #   Week A: Mon 2026-01-05, Thu 2026-01-08 (boundary)
+        #   Week B: Mon 2026-01-12, Thu 2026-01-15 (boundary)
+        #   Week C: Mon 2026-01-19, Thu 2026-01-22 (boundary)
+        # → boundaries: [01-08, 01-15, 01-22] → 2 pairs → 2 cycles
+        nifty_rows = [
+            (date(2026, 1, 5),  23400.0, 0.10),
+            (date(2026, 1, 8),  23400.0, 0.10),   # boundary week A
+            (date(2026, 1, 12), 23400.0, 0.10),
+            (date(2026, 1, 15), 23400.0, 0.10),   # boundary week B
+            (date(2026, 1, 19), 23400.0, 0.10),
+            (date(2026, 1, 22), 23400.0, 0.10),   # boundary week C
+        ]
+        vix_rows = [
+            (date(2026, 1, 5),  15.0),
+            (date(2026, 1, 8),  15.0),   # straddle_iv=0.15; rvol=0.10 < 0.9*0.15 → SELL
+            (date(2026, 1, 12), 15.0),
+            (date(2026, 1, 15), 15.0),
+            (date(2026, 1, 19), 15.0),
+            (date(2026, 1, 22), 15.0),
+        ]
+
+        def _make_result(rows):
+            result = MagicMock()
+            result.fetchall.return_value = rows
+            return result
+
+        session = MagicMock()
+        session.execute.side_effect = [
+            _make_result(nifty_rows),
+            _make_result(vix_rows),
+        ]
+
+        @contextmanager
+        def fake_get_session():
+            yield session
+
+        with patch("research.backtest.fno_condor.get_session", new=fake_get_session, create=True), \
+             patch("db.get_session", new=fake_get_session):
+            cycles = cycles_from_db(mode="weekly")
+
+        assert len(cycles) == 2, f"expected 2 cycles from weekly mode, got {len(cycles)}"
+
+        metrics = run_backtest(cycles, k=0.9, move_mult=1.0, capital=200_000.0)
+
+        required_keys = {
+            "trades", "n_cycles", "n_trades", "win_rate",
+            "profit_factor", "sharpe", "max_drawdown", "net_pnl",
+            "return_on_capital", "go_no_go",
+        }
+        assert required_keys.issubset(metrics.keys()), (
+            f"metrics missing: {required_keys - metrics.keys()}"
+        )
+        assert metrics["n_cycles"] == 2
+        # SELL gate: rvol=0.10 < 0.9*0.15=0.135 → both cycles should trade
+        assert metrics["n_trades"] == 2
         assert isinstance(metrics["go_no_go"], tuple)
         ok, reason = metrics["go_no_go"]
         assert isinstance(ok, bool)
