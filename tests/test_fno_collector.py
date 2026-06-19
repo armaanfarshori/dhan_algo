@@ -172,10 +172,15 @@ def test_chain_rows_and_atm_summed_correctly():
 
 
 def test_summary_dict_has_all_keys():
-    """run_eod_collection must return a dict with the documented keys."""
+    """run_eod_collection must return a dict with the documented keys.
+
+    The two backfill_index_bars calls return DISTINCT values (NIFTY→5, VIX→9)
+    so the routing into index_bars vs vix_bars is actually verified.
+    """
     client = _make_patched_client(_make_expiry_list([], FUTURE_EXPIRIES[:2]))
 
-    mock_backfill = AsyncMock(return_value=7)
+    # side_effect list: first call (NIFTY) → 5, second call (INDIAVIX) → 9.
+    mock_backfill = AsyncMock(side_effect=[5, 9])
     mock_calendar = AsyncMock(return_value=4)
     mock_snapshot = AsyncMock(return_value={"chain_rows": 80, "atm": 1})
 
@@ -193,8 +198,9 @@ def test_summary_dict_has_all_keys():
     assert set(result.keys()) == {
         "index_bars", "vix_bars", "expiries", "snapshots", "chain_rows", "atm"
     }
-    assert result["index_bars"] == 7
-    assert result["vix_bars"] == 7
+    # NIFTY bars land in index_bars, VIX bars land in vix_bars.
+    assert result["index_bars"] == 5
+    assert result["vix_bars"] == 9
     assert result["expiries"] == 4
 
 
@@ -283,7 +289,7 @@ def test_lookback_dates_passed_to_backfill():
         )
 
     expected_to = _TODAY.isoformat()
-    expected_from = (_TODAY - __import__("datetime").timedelta(days=lookback)).isoformat()
+    expected_from = (_TODAY - timedelta(days=lookback)).isoformat()
 
     for call in mock_backfill.call_args_list:
         # Positional: (client, security_id, symbol, from_date, to_date, ...)
@@ -291,3 +297,103 @@ def test_lookback_dates_passed_to_backfill():
         to_arg = call.args[4] if len(call.args) > 4 else call.kwargs.get("to_date")
         assert from_arg == expected_from
         assert to_arg == expected_to
+
+
+# ── main() coverage ───────────────────────────────────────────────────────────
+
+def _make_main_patches(*, token: Any = "tok123", with_instruments: bool = False):
+    """Return a context manager that patches all deferred imports used by main().
+
+    The returned mapping exposes the individual mocks so tests can assert on them.
+    """
+    import contextlib
+    import sys
+
+    @contextlib.contextmanager
+    def _ctx():
+        argv = ["fno_collector"]
+        if with_instruments:
+            argv.append("--with-instruments")
+
+        mock_cfg = MagicMock()
+        mock_cfg.db_url = "postgresql://fake/db"
+        mock_cfg.dhan_client_id = "CLIENT1"
+
+        mock_get_config = MagicMock(return_value=mock_cfg)
+        mock_init_db = MagicMock()
+        mock_token = MagicMock(return_value=token)
+        mock_client_cls = MagicMock()
+        mock_client_instance = MagicMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client_instance)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        mock_rv_fn = MagicMock(return_value=42)
+        mock_sync_instruments = MagicMock(return_value={"inserted": 0, "updated": 0})
+        _summary = {"index_bars": 1, "vix_bars": 1,
+                    "expiries": 2, "snapshots": 1,
+                    "chain_rows": 10, "atm": 1}
+
+        def _fake_asyncio_run(coro):
+            """Close the coroutine (suppress 'never awaited' warning) and return stub."""
+            coro.close()
+            return _summary
+
+        mock_asyncio_run = MagicMock(side_effect=_fake_asyncio_run)
+
+        with (
+            patch.object(sys, "argv", argv),
+            patch("core.fno_collector.compute_index_realized_vol", mock_rv_fn),
+            patch("asyncio.run", mock_asyncio_run),
+        ):
+            # Patch the deferred imports that main() does at runtime.
+            with (
+                patch.dict("sys.modules", {
+                    "config": MagicMock(get_config=mock_get_config),
+                    "db": MagicMock(init_db=mock_init_db),
+                    "core.client": MagicMock(DhanClient=mock_client_cls),
+                    "core.token_manager": MagicMock(read_current_token=mock_token),
+                    "core.fno_instruments": MagicMock(
+                        sync_fno_instruments=mock_sync_instruments
+                    ),
+                }),
+            ):
+                mocks = {
+                    "get_config": mock_get_config,
+                    "init_db": mock_init_db,
+                    "read_current_token": mock_token,
+                    "DhanClient": mock_client_cls,
+                    "compute_index_realized_vol": mock_rv_fn,
+                    "asyncio_run": mock_asyncio_run,
+                    "sync_fno_instruments": mock_sync_instruments,
+                }
+                yield mocks
+
+    return _ctx()
+
+
+def test_main_with_instruments_calls_sync_once():
+    """--with-instruments must call sync_fno_instruments exactly once."""
+    with _make_main_patches(token="tok", with_instruments=True) as mocks:
+        import core.fno_collector as _col
+        _col.main()
+        mocks["sync_fno_instruments"].assert_called_once()
+
+
+def test_main_without_instruments_does_not_call_sync():
+    """Without --with-instruments, sync_fno_instruments must NOT be called."""
+    with _make_main_patches(token="tok", with_instruments=False) as mocks:
+        import core.fno_collector as _col
+        _col.main()
+        mocks["sync_fno_instruments"].assert_not_called()
+
+
+def test_main_raises_systemexit_when_no_token():
+    """When read_current_token() returns None, main() must raise SystemExit
+    and never construct a DhanClient or call asyncio.run."""
+    with _make_main_patches(token=None, with_instruments=False) as mocks:
+        import pytest
+        import core.fno_collector as _col
+        with pytest.raises(SystemExit):
+            _col.main()
+        mocks["DhanClient"].assert_not_called()
+        mocks["asyncio_run"].assert_not_called()

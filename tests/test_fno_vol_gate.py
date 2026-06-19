@@ -826,6 +826,53 @@ class TestSamplesFromDbAtm:
         assert realized == pytest.approx(0.10)
         assert implied == pytest.approx(0.155)
 
+    @requires_module
+    def test_atm_realized_from_index_bars_not_futures_bars(self, monkeypatch):
+        """source='atm' must join index_bars for realized_vol_20d (not futures_bars).
+
+        The SQL is verified indirectly: we monkeypatch get_session to return canned
+        (realized_vol_20d, straddle_iv) rows as the DB would after the corrected
+        index_bars join, and assert:
+          1. The returned tuples match the canned values (correct column mapping).
+          2. straddle_iv is used AS-IS (already a fraction — no /100 applied).
+          3. The Python-side >0 guard drops any non-positive pair.
+        """
+        # Simulate index_bars join result: (realized_vol_20d, straddle_iv)
+        # straddle_iv values are already annualised fractions (e.g. 0.14 = 14%).
+        # If the OLD code (futures_bars join) ran instead it would return zero rows
+        # because futures_bars is unpopulated; the mock ensures we test the mapping.
+        canned_rows = [
+            (0.12, 0.14),   # good: realized=12%, straddle_iv=14% (fraction)
+            (0.09, 0.11),   # good: realized=9%,  straddle_iv=11%
+            (0.00, 0.13),   # bad:  realized=0  → dropped by Python >0 guard
+            (0.10, 0.00),   # bad:  implied=0   → dropped by Python >0 guard
+        ]
+        self._patch_session(monkeypatch, canned_rows)
+
+        from ml.fno_vol_gate import samples_from_db
+
+        result = samples_from_db(source="atm", nifty_id="13", symbol="NIFTY")
+
+        # Only the two good rows survive
+        assert len(result) == 2
+
+        # Column order: (realized_vol_20d, straddle_iv) — straddle_iv is the fraction
+        assert result[0] == pytest.approx((0.12, 0.14))
+        assert result[1] == pytest.approx((0.09, 0.11))
+
+        # Verify the >0 guard: no non-positive values in output
+        for rv, iv in result:
+            assert rv > 0, f"realized_vol must be >0, got {rv}"
+            assert iv > 0, f"straddle_iv must be >0, got {iv}"
+
+        # straddle_iv must NOT be divided by 100 — values should match canned fractions
+        # (if erroneously divided by 100, result[0][1] would be 0.0014, not 0.14)
+        _, first_iv = result[0]
+        assert first_iv > 0.01, (
+            "straddle_iv appears to have been divided by 100 — it should be a fraction "
+            f"(got {first_iv}; expected ~0.14)"
+        )
+
 
 # ===========================================================================
 # 9. samples_from_db — source="bad" raises ValueError

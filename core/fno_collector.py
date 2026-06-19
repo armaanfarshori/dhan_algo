@@ -40,7 +40,6 @@ async def run_eod_collection(
     vix_id: str = "21",
     lookback_days: int = 10,
     n_expiries: int = 4,
-    with_instruments: bool = False,
     now: Optional[Any] = None,
 ) -> dict[str, Any]:
     """Orchestrate the EOD F&O data collection for one session.
@@ -60,18 +59,17 @@ async def run_eod_collection(
         upsert — only new rows are inserted).
     n_expiries:
         Number of *future* expiries to snapshot.  Nearest first.
-    with_instruments:
-        If True, ``sync_fno_instruments()`` is called before the async section
-        (handled in ``main()`` so the async fn stays client-only).
     now:
         Override the current IST time (for tests).  ``None`` uses real wall time.
+        Instrument sync is handled synchronously in ``main()`` before this
+        async function is called.
 
     Returns
     -------
     dict with keys: ``index_bars``, ``vix_bars``, ``expiries``,
     ``snapshots``, ``chain_rows``, ``atm``.
     """
-    today: date = (now or fb._now_ist()).date()
+    today: date = (now or fb._now_ist()).astimezone(fb._IST).date()
     frm: str = (today - timedelta(days=lookback_days)).isoformat()
     to: str = today.isoformat()
 
@@ -88,7 +86,7 @@ async def run_eod_collection(
 
     # 3. Option-chain snapshots — nearest n_expiries future expiries only.
     scrip = fb.SYMBOL_SCRIP[symbol]
-    raw_expiries = await client.get_fno_expiry_list(scrip)
+    raw_expiries = await client.get_fno_expiry_list(scrip, "IDX_I")
     raw_data = (
         raw_expiries.get("data", raw_expiries)
         if isinstance(raw_expiries, dict)
@@ -187,7 +185,6 @@ def main() -> None:
                 args.symbol,
                 n_expiries=args.n_expiries,
                 lookback_days=args.lookback_days,
-                with_instruments=args.with_instruments,
             )
 
     summary = asyncio.run(_run())

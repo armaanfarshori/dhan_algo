@@ -32,11 +32,15 @@ the one that actually answers "is this profitable?" — and it's not yet compute
 - **Forward (now):** the EOD collector (`core/fno_collector.py`, cron) snapshots the NIFTY chain
   post-close into `option_chain_snapshot` + the ATM projection into `option_atm_iv`. Real weekly
   IV accrues from day 1. Usable for a forward/paper test within weeks.
-- **Backward (faster history):** for **currently-listed** option contracts, pull each contract's
-  historical OHLCV via `charts/historical` (NSE_FNO/OPTIDX, security_id from `fno_instruments`) and
-  **derive IV via Black-76** from option LTP + spot + rate + dte. Gives a few months of *real* weekly
-  IV immediately (expired contracts are gone from the master, so this can't reach 2yr — but it
-  validates the VIX→real-IV delta on recent data).
+- **Backward (faster history) — FEASIBILITY TO VERIFY FIRST:** the *intent* is, for
+  **currently-listed** option contracts, to pull each contract's historical OHLCV via
+  `charts/historical` (NSE_FNO/OPTIDX, security_id from `fno_instruments`) and **derive IV via
+  Black-76** from option LTP + spot + rate + dte. **But Dhan may not serve per-contract option
+  OHLCV historically** (handoff §8 Open Q#1 is still open; the option-chain endpoint is
+  snapshot-only). So step 0 is a one-call probe: `get_daily_historical(<an OPTIDX security_id>,
+  "NSE_FNO", "OPTIDX", …)` and confirm it returns bars. If yes → a few months of *real* weekly IV
+  immediately (expired contracts are gone, so not 2yr). If no → rely solely on the forward
+  collector accruing IV over time. Do not scope work against A-backward until the probe passes.
 - **Deliverable:** re-run the backtest with `samples_from_db(source="atm")` + cycles priced from
   real ATM IV; quantify the VIX-proxy bias (expected: real edge ≥ VIX-based).
 
@@ -44,6 +48,10 @@ the one that actually answers "is this profitable?" — and it's not yet compute
 - Source the weekly NIFTY **FSP** series (NSE F&O bhavcopy / settlement files; the 15:00–15:30
   weighted average). Add an `expiry_settlement` table (or column) and use it as `expiry_spot` in
   `cycles_from_db`/`run_backtest` instead of the daily close.
+  - **Sourcing format TBD — verify first:** NSE's FSP lives in the daily F&O bhavcopy (the
+    settlement-price column); the file format changed across 2022–2026 and 2yr means ~200+ daily
+    files. Pin the exact URL pattern + the settlement-price column name before implementing, and
+    handle gaps/holidays. Treat this as a manual verification step, not a given.
 - **Deliverable:** re-resolve all cycles on FSP; report how many near-the-money win/loss flips occur
   and the P&L delta.
 
@@ -53,6 +61,10 @@ the one that actually answers "is this profitable?" — and it's not yet compute
   **sizing-to-target-risk** view (e.g. risk 1–2% of capital per cycle), not return on notional ₹2L.
 - Quantify the **hedged-vs-naked** SPAN advantage (the original thesis: condor margin ≪ naked
   strangle) — this is the structural edge that makes the strategy scalable.
+- **Caveat:** `max_loss` is a *conservative* (high) proxy for capital-at-risk — the exchange's actual
+  SPAN on a hedged condor is typically ~40–60% of max_loss (it recognises the long wings), so a
+  return-on-margin computed off max_loss **understates** true capital efficiency. Compute the real
+  SPAN where possible; treat the max_loss-based ROM as a floor.
 - **Deliverable:** a return-on-margin + max-DD-on-margin table; the number that decides allocation.
 
 ### D. ORB/Kronos vs condor — head-to-head (after the fine-tune session's M3)
@@ -62,6 +74,10 @@ the one that actually answers "is this profitable?" — and it's not yet compute
 - **Key question — complementarity, not just competition:** ORB is *directional/intraday*; the condor
   is *short-vol/weekly*. Different risk factors → running **both** may diversify (lower combined DD)
   rather than one replacing the other. Decide allocation accordingly.
+  - **Tail caveat:** the diversification holds in the *average* regime, but in a market-wide
+    crash/gap the two can lose **together** (short strikes blown through *and* no clean ORB breakout +
+    wide slippage). Measure the **joint left-tail** (worst combined weeks), not just average
+    correlation, before assuming the combo lowers risk.
 - **Deliverable:** a one-page comparison + an allocation recommendation.
 
 ### E. NIFTY-vol Kronos (replace the persistence proxy) — later

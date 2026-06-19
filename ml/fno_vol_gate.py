@@ -350,12 +350,20 @@ def samples_from_db(
 
     ``source="atm"`` (live / forward path)
         Joins ``option_atm_iv`` (straddle IV for ``symbol``) with
-        ``index_bars`` (realized_vol_20d for the NIFTY 50 SPOT INDEX,
-        security_id ``"13"``) on the same trading date and timeframe.  This is
-        the forward path used once option_atm_iv rows accumulate.  The existing
-        DISTINCT ON de-duplication (nearest positive-dte expiry per date) is
-        preserved.  After the DB round-trip, any pair where ``realized <= 0``
-        or ``implied <= 0`` is silently dropped in Python.
+        ``index_bars`` (security_id=nifty_id, default ``"13"``) on the same
+        trading date and timeframe.
+
+        * ``realized_vol`` = ``index_bars.realized_vol_20d`` (annualised
+          fraction, computed by core/fno_derived from NIFTY 50 SPOT INDEX
+          closes; NOT futures bars — futures_bars is unpopulated).
+        * ``implied_vol``  = ``option_atm_iv.straddle_iv`` (annualised
+          fraction already stored as such by core/fno_backfill — do NOT
+          divide by 100, unlike the VIX path).
+
+        ``DISTINCT ON`` de-duplication picks the nearest positive-dte expiry
+        per trading date so each date yields exactly one pair.  After the DB
+        round-trip, any pair where ``realized <= 0`` or ``implied <= 0`` is
+        silently dropped in Python.
 
     Rows missing either value are silently dropped in both paths.
 
@@ -370,7 +378,8 @@ def samples_from_db(
         Any other value raises ``ValueError``.
     nifty_id:
         security_id of NIFTY 50 SPOT INDEX in index_bars (default ``"13"``).
-        Only used when ``source="vix"``.
+        Used by both ``source="vix"`` and ``source="atm"`` (realized-vol base
+        always comes from the spot index).
     vix_id:
         security_id of India VIX in index_bars (default ``"21"``).
         Only used when ``source="vix"``.
@@ -417,27 +426,33 @@ def samples_from_db(
             -- expiries).  DISTINCT ON restricts to the nearest positive-dte expiry per
             -- date so each (realized_vol, implied_vol) pair is not duplicated.
             -- Date keys use AT TIME ZONE 'UTC' so the join is independent of DB server TZ.
+            --
+            -- realized_vol_20d comes from index_bars (NIFTY 50 SPOT INDEX, security_id
+            -- :nifty_id).  futures_bars is never used here — it is unpopulated and would
+            -- always return zero rows.  straddle_iv is already stored as an annualised
+            -- fraction by core/fno_backfill; do NOT divide by 100.
             SELECT
-                fb.realized_vol_20d  AS realized_vol,
+                ib.realized_vol_20d  AS realized_vol,
                 oi.straddle_iv       AS implied_vol
             FROM (
                 SELECT DISTINCT ON ((time AT TIME ZONE 'UTC')::date)
-                    symbol,
                     (time AT TIME ZONE 'UTC')::date  AS trade_date,
                     straddle_iv
                 FROM option_atm_iv
                 WHERE symbol      = :sym
                   AND straddle_iv IS NOT NULL
+                  AND straddle_iv > 0
+                  AND dte         > 0
                 ORDER BY (time AT TIME ZONE 'UTC')::date, dte ASC
             ) oi
-            JOIN futures_bars fb
-              ON fb.symbol    = oi.symbol
-             AND fb.timeframe = :tf
-             AND (fb.time AT TIME ZONE 'UTC')::date = oi.trade_date
-            WHERE fb.realized_vol_20d IS NOT NULL
+            JOIN index_bars ib
+              ON ib.security_id = :nifty_id
+             AND ib.timeframe   = :tf
+             AND (ib.time AT TIME ZONE 'UTC')::date = oi.trade_date
+            WHERE ib.realized_vol_20d IS NOT NULL
             ORDER BY oi.trade_date
         """)
-        params = {"sym": symbol, "tf": timeframe}
+        params = {"sym": symbol, "nifty_id": nifty_id, "tf": timeframe}
     else:
         raise ValueError(f"samples_from_db: unknown source={source!r}; expected 'vix' or 'atm'")
 
