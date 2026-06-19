@@ -31,7 +31,7 @@ Changes to the execution path (`engine/execution.py`, `engine/portfolio.py`, `en
 Before opening a pull request:
 
 - [ ] `pytest -q` passes locally (71 tests; CI runs the same suite)
-- [ ] No secrets, tokens, real IPs, or account IDs anywhere in the diff (repo is private since 2026-06-19, but treat as if public — defense-in-depth)
+- [ ] No secrets, tokens, real IPs, or account IDs anywhere in the diff (private repo — never rely on that)
 - [ ] No `PAPER_TRADING=false` anywhere in the diff
 - [ ] Changes to the execution/risk path are mode-blind
 - [ ] New env vars added to `config.py` (the single env reader) with safe defaults

@@ -25,7 +25,7 @@ Read endpoints leak operational data (positions, P&L, trade history, Dhan funds,
 
 1. **Unauthenticated internet scanner** — the API is bound to `0.0.0.0`; if the Tailscale firewall misconfigures or the instance gets a public IP, the dashboard is exposed. Without auth, anyone who finds port 8765 can trigger the kill-switch or drain position data.
 2. **Tailscale network participant** — any device added to the Tailscale network can reach the dashboard. The tailnet is controlled, but a compromised device inside it has full dashboard access today.
-3. **Repo reader** — the code is readable by anyone with repo access, and the repo was **public until 2026-06-19** (so the code is already disclosed; going private does not un-disclose it). The SEC-04 `DASHBOARD_TOKEN` is in `.env` (not committed), but its role and header name (`X-Dashboard-Token`) are visible in the code. An attacker who obtains the token value (e.g., from a leaked `.env`) can impersonate the operator.
+3. **Repo reader** — the code is readable by anyone with repo access. The SEC-04 `DASHBOARD_TOKEN` is in `.env` (not committed), but its role and header name (`X-Dashboard-Token`) are visible in the code. An attacker who obtains the token value (e.g., from a leaked `.env`) can impersonate the operator.
 4. **Self (accidental)** — the operator triggers the kill-switch from the wrong browser tab, or a script sends a stale token. The fail-open default (token unset → allow) was chosen so a misconfigured secret never locks the operator out of the kill-switch; M6 must preserve this escape hatch explicitly.
 
 ### What M6 is NOT defending against
