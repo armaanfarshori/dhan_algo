@@ -52,3 +52,4 @@ run/
 
 # Local-dev TimescaleDB data dir (docker-compose default bind mount)
 pgdata/
+.claude/settings.local.json.bak
