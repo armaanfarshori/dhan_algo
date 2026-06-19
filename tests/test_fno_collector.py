@@ -344,17 +344,19 @@ def _make_main_patches(*, token: Any = "tok123", with_instruments: bool = False)
             patch.object(sys, "argv", argv),
             patch("core.fno_collector.compute_index_realized_vol", mock_rv_fn),
             patch("asyncio.run", mock_asyncio_run),
+            # main() does `import core.fno_instruments as fno_instruments`, which binds via
+            # the parent-package attribute (not sys.modules) — so patch the real attribute,
+            # not sys.modules, or the real sync_fno_instruments runs (downloads the master).
+            patch("core.fno_instruments.sync_fno_instruments", mock_sync_instruments),
         ):
-            # Patch the deferred imports that main() does at runtime.
+            # config/db/core.client/core.token_manager are reached via `from X import Y`,
+            # which resolves through sys.modules — so swapping those is sufficient.
             with (
                 patch.dict("sys.modules", {
                     "config": MagicMock(get_config=mock_get_config),
                     "db": MagicMock(init_db=mock_init_db),
                     "core.client": MagicMock(DhanClient=mock_client_cls),
                     "core.token_manager": MagicMock(read_current_token=mock_token),
-                    "core.fno_instruments": MagicMock(
-                        sync_fno_instruments=mock_sync_instruments
-                    ),
                 }),
             ):
                 mocks = {
