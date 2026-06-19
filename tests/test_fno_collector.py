@@ -196,12 +196,34 @@ def test_summary_dict_has_all_keys():
         )
 
     assert set(result.keys()) == {
-        "index_bars", "vix_bars", "expiries", "snapshots", "chain_rows", "atm"
+        "index_bars", "vix_bars", "expiries", "snapshots", "chain_rows", "atm", "errors"
     }
     # NIFTY bars land in index_bars, VIX bars land in vix_bars.
     assert result["index_bars"] == 5
     assert result["vix_bars"] == 9
     assert result["expiries"] == 4
+    assert result["errors"] == []  # happy path: no step failed
+
+
+def test_index_bars_failure_does_not_abort_collection():
+    """A transient failure of one step (e.g. Dhan's daily charts endpoint) must be
+    isolated: the error is recorded and the other steps still run."""
+    client = _make_patched_client(_make_expiry_list([], FUTURE_EXPIRIES))
+    # NIFTY backfill raises (daily endpoint down); VIX/calendar/snapshots succeed.
+    mock_backfill = AsyncMock(side_effect=[RuntimeError("DH-905 daily down"), 9])
+    mock_calendar = AsyncMock(return_value=4)
+    mock_snapshot = AsyncMock(return_value={"chain_rows": 80, "atm": 1})
+    with (
+        patch.object(collector.fb, "backfill_index_bars", mock_backfill),
+        patch.object(collector.fb, "build_expiry_calendar", mock_calendar),
+        patch.object(collector.fb, "snapshot_option_chain", mock_snapshot),
+    ):
+        result = _run(collector.run_eod_collection(client, "NIFTY", n_expiries=2, now=_NOW))
+    assert result["index_bars"] == 0          # failed step → default
+    assert result["vix_bars"] == 9            # other steps still ran
+    assert result["expiries"] == 4
+    assert result["snapshots"] == 2
+    assert any("index_bars" in e for e in result["errors"])  # failure recorded, not raised
 
 
 def test_one_failing_snapshot_does_not_abort_others():

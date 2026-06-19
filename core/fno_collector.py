@@ -67,26 +67,46 @@ async def run_eod_collection(
     Returns
     -------
     dict with keys: ``index_bars``, ``vix_bars``, ``expiries``,
-    ``snapshots``, ``chain_rows``, ``atm``.
+    ``snapshots``, ``chain_rows``, ``atm``, ``errors``.
+
+    Resilience: each step is isolated — a transient failure of one source (e.g.
+    Dhan's daily ``charts/historical`` endpoint being briefly unavailable, which
+    is independent of the live ``optionchain`` feed) is logged into ``errors``
+    and the remaining steps still run. The daily lookback window makes a missed
+    day self-heal on the next successful run.
     """
     today: date = (now or fb._now_ist()).astimezone(fb._IST).date()
     frm: str = (today - timedelta(days=lookback_days)).isoformat()
     to: str = today.isoformat()
+    errors: list[str] = []
+
+    async def _step(label: str, coro: Any, default: Any) -> Any:
+        try:
+            return await coro
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("%s failed: %s — continuing", label, exc)
+            errors.append(f"{label}: {exc}")
+            return default
 
     # 1. Index bars — NIFTY 50 spot + India VIX.
     logger.info("Collecting index bars: %s [%s] %s → %s", symbol, nifty_id, frm, to)
-    idx = await fb.backfill_index_bars(client, nifty_id, symbol, frm, to, now=now)
-
+    idx = await _step(
+        f"index_bars[{nifty_id}]",
+        fb.backfill_index_bars(client, nifty_id, symbol, frm, to, now=now), 0,
+    )
     logger.info("Collecting VIX bars: INDIAVIX [%s] %s → %s", vix_id, frm, to)
-    vix = await fb.backfill_index_bars(client, vix_id, "INDIAVIX", frm, to, now=now)
+    vix = await _step(
+        f"index_bars[{vix_id}]",
+        fb.backfill_index_bars(client, vix_id, "INDIAVIX", frm, to, now=now), 0,
+    )
 
     # 2. Expiry calendar.
     logger.info("Refreshing expiry calendar for %s", symbol)
-    exp = await fb.build_expiry_calendar(client, symbol, now=now)
+    exp = await _step("expiry_calendar", fb.build_expiry_calendar(client, symbol, now=now), 0)
 
     # 3. Option-chain snapshots — nearest n_expiries future expiries only.
     scrip = fb.SYMBOL_SCRIP[symbol]
-    raw_expiries = await client.get_fno_expiry_list(scrip, "IDX_I")
+    raw_expiries = await _step("expiry_list", client.get_fno_expiry_list(scrip, "IDX_I"), None)
     raw_data = (
         raw_expiries.get("data", raw_expiries)
         if isinstance(raw_expiries, dict)
@@ -129,6 +149,7 @@ async def run_eod_collection(
         "snapshots": snapshots,
         "chain_rows": total_chain_rows,
         "atm": total_atm,
+        "errors": errors,
     }
     logger.info("EOD collection complete: %s", summary)
     return summary
@@ -193,8 +214,11 @@ def main() -> None:
     # Recompute realized vol after the bars are written (sync, no client needed).
     nifty_id = "13"
     logger.info("Recomputing realized vol for security_id=%s", nifty_id)
-    rv_rows = compute_index_realized_vol(nifty_id)
-    logger.info("realized_vol_20d: updated %d rows for security_id=%s", rv_rows, nifty_id)
+    try:
+        rv_rows = compute_index_realized_vol(nifty_id)
+        logger.info("realized_vol_20d: updated %d rows for security_id=%s", rv_rows, nifty_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("realized-vol recompute failed (collection data still written)")
 
 
 if __name__ == "__main__":
