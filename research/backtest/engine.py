@@ -35,6 +35,7 @@ from sqlalchemy import text
 from engine.portfolio import Portfolio
 from engine.risk import RiskEngine, RiskParams
 from research.backtest.costs import round_trip_costs
+from research.backtest.registry import STRATEGIES
 from strategies.orb import ORB, ORBParams, Decision
 
 logger = logging.getLogger("dhan.backtest.engine")
@@ -51,6 +52,9 @@ class BacktestParams:
     slippage_bps: float = 2.0
     tick_size: float = 0.05            # half-tick slippage floor (cheap/thin names)
     orb: ORBParams = field(default_factory=ORBParams)
+    # Strategy to use; must be a key in research.backtest.registry.STRATEGIES.
+    # Defaults to "orb" so existing callers that never set this field are unchanged.
+    strategy_name: str = "orb"
 
 
 @dataclass
@@ -107,13 +111,22 @@ def _intrabar_exit(
     bar_high: float,
     bar_low: float,
     bar_open: float,
-    orb: "ORB",
-    bps: float,
-    tick: float,
+    stop: float = 0.0,
+    target: float = 0.0,
+    orb: "Optional[ORB]" = None,
+    bps: float = 0.0,
+    tick: float = 0.0,
 ) -> tuple[float, str] | None:
     """
-    Detect a stop-loss or target hit using the bar's wick (high/low), mirroring
-    the exact level formulas in strategies/orb.py section 4.
+    Detect a stop-loss or target hit using the bar's wick (high/low).
+
+    Strategy-agnostic: uses the ``stop`` and ``target`` levels captured from the
+    ENTER Decision at fill time (stored on the position state in the replay loop).
+    Pass these directly — they are absolute price levels.
+
+    Backward-compat: if ``orb`` is supplied (keyword-only), the stop and target
+    are derived from its internals instead, preserving the pre-refactor call
+    signature used by existing unit tests.
 
     Fidelity rationale: the live engine receives individual ticks, so a bar whose
     LOW pierces a long stop but CLOSES above it would correctly trigger a stop in
@@ -125,33 +138,35 @@ def _intrabar_exit(
 
     Returns (fill_price, reason) or None if neither level is hit.
     """
+    if orb is not None:
+        # Backward-compat path: derive levels from ORB internals (used by tests
+        # that pre-date the strategy-agnostic refactor).
+        if pos_side == "LONG":
+            stop   = orb.or_low * (1 - orb.p.sl_buffer_pct)
+            target = orb.entry_price + orb.p.target_multiplier * orb.or_range
+        else:
+            stop   = orb.or_high * (1 + orb.p.sl_buffer_pct)
+            target = orb.entry_price - orb.p.target_multiplier * orb.or_range
+
     if pos_side == "LONG":
-        # Mirror orb.py: stop = or_low * (1 - sl_buffer_pct)
-        #                target = entry_price + target_multiplier * or_range
-        stop_lvl   = orb.or_low * (1 - orb.p.sl_buffer_pct)
-        target_lvl = orb.entry_price + orb.p.target_multiplier * orb.or_range
-        stop_hit   = bar_low <= stop_lvl
-        target_hit = bar_high >= target_lvl
+        stop_hit   = bar_low <= stop
+        target_hit = bar_high >= target
         if stop_hit:
             # Gap-aware: a gap-down through the stop fills at the open, not the
             # stop (worse of stop vs gap-open) — gap losses must not be understated.
-            fill = min(bar_open, stop_lvl)
+            fill = min(bar_open, stop)
             return _slip(fill, "SELL", bps, tick), f"Stop-loss ₹{fill:.2f} (wick)"
         if target_hit:
-            return _slip(target_lvl, "SELL", bps, tick), f"Target hit ₹{target_lvl:.2f} (wick)"
+            return _slip(target, "SELL", bps, tick), f"Target hit ₹{target:.2f} (wick)"
     else:  # SHORT
-        # Mirror orb.py: stop = or_high * (1 + sl_buffer_pct)
-        #                target = entry_price - target_multiplier * or_range
-        stop_lvl   = orb.or_high * (1 + orb.p.sl_buffer_pct)
-        target_lvl = orb.entry_price - orb.p.target_multiplier * orb.or_range
-        stop_hit   = bar_high >= stop_lvl
-        target_hit = bar_low <= target_lvl
+        stop_hit   = bar_high >= stop
+        target_hit = bar_low <= target
         if stop_hit:
             # Gap-aware (SHORT): a gap-up through the stop fills at the open.
-            fill = max(bar_open, stop_lvl)
+            fill = max(bar_open, stop)
             return _slip(fill, "BUY", bps, tick), f"Stop-loss ₹{fill:.2f} (wick)"
         if target_hit:
-            return _slip(target_lvl, "BUY", bps, tick), f"Target hit ₹{target_lvl:.2f} (wick)"
+            return _slip(target, "BUY", bps, tick), f"Target hit ₹{target:.2f} (wick)"
     return None
 
 
@@ -162,13 +177,22 @@ async def replay_security_day(
     gate_fn: Optional[GateFn] = None,
     bars: Optional[pd.DataFrame] = None,
 ) -> list[BTTrade]:
-    """Replay one security's session through the live ORB class."""
+    """Replay one security's session through the strategy class from the registry."""
     df = bars if bars is not None else load_day_bars(security_id, day)
-    # Need at least the OR window plus a few bars to trade — skip junk sessions
+    # Need at least the OR window plus a few bars to trade — skip junk sessions.
+    # Use params.orb.orb_minutes for the min-bar threshold (ORB default; strategies
+    # with shorter warm-ups will simply skip fewer sessions).
     if df.empty or len(df) < params.orb.orb_minutes + 3:
         return []
 
-    orb = ORB(security_id, params.orb)
+    # Instantiate the strategy from the registry.  ORB is the default; any
+    # other registered strategy gets its default params.
+    strategy_cls, params_cls = STRATEGIES.get(params.strategy_name, (ORB, ORBParams))
+    if params.strategy_name == "orb":
+        strategy = strategy_cls(security_id, params.orb)
+    else:
+        strategy = strategy_cls(security_id, params_cls())
+
     sizer = RiskEngine(
         RiskParams(equity_base=params.equity, risk_per_trade=params.risk_per_trade,
                    max_notional_pct=params.max_notional_pct),
@@ -182,9 +206,12 @@ async def replay_security_day(
     pos_entry_price = 0.0
     pos_entry_ts: Optional[datetime] = None
     pos_side = ""
+    # Stop and target captured from the ENTER Decision (strategy-agnostic).
+    pos_stop: float = 0.0
+    pos_target: float = 0.0
 
     def close_position(exit_price: float, exit_ts: datetime, reason: str):
-        nonlocal pos_qty, pos_entry_price, pos_entry_ts, pos_side
+        nonlocal pos_qty, pos_entry_price, pos_entry_ts, pos_side, pos_stop, pos_target
         direction = 1 if pos_side == "LONG" else -1
         gross = (exit_price - pos_entry_price) * pos_qty * direction
         buy_px, sell_px = ((pos_entry_price, exit_price) if direction == 1
@@ -197,7 +224,8 @@ async def replay_security_day(
             gross_pnl=round(gross, 2), costs=costs,
             net_pnl=round(gross - costs, 2)))
         pos_qty, pos_entry_price, pos_entry_ts, pos_side = 0, 0.0, None, ""
-        orb.notify_flat()
+        pos_stop, pos_target = 0.0, 0.0
+        strategy.notify_flat()
 
     n = len(df)
     for i in range(n):
@@ -226,7 +254,11 @@ async def replay_security_day(
                     pos_entry_price = fill_px
                     pos_entry_ts = ts
                     pos_side = "LONG" if d.side == "BUY" else "SHORT"
-                    orb.notify_fill(d.side, qty, fill_px)
+                    # Capture stop/target from the ENTER Decision for strategy-agnostic
+                    # intrabar wick detection (no ORB-internal field access needed).
+                    pos_stop = d.stop
+                    pos_target = d.target
+                    strategy.notify_fill(d.side, qty, fill_px)
             else:   # EXIT (strategy-driven, e.g. EOD square-off queued at prev bar)
                 exit_side = "SELL" if pos_side == "LONG" else "BUY"
                 fill_px = _slip(bar_open, exit_side, params.slippage_bps, params.tick_size)
@@ -242,8 +274,9 @@ async def replay_security_day(
         # level.  Stop fills before target (conservative: realises the loss).
         if pos_qty != 0:
             wick_result = _intrabar_exit(
-                pos_side, bar_high, bar_low, bar_open, orb,
-                params.slippage_bps, params.tick_size,
+                pos_side, bar_high, bar_low, bar_open,
+                stop=pos_stop, target=pos_target,
+                bps=params.slippage_bps, tick=params.tick_size,
             )
             if wick_result is not None:
                 fill_px, reason = wick_result
@@ -252,7 +285,7 @@ async def replay_security_day(
                 # signals (e.g. the other direction) if the OR allows it.
 
         # 3. Let the strategy see the bar close (entry/EOD signals).
-        decision = orb.on_tick(ts, bar_close, high=bar_high, low=bar_low)
+        decision = strategy.on_tick(ts, bar_close, high=bar_high, low=bar_low)
         if decision is None:
             continue
 
@@ -260,7 +293,7 @@ async def replay_security_day(
             if gate_fn is not None:
                 allowed = await gate_fn(security_id, decision.side, df.iloc[: i + 1])
                 if not allowed:
-                    continue   # direction already consumed inside ORB
+                    continue   # direction already consumed inside strategy
             # Defer qty calculation to fill time (step 1, next bar) so it uses
             # the actual fill price — see FIX (P0-sizing) comment above.
             if i == n - 1:

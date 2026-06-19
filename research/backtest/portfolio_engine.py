@@ -33,6 +33,7 @@ from engine.portfolio import Portfolio
 from engine.risk import RiskEngine, RiskParams
 from research.backtest.costs import round_trip_costs
 from research.backtest.engine import BTTrade, _slip, load_day_bars
+from research.backtest.registry import STRATEGIES
 from strategies.orb import ORB, ORBParams, Decision
 
 logger = logging.getLogger("dhan.backtest.portfolio")
@@ -59,6 +60,9 @@ class PortfolioParams:
     tick_size: float = 0.05                # NSE tick; slippage floored at half-tick
     partial_fill_pct: float = 0.10         # fill qty capped at this % of the fill-bar volume
     orb: ORBParams = field(default_factory=ORBParams)
+    # Strategy to use; must be a key in research.backtest.registry.STRATEGIES.
+    # Defaults to "orb" so existing callers that never set this field are unchanged.
+    strategy_name: str = "orb"
 
 
 class _Book:
@@ -236,7 +240,11 @@ async def replay_portfolio(universe_by_day: dict[date, list[str]],
             hist = adv_history[sid]
             adv_snapshot[sid] = (sum(hist) / len(hist)) if hist else None
 
-        orbs = {sid: ORB(sid, params.orb) for sid in bars}
+        strategy_cls, params_cls = STRATEGIES.get(params.strategy_name, (ORB, ORBParams))
+        if params.strategy_name == "orb":
+            orbs = {sid: strategy_cls(sid, params.orb) for sid in bars}
+        else:
+            orbs = {sid: strategy_cls(sid, params_cls()) for sid in bars}
         entries_today = {sid: 0 for sid in bars}
         pending: dict[str, tuple] = {}
         last_idx = {sid: len(df) - 1 for sid, df in bars.items()}
@@ -280,19 +288,14 @@ async def replay_portfolio(universe_by_day: dict[date, list[str]],
                         if consumed + new_risk > risk.daily_loss_budget:
                             qty = 0  # budget exhausted at fill price — skip
                     if qty > 0:
-                        # Compute stop and target for the position record so the
-                        # intrabar wick check has them readily available.
-                        orb_range = orb.or_range
-                        if d.side == "BUY":
-                            stop_px = orb.or_low * (1 - params.orb.sl_buffer_pct)
-                            target_px = fill_px + params.orb.target_multiplier * orb_range
-                        else:
-                            stop_px = orb.or_high * (1 + params.orb.sl_buffer_pct)
-                            target_px = fill_px - params.orb.target_multiplier * orb_range
+                        # Use the stop and target captured from the ENTER Decision
+                        # (strategy-agnostic — no ORB-internal field access needed).
+                        # The strategy is contractually required to set concrete
+                        # absolute stop/target on every ENTER Decision.
                         book.positions[sid] = {
                             "side": "LONG" if d.side == "BUY" else "SHORT",
                             "qty": qty, "entry_px": fill_px, "entry_ts": ts,
-                            "stop": stop_px, "target": target_px}
+                            "stop": d.stop, "target": d.target}
                         risk.register_risk(sid, risk.position_risk(fill_px, d.stop, qty))
                         orb.notify_fill(d.side, qty, fill_px)
                         # Count the entry only when it ACTUALLY fills — a dropped/
