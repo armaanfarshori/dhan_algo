@@ -145,14 +145,27 @@ def test_risk_budget_rejects_second_after_first_fills(monkeypatch):
 
 
 def test_daily_loss_kill_switch_trips_and_blocks(monkeypatch):
-    crash = _session(after_close=103.0, n_after=3)
-    extra, t = [], crash.iloc[-1]["time"] + pd.Timedelta(minutes=1)
-    for px in (70.0, 60.0, 50.0, 50.0, 50.0):
-        extra.append((t, px, px + 0.5, px - 0.5, px, 5_000_000)); t += pd.Timedelta(minutes=1)
-    crash = pd.concat([crash, pd.DataFrame(extra, columns=crash.columns)], ignore_index=True)
-    _patch_bars(monkeypatch, {"1": crash, "2": crash})
-    params = PortfolioParams(slippage_bps=0.0, equity=100_000.0, max_daily_loss_pct=0.02)
-    _, daily = _run({DAY: ["1", "2"]}, params)
+    # Gap-aware fill design (all OHLC bars are physically valid: low ≤ open,close ≤ high).
+    #
+    # _session(after_closes=[103.0, 103.0, 90.0, 90.0, 90.0]) generates:
+    #   • 15 OR bars  [or_low=100, or_high=101]
+    #   • bar 15: open=103, high=103.5, low=102.5, close=103  ← ORB sees close>101 → ENTER LONG
+    #   • bar 16: open=103, high=103.5, low=102.5, close=103  ← fill at open=103 (valid)
+    #   • bar 17: open=90,  high=90.5,  low=89.5,  close=90   ← GAP-DOWN through stop (valid)
+    #   • bars 18-19: same (session ends)
+    #
+    # Stop = or_low × (1 − 0.002) = 100 × 0.998 = 99.8.
+    # Bar 17: bar_low=89.5 ≤ stop=99.8 → intrabar stop fires.
+    # Gap-aware: fill_px = min(open=90, stop=99.8) = 90 (gapped through → fills at gap-open).
+    # With risk_per_trade=0.01, equity=100_000: trade_budget=1_000, dist=3.2, qty≈312.
+    # Realized loss = (90 − 103) × 312 = −4_056.
+    # Daily budget = 100_000 × 0.02 = 2_000.  −4_056 << −2_000 → kill-switch trips on bar 18
+    # kill-switch check (step 2): realized_today=−4_056 + unrealized=0 ≤ −budget → halt.
+    _patch_bars(monkeypatch, {"1": _session(after_closes=[103.0, 103.0, 90.0, 90.0, 90.0])})
+    params = PortfolioParams(slippage_bps=0.0, tick_size=0.0,
+                             equity=100_000.0, risk_per_trade=0.01,
+                             max_daily_loss_pct=0.02)
+    _, daily = _run({DAY: ["1"]}, params)
     assert daily[0]["kill_switch"] is True
     assert daily[0]["net_pnl"] < 0
 
@@ -200,11 +213,15 @@ def test_equity_compounds_across_winning_days(monkeypatch):
 
 def test_kill_switch_day1_does_not_bleed_into_day2(monkeypatch):
     d1, d2 = date(2024, 3, 1), date(2024, 3, 4)
-    crash = _session(after_close=103.0, n_after=3, day=d1)
-    extra, t = [], crash.iloc[-1]["time"] + pd.Timedelta(minutes=1)
-    for px in (70.0, 60.0, 50.0, 50.0, 50.0):
-        extra.append((t, px, px + 0.5, px - 0.5, px, 5_000_000)); t += pd.Timedelta(minutes=1)
-    crash = pd.concat([crash, pd.DataFrame(extra, columns=crash.columns)], ignore_index=True)
+
+    # Day 1: same gap-down design as test_daily_loss_kill_switch_trips_and_blocks.
+    # _session(after_closes=[103.0, 103.0, 90.0, 90.0, 90.0], day=d1) — all bars valid:
+    #   bar 15 close=103 → ENTER LONG; bar 16 open=103 → fill; bar 17 open=90 (gap-down) →
+    #   intrabar stop fires at fill_px=90; realized loss ≈ −4_056 >> budget −2_000.
+    #   Kill-switch trips when bar 18's step-2 check sees realized_today ≤ −budget.
+    crash = _session(after_closes=[103.0, 103.0, 90.0, 90.0, 90.0], day=d1)
+
+    # Day 2: normal winning session — breakout to 103, ramp to 105 → target hit.
     win = _session(after_closes=[103.0, 103.0, 105.0, 105.0, 105.0, 105.0], day=d2)
 
     def loader(sid, day):
@@ -212,6 +229,7 @@ def test_kill_switch_day1_does_not_bleed_into_day2(monkeypatch):
     monkeypatch.setattr(pe, "load_day_bars", loader)
     _, daily = _run({d1: ["1"], d2: ["1"]},
                     PortfolioParams(slippage_bps=0.0, tick_size=0.0, partial_fill_pct=0.0,
-                                    equity=100_000.0, max_daily_loss_pct=0.02))
+                                    equity=100_000.0, risk_per_trade=0.01,
+                                    max_daily_loss_pct=0.02))
     assert daily[0]["kill_switch"] is True
     assert daily[1]["kill_switch"] is False              # halt resets next day

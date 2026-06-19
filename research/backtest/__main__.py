@@ -88,16 +88,19 @@ async def run(args) -> int:
     universe_by_day: dict = {}
     cache_path = args.universe_cache
     if cache_path and os.path.exists(cache_path) and not fixed_ids:
-        with open(cache_path, "rb") as f:
-            cached = pickle.load(f)
-        # Reuse only if it matches this run's universe definition AND covers every day.
-        if (cached.get("n") == args.n and cached.get("min_volume") == args.min_volume
-                and all(d in cached["universe_by_day"] for d in days)):
-            universe_by_day = {d: cached["universe_by_day"][d] for d in days}
-            logger.info("Loaded universe for %d days from cache %s", len(days), cache_path)
-        else:
-            logger.info("Universe cache %s present but doesn't match (n/min_volume/range) "
-                        "— rebuilding", cache_path)
+        try:
+            with open(cache_path, "rb") as f:
+                cached = pickle.load(f)
+            # Reuse only if it matches this run's universe definition AND covers every day.
+            if (cached.get("n") == args.n and cached.get("min_volume") == args.min_volume
+                    and all(d in cached["universe_by_day"] for d in days)):
+                universe_by_day = {d: cached["universe_by_day"][d] for d in days}
+                logger.info("Loaded universe for %d days from cache %s", len(days), cache_path)
+            else:
+                logger.info("Universe cache %s present but doesn't match (n/min_volume/range) "
+                            "— rebuilding", cache_path)
+        except Exception as exc:
+            logger.warning("Universe cache %s unreadable (%s) — rebuilding", cache_path, exc)
     if not universe_by_day:
         for i, day in enumerate(days):
             if fixed_ids:
@@ -114,16 +117,28 @@ async def run(args) -> int:
             if (i + 1) % 50 == 0 or i == len(days) - 1:
                 logger.info("  universe built %d/%d days", i + 1, len(days))
         if cache_path and not fixed_ids:
-            with open(cache_path, "wb") as f:
-                pickle.dump({"n": args.n, "min_volume": args.min_volume,
-                             "universe_by_day": universe_by_day}, f)
-            logger.info("Wrote universe cache %s (reuse across the three-way runs)", cache_path)
+            # Guard: refuse to persist an all-empty universe — indicates a failed build.
+            if not any(v for v in universe_by_day.values()):
+                logger.warning("Universe is entirely empty — skipping cache write to avoid "
+                               "poisoning future runs (check DB connectivity)")
+            else:
+                os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
+                with open(cache_path, "wb") as f:
+                    pickle.dump({"n": args.n, "min_volume": args.min_volume,
+                                 "universe_by_day": universe_by_day}, f)
+                logger.info("Wrote universe cache %s (reuse across the three-way runs)", cache_path)
 
     trades, daily = await replay_portfolio(universe_by_day, pparams, gate_fn)
 
     panel = m3_panel(trades, args.equity, split_date=args.split_date)
-    label = f"ORB{' + Kronos zero-shot' if args.gate == 'kronos' else ' standalone'}  " \
-            f"{args.from_date} → {args.to_date}  (portfolio)"
+    if args.gate == "kronos":
+        if cfg.kronos_checkpoint:
+            _gate_label = f"+ Kronos fine-tuned ({cfg.kronos_checkpoint})"
+        else:
+            _gate_label = "+ Kronos zero-shot"
+    else:
+        _gate_label = "standalone"
+    label = f"ORB {_gate_label}  {args.from_date} → {args.to_date}  (portfolio)"
     Report(trades, starting_equity=args.equity).print_report(label)
     ks_days = sum(1 for d in daily if d["kill_switch"])
     if args.split_date:
@@ -135,6 +150,14 @@ async def run(args) -> int:
                 ks_days)
 
     if args.json:
+        # Surface the gate engine's _loaded_from if accessible (set after lazy load).
+        _kronos_loaded_from: str | None = None
+        if gate is not None:
+            try:
+                _kronos_loaded_from = getattr(gate._engine, "_loaded_from", None)
+            except Exception:
+                pass
+        _UNIVERSE_LOOKBACK_DAYS = 30  # default in point_in_time_universe
         payload = {
             "provenance": provenance({
                 "cli": {
@@ -147,9 +170,13 @@ async def run(args) -> int:
                 # Full PortfolioParams (sizing, caps, tick, partial-fill, ORB) so
                 # the result is fully reproducible from the JSON alone.
                 "portfolio_params": asdict(pparams),
+                "kronos_model": cfg.kronos_model if args.gate == "kronos" else None,
+                "kronos_checkpoint": cfg.kronos_checkpoint if args.gate == "kronos" else None,
+                "kronos_loaded_from": _kronos_loaded_from,
                 "kronos_min_confidence": (cfg.kronos_min_confidence
                                           if args.gate == "kronos" else None),
                 "kronos_seed": gate.seed if gate else None,
+                "universe_lookback_days": _UNIVERSE_LOOKBACK_DAYS,
                 "db": cfg.backtest_db_name,
             }),
             "label": label,
@@ -178,7 +205,7 @@ def main():
     p.add_argument("--n", type=int, default=5, help="Universe size per day (default 5)")
     p.add_argument("--gate", choices=["none", "kronos"], default="none")
     p.add_argument("--equity", type=float, default=500_000.0)
-    p.add_argument("--slippage-bps", type=float, default=2.0)
+    p.add_argument("--slippage-bps", type=float, default=5.0)
     p.add_argument("--split-date", dest="split_date", default=None,
                    type=lambda s: datetime.strptime(s, "%Y-%m-%d").date(),
                    help="First OOS day (date-split): trades before = IS, on/after = OOS")

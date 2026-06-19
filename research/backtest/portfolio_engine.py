@@ -24,6 +24,7 @@ risk, daily_loss_budget, equity compounding) but keeps the book IN-MEMORY — a
 2y×1700 run through Portfolio.apply_fill would be millions of DB writes.
 """
 import logging
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
@@ -35,11 +36,14 @@ from strategies.orb import ORB, ORBParams, Decision
 
 logger = logging.getLogger("dhan.backtest.portfolio")
 
+# How many prior daily-volume observations to average for ADV (mirrors live ~20 trading days).
+_ADV_WINDOW = 20
+
 
 @dataclass
 class PortfolioParams:
     equity: float = 500_000.0
-    risk_per_trade: float = 0.01
+    risk_per_trade: float = 0.005       # live default (engine/risk.py RiskParams)
     max_notional_pct: float = 0.20
     slippage_bps: float = 2.0
     # Portfolio-level caps (mirror config.py live values).
@@ -61,7 +65,7 @@ class _Book:
         self.start_equity = start_equity
         self.realized_total = 0.0          # all-time (across days) — drives equity
         self.realized_today = 0.0
-        self.positions: dict[str, dict] = {}   # sid -> {side,qty,entry_px,entry_ts,stop}
+        self.positions: dict[str, dict] = {}   # sid -> {side,qty,entry_px,entry_ts,stop,target}
         self.risk = risk
         self.halted_today = False
 
@@ -78,6 +82,15 @@ class _Book:
         # lockstep with the in-memory book (no DB refresh_pnl in backtest).
         self.risk._realized_total = self.realized_total
         self.risk._realized_today = self.realized_today
+
+    def unrealized_pnl(self, ltp: dict[str, float]) -> float:
+        """Mark open positions to current prices (mirrors live RiskEngine._evaluate)."""
+        total = 0.0
+        for sid, pos in self.positions.items():
+            px = ltp.get(sid, pos["entry_px"])
+            direction = 1 if pos["side"] == "LONG" else -1
+            total += (px - pos["entry_px"]) * pos["qty"] * direction
+        return total
 
 
 def _close(book: _Book, trades: list, sid: str, day: date, raw_px: float,
@@ -105,6 +118,65 @@ def _close(book: _Book, trades: list, sid: str, day: date, raw_px: float,
     orb.notify_flat()
 
 
+def _check_intrabar_exit(book: _Book, trades: list, sid: str, day: date,
+                         bar, ts: datetime, params: PortfolioParams,
+                         orb: ORB) -> bool:
+    """Detect intrabar stop/target wick hits for an open position in sid.
+
+    Mirrors the live fill model: the engine monitors the live price stream and
+    can exit mid-bar when price touches a stop or target. In a bar-by-bar
+    replay we only see OHLC, so we test bar.low/high against the stop/target
+    levels and fill AT the stop/target price (stop-first when both are hit).
+
+    Stop levels (from orb.py):
+      LONG:  stop  = or_low  * (1 - sl_buffer_pct)
+             target = entry  + multiplier * or_range
+      SHORT: stop  = or_high * (1 + sl_buffer_pct)
+             target = entry  - multiplier * or_range
+
+    Returns True if the position was closed (caller skips on_tick exit logic)."""
+    if sid not in book.positions:
+        return False
+    pos = book.positions[sid]
+    stop = pos["stop"]
+    target = pos["target"]
+    bar_low = float(bar["low"])
+    bar_high = float(bar["high"])
+
+    if pos["side"] == "LONG":
+        stop_hit = bar_low <= stop
+        target_hit = bar_high >= target
+        if stop_hit or target_hit:
+            # Stop-first: if the wick triggered both, the adverse outcome wins.
+            if stop_hit:
+                # Gap-aware: a bar that gapped through the stop (open below it)
+                # fills at the open — you can't exit a gap-down at the stop. Take
+                # the WORSE of stop vs gap-open so gap losses aren't understated.
+                fill_px = min(float(bar["open"]), stop)
+                reason = f"Stop-loss ₹{fill_px:.2f} (intrabar)"
+            else:
+                fill_px = target
+                reason = f"Target hit ₹{target:.2f} (intrabar)"
+            _close(book, trades, sid, day, fill_px, ts, reason,
+                   params.slippage_bps, orb, params.tick_size)
+            return True
+    else:  # SHORT
+        stop_hit = bar_high >= stop
+        target_hit = bar_low <= target
+        if stop_hit or target_hit:
+            if stop_hit:
+                # Gap-aware (SHORT): a gap-up through the stop fills at the open.
+                fill_px = max(float(bar["open"]), stop)
+                reason = f"Stop-loss ₹{fill_px:.2f} (intrabar)"
+            else:
+                fill_px = target
+                reason = f"Target hit ₹{target:.2f} (intrabar)"
+            _close(book, trades, sid, day, fill_px, ts, reason,
+                   params.slippage_bps, orb, params.tick_size)
+            return True
+    return False
+
+
 async def replay_portfolio(universe_by_day: dict[date, list[str]],
                            params: PortfolioParams, gate_fn=None):
     """Replay all days against one shared book. Returns (trades, daily_records)
@@ -121,6 +193,11 @@ async def replay_portfolio(universe_by_day: dict[date, list[str]],
     trades: list[BTTrade] = []
     daily: list[dict] = []
 
+    # Rolling per-security daily volume history for ADV — no look-ahead:
+    # only volumes from PRIOR completed sessions are used to size today's trades.
+    # deque(maxlen=_ADV_WINDOW) keeps the most recent _ADV_WINDOW observations.
+    adv_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=_ADV_WINDOW))
+
     for day in sorted(universe_by_day):
         book.realized_today = 0.0
         book.halted_today = False
@@ -135,6 +212,14 @@ async def replay_portfolio(universe_by_day: dict[date, list[str]],
             daily.append({"day": str(day), "net_pnl": 0.0,
                           "equity_end": round(book.equity, 2), "kill_switch": False})
             continue
+
+        # Snapshot ADV from prior-session history BEFORE today's bars are observed.
+        # adv_history was updated at EOD of each prior session; read it now (no
+        # look-ahead). None → liquidity cap not applied (same as live get_adv failure).
+        adv_snapshot: dict[str, float | None] = {}
+        for sid in bars:
+            hist = adv_history[sid]
+            adv_snapshot[sid] = (sum(hist) / len(hist)) if hist else None
 
         orbs = {sid: ORB(sid, params.orb) for sid in bars}
         entries_today = {sid: 0 for sid in bars}
@@ -165,9 +250,19 @@ async def replay_portfolio(universe_by_day: dict[date, list[str]],
                     if qty > 0:
                         fill_px = _slip(float(bar["open"]), d.side,
                                         params.slippage_bps, params.tick_size)
+                        # Compute stop and target for the position record so the
+                        # intrabar wick check (bug 1) has them readily available.
+                        orb_range = orb.or_range
+                        if d.side == "BUY":
+                            stop_px = orb.or_low * (1 - params.orb.sl_buffer_pct)
+                            target_px = fill_px + params.orb.target_multiplier * orb_range
+                        else:
+                            stop_px = orb.or_high * (1 + params.orb.sl_buffer_pct)
+                            target_px = fill_px - params.orb.target_multiplier * orb_range
                         book.positions[sid] = {
                             "side": "LONG" if d.side == "BUY" else "SHORT",
-                            "qty": qty, "entry_px": fill_px, "entry_ts": ts, "stop": d.stop}
+                            "qty": qty, "entry_px": fill_px, "entry_ts": ts,
+                            "stop": stop_px, "target": target_px}
                         risk.register_risk(sid, risk.position_risk(fill_px, d.stop, qty))
                         orb.notify_fill(d.side, qty, fill_px)
                         # Count the entry only when it ACTUALLY fills — a dropped/
@@ -177,16 +272,51 @@ async def replay_portfolio(universe_by_day: dict[date, list[str]],
                     _close(book, trades, sid, day, float(bar["open"]), ts, d.reason,
                            params.slippage_bps, orb, params.tick_size)
 
-            # 2. Portfolio daily-loss kill-switch: queue exits for all open names,
-            #    block new entries for the rest of the day.
+            # 1b. Intrabar stop/target wick check (P0 fix: stop/target hit detection).
+            # Before calling on_tick (which evaluates only close price), test whether
+            # this bar's wick pierced the position's stop or target. Fill at the
+            # stop/target price with adverse slippage; stop-first if both triggered.
+            # Skip if the position was just entered this bar (fill px already set).
+            if sid in book.positions:
+                intrabar_exited = _check_intrabar_exit(
+                    book, trades, sid, day, bar, ts, params, orb)
+                if intrabar_exited:
+                    # Position closed; on_tick exit logic below is not needed.
+                    continue
+
+            # 2. Portfolio daily-loss kill-switch (P0 fix: include unrealized P&L).
+            # Live engine/_evaluate() computes day_total = realized + unrealized.
+            # Mirror that: mark open positions to the current bar's close price.
             book._sync_risk()
-            if not book.halted_today and book.realized_today <= -risk.daily_loss_budget:
-                book.halted_today = True
-                logger.info("[%s] portfolio kill-switch: realized %.0f <= -budget %.0f",
-                            day, book.realized_today, risk.daily_loss_budget)
+            if not book.halted_today:
+                # Build a per-sid ltp from each open position's most recent bar close.
+                # For sids whose bar stream is behind the current timestamp we use the
+                # last bar close up to this moment — no look-ahead.
+                ltp_now: dict[str, float] = {}
                 for osid in list(book.positions):
-                    pending.setdefault(osid, ("EXIT",
-                        Decision(action="EXIT", reason="portfolio kill-switch"), 0))
+                    if osid in bars:
+                        osid_df = bars[osid]
+                        # Find the latest bar index for osid whose time <= current ts
+                        osid_idx = osid_df["time"].searchsorted(bar["time"], side="right") - 1
+                        if osid_idx >= 0:
+                            ltp_now[osid] = float(osid_df.iloc[osid_idx]["close"])
+                        else:
+                            ltp_now[osid] = book.positions[osid]["entry_px"]
+                    else:
+                        ltp_now[osid] = book.positions[osid]["entry_px"]
+
+                unrealized = book.unrealized_pnl(ltp_now)
+                day_total = book.realized_today + unrealized
+                if day_total <= -risk.daily_loss_budget:
+                    book.halted_today = True
+                    logger.info(
+                        "[%s] portfolio kill-switch: realized %.0f + unrealized %.0f"
+                        " = %.0f <= -budget %.0f",
+                        day, book.realized_today, unrealized, day_total,
+                        risk.daily_loss_budget)
+                    for osid in list(book.positions):
+                        pending.setdefault(osid, ("EXIT",
+                            Decision(action="EXIT", reason="portfolio kill-switch"), 0))
 
             # 3. Strategy sees the bar (pure ORB).
             decision = orb.on_tick(ts, float(bar["close"]),
@@ -205,7 +335,9 @@ async def replay_portfolio(universe_by_day: dict[date, list[str]],
                     if not await gate_fn(sid, decision.side, df.iloc[: idx + 1]):
                         continue
                 book._sync_risk()
-                qty = risk.size_position(entry=float(bar["close"]), stop=decision.stop)
+                # Pass ADV from prior sessions so live liquidity cap applies (P1 fix).
+                qty = risk.size_position(entry=float(bar["close"]), stop=decision.stop,
+                                         adv=adv_snapshot.get(sid))
                 if qty <= 0:
                     continue
                 new_risk = risk.position_risk(float(bar["close"]), decision.stop, qty)
@@ -224,21 +356,42 @@ async def replay_portfolio(universe_by_day: dict[date, list[str]],
                 else:
                     pending[sid] = ("EXIT", decision, 0)
 
-        # EOD: force-close anything still open at its last bar's close. Guard
-        # against a position whose bars aren't in today's set (only possible if a
-        # prior day aborted mid-replay and leaked a position) — drop it safely
-        # rather than KeyError-cascade.
+        # EOD: force-close anything still open at its last bar's close.
+        # P0 fix (bug 3): a position whose security has NO bars today is force-closed
+        # at the last known price (prior session's close), booking real P&L + a trade
+        # record. Prior code silently dropped these at zero P&L, understating losses.
         for sid in list(book.positions):
             df = bars.get(sid)
-            if df is None or df.empty or sid not in orbs:
-                logger.warning("[%s] EOD: leaked position %s has no bars today — dropping", day, sid)
-                book.positions.pop(sid, None)
-                risk.release_risk(sid)
+            orb_inst = orbs.get(sid)
+            if df is None or df.empty or orb_inst is None:
+                # Leaked position: security suspended/halted/left universe.
+                # Close at last known price (entry price is the only safe fallback
+                # if we have no bars at all; in practice the prior EOD would have
+                # set entry_px to a realistic price).
+                pos = book.positions[sid]
+                last_px = pos["entry_px"]   # worst-case fallback (no prior bars loaded)
+                logger.warning(
+                    "[%s] EOD: %s has no bars today — force-closing at last known px %.2f",
+                    day, sid, last_px)
+                # Build a stub ORB so _close can call orb.notify_flat() safely.
+                stub_orb = ORB(sid, params.orb)
+                stub_orb.position = pos["qty"] if pos["side"] == "LONG" else -pos["qty"]
+                _close(book, trades, sid, day, last_px,
+                       datetime.combine(day, datetime.min.time()),
+                       "forced close — no bars (halt/suspension)",
+                       params.slippage_bps, stub_orb, params.tick_size)
                 continue
             last = df.iloc[-1]
             _close(book, trades, sid, day, float(last["close"]),
                    last["time"].to_pydatetime(), "forced EOD close",
-                   params.slippage_bps, orbs[sid], params.tick_size)
+                   params.slippage_bps, orb_inst, params.tick_size)
+
+        # Update ADV history AFTER all today's bars are consumed — no look-ahead.
+        # Sum the 1-min bar volumes for each security to get the session volume,
+        # then push it into the rolling window for the next day's sizing.
+        for sid, df in bars.items():
+            session_vol = float(df["volume"].sum())
+            adv_history[sid].append(session_vol)
 
         daily.append({"day": str(day), "net_pnl": round(book.realized_today, 2),
                       "equity_end": round(book.equity, 2),

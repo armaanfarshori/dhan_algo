@@ -71,9 +71,10 @@ def test_stop_loss_path():
 def test_risk_based_sizing():
     t = run(session(), equity=500_000, risk_per_trade=0.01)
     qty = t[0].qty
-    # stop ≈ 100×(1−0.002)=99.8; entry at decision price 103 → distance 3.2
-    # budget 5000/3.2 = 1562 → notional cap 100000/103 = 970
-    assert qty == 970
+    # Sizing uses the ACTUAL fill price (next-bar open 103.5), not the signal-bar close.
+    # stop ≈ 100×(1−0.002)=99.8; fill price 103.5 → distance 3.7
+    # budget 5000/3.7 = 1351 → notional cap 100000/103.5 = 966
+    assert qty == 966
 
 
 def test_gate_blocks_entry():
