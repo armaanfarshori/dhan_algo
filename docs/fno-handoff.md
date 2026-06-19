@@ -51,7 +51,7 @@ to `CLAUDE.md`, then do **PR1 = the Alembic 009 migration only**. Stop after PR5
 - `PAPER_TRADING = true` stays true. Nothing in this handoff places a real order.
 - Propose all changes on a **feature branch**; never commit to `main`. Branch: `feat/fno-data-foundation`.
 - **No live/infra actions during market hours (09:15–15:30 IST).** Backfill of *historical* data is fine off-hours; anything touching live order paths is out of scope here.
-- Never hardcode real IPs / account IDs / tokens (repo is private now, but treat as if public). Use `.env` + SSM.
+- Never hardcode real IPs / account IDs / tokens (private repo — never rely on that). Use `.env` + SSM.
 - This is a **research → data-foundation** handoff. It does NOT yet build strategies or touch order placement. Strategy code is Phase 2, gated on Phase 0–1 results.
 
 ### 1. Why this work exists

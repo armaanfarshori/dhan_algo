@@ -1,7 +1,5 @@
 # DhanAIBot — Trading Platform (agent instructions)
-**Repo:** `github.com/armaanfarshori/dhan_algo` (PRIVATE since 2026-06-19, for patent posture — but
-STILL never commit IPs, account IDs, tokens, chat IDs: a private repo can leak or be flipped public,
-and the prior public history already disclosed the code. Treat as if public.)
+**Repo:** `github.com/armaanfarshori/dhan_algo` (PRIVATE — never commit IPs, account IDs, tokens, chat IDs)
 **Last updated:** 2026-06-19
 **Current phase:** ENGINE LIVE (paper) · BACKFILL DONE · M2.5 CLEAN-DB BUILD RUNNING · S3 PIPELINE WIRED · GATE IN SHADOW
 
@@ -51,12 +49,11 @@ NEVER auto-destroy when state already has live resources. See memory `terraform-
 
 ## 🤝 Multi-Claude collaboration — lanes
 
-This repo is **PRIVATE** (made private 2026-06-19 for patent posture; see memory `repo-made-private`).
-Other Claude surfaces can still read it and contribute, each in its lane, with NO secrets or AWS
-access — but they now need **authorized private-repo access** (the Claude Projects GitHub connector
-and the Claude Code GitHub App must be granted scope on `armaanfarshori/dhan_algo`; it is no longer
-world-readable). The repo (this `CLAUDE.md` included) is the shared, always-in-sync context — keep
-it current and they stay current.
+This repo is **PRIVATE**. Other Claude surfaces can read it and contribute, each in its lane, with
+NO secrets or AWS access, via **authorized private-repo access** (the Claude Projects GitHub
+connector and the Claude Code GitHub App must be granted scope on `armaanfarshori/dhan_algo`). The
+repo (this `CLAUDE.md` included) is the shared, always-in-sync context — keep it current and they
+stay current.
 
 **ADVISORY lane — Claude Projects (claude.ai).** Connect the repo as a Project knowledge source
 (GitHub connector on `armaanfarshori/dhan_algo`); the Project reasons over the synced codebase —
@@ -80,8 +77,8 @@ reviews, merges, and deploys.
   package **out of band** (never in the repo) + Tailscale-join their box; pull TF secrets with
   `infra/secrets-sync.sh pull`. Default to NOT doing this — the PR lane covers most work.
 
-Rules for any Claude here: PAPER_TRADING stays `true`; never commit IPs/IDs/tokens (repo is private
-now, but treat as if public — defense-in-depth);
+Rules for any Claude here: PAPER_TRADING stays `true`; never commit IPs/IDs/tokens (private repo —
+but never rely on that; no secrets in git);
 branch + PR for every change (never commit straight to `main`). **The agent merges PRs itself**
 (memory `agent-handles-merges` — don't wait for a human) once gated by **green CI + outside
 market hours (09:15–15:30 IST)**. The market-hours + CI gates are safety rails, not
@@ -218,8 +215,8 @@ dhan-trader (apps/trader.py)                 dhan-api (apps/api.py)
 - **RiskEngine owns the kill-switch.** Never bypass.
 - **The old `platform_watchdog.sh` cron was REMOVED — do not re-add it** (it caused the
   June crash loop by kill -9ing a slow-booting process).
-- **Repo is PRIVATE (since 2026-06-19) — still treat as if public** — placeholders in docs; real
-  values only in `~/Desktop/dhan_aws_access/`.
+- **Repo is PRIVATE** — no secrets in committed files regardless; placeholders in docs, real values
+  only in `~/Desktop/dhan_aws_access/`.
 
 ---
 
@@ -312,5 +309,4 @@ cat /opt/dhan-trading/run/trader_heartbeat.json | python3 -m json.tool
 5. Dhan has no sandbox; treat every non-paper call as production.
 6. EOD square-off is unconditional — never reintroduce a dependency on strategy state.
 7. No static watchlists; screener + validation only.
-8. Repo is private (2026-06-19) — still no real IPs/IDs/tokens in committed files (defense-in-depth;
-   the prior public history already disclosed the code, so this discipline still matters).
+8. Repo is private — never commit real IPs/IDs/tokens (never rely on repo privacy for secrets).
