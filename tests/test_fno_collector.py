@@ -361,15 +361,19 @@ def _make_main_patches(*, token: Any = "tok123", with_instruments: bool = False)
             return _summary
 
         mock_asyncio_run = MagicMock(side_effect=_fake_asyncio_run)
+        mock_record_paper = MagicMock(return_value={"recorded": False, "decision": "STAND_ASIDE"})
+        mock_resolve_paper = MagicMock(return_value=0)
 
         with (
             patch.object(sys, "argv", argv),
             patch("core.fno_collector.compute_index_realized_vol", mock_rv_fn),
             patch("asyncio.run", mock_asyncio_run),
-            # main() does `import core.fno_instruments as fno_instruments`, which binds via
-            # the parent-package attribute (not sys.modules) — so patch the real attribute,
-            # not sys.modules, or the real sync_fno_instruments runs (downloads the master).
+            # main() does `import core.fno_instruments as fno_instruments` / `from core.fno_paper
+            # import ...`, which bind via the real module — so patch the real attributes (not
+            # sys.modules), or the real functions run (download the master / hit the DB).
             patch("core.fno_instruments.sync_fno_instruments", mock_sync_instruments),
+            patch("core.fno_paper.record_paper_entry", mock_record_paper),
+            patch("core.fno_paper.resolve_paper_trades", mock_resolve_paper),
         ):
             # config/db/core.client/core.token_manager are reached via `from X import Y`,
             # which resolves through sys.modules — so swapping those is sufficient.
@@ -389,6 +393,8 @@ def _make_main_patches(*, token: Any = "tok123", with_instruments: bool = False)
                     "compute_index_realized_vol": mock_rv_fn,
                     "asyncio_run": mock_asyncio_run,
                     "sync_fno_instruments": mock_sync_instruments,
+                    "record_paper_entry": mock_record_paper,
+                    "resolve_paper_trades": mock_resolve_paper,
                 }
                 yield mocks
 
@@ -409,6 +415,15 @@ def test_main_without_instruments_does_not_call_sync():
         import core.fno_collector as _col
         _col.main()
         mocks["sync_fno_instruments"].assert_not_called()
+
+
+def test_main_runs_paper_log():
+    """main() resolves matured paper trades and records today's entry once."""
+    with _make_main_patches(token="tok", with_instruments=False) as mocks:
+        import core.fno_collector as _col
+        _col.main()
+        mocks["resolve_paper_trades"].assert_called_once()
+        mocks["record_paper_entry"].assert_called_once()
 
 
 def test_main_raises_systemexit_when_no_token():

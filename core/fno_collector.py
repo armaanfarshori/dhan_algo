@@ -220,6 +220,18 @@ def main() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("realized-vol recompute failed (collection data still written)")
 
+    # Forward paper log: resolve any matured trades, then record today's gate-filtered
+    # iron-condor entry from the REAL chain (one per weekly cycle). Guarded so a paper-log
+    # failure never breaks the daily collection.
+    try:
+        from core.fno_paper import record_paper_entry, resolve_paper_trades
+
+        resolved = resolve_paper_trades(symbol=args.symbol)
+        entry = record_paper_entry(symbol=args.symbol)
+        logger.info("paper-log: resolved=%d entry=%s", resolved, entry)
+    except Exception:  # noqa: BLE001
+        logger.exception("paper-log step failed (collection data still written)")
+
 
 if __name__ == "__main__":
     main()
