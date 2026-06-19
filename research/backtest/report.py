@@ -43,9 +43,10 @@ class Report:
 
     @property
     def win_rate(self) -> float:
+        """Fraction of trades with non-negative net P&L (breakeven counts as a win)."""
         if not self.trades:
             return 0.0
-        return round(100 * sum(1 for t in self.trades if t.net_pnl > 0) / len(self.trades), 1)
+        return round(100 * sum(1 for t in self.trades if t.net_pnl >= 0) / len(self.trades), 1)
 
     @property
     def profit_factor(self) -> float:
@@ -53,7 +54,7 @@ class Report:
             return 0.0                       # no trades → undefined, not inf
         wins = sum(t.net_pnl for t in self.trades if t.net_pnl > 0)
         losses = abs(sum(t.net_pnl for t in self.trades if t.net_pnl < 0))
-        return round(wins / losses, 2) if losses else float("inf")
+        return round(wins / losses, 2) if losses else 9999.0
 
     @property
     def sharpe(self) -> float:
@@ -127,7 +128,7 @@ class Report:
             a = agg.setdefault(t.security_id, {"trades": 0, "net": 0.0, "wins": 0})
             a["trades"] += 1
             a["net"] = round(a["net"] + t.net_pnl, 2)
-            a["wins"] += 1 if t.net_pnl > 0 else 0
+            a["wins"] += 1 if t.net_pnl >= 0 else 0
         return dict(sorted(agg.items(), key=lambda kv: kv[1]["net"], reverse=True))
 
     def summary(self) -> dict:
@@ -181,13 +182,14 @@ def m3_panel(trades: list[BTTrade], starting_equity: float,
         is_t = [t for t in trades if t.day < split_date]
         oos_t = [t for t in trades if t.day >= split_date]
         is_r = Report(is_t, starting_equity)
-        oos_r = Report(oos_t, starting_equity)
+        oos_starting = starting_equity + is_r.total_net
+        oos_r = Report(oos_t, oos_starting)
         out["is"] = is_r.summary()
         out["oos"] = oos_r.summary()
         out["split_date"] = str(split_date)
-        # Degradation ratio: compute for any NON-ZERO IS Sharpe (including a
-        # negative one — that's informative). Only a true-zero IS Sharpe
-        # (<2 IS days / flat returns) makes the ratio undefined → None.
+        # Degradation ratio: only meaningful when IS Sharpe is strictly positive.
+        # A negative IS Sharpe would flip the sign of the ratio, making a worse OOS
+        # look like "outperformance". A zero IS Sharpe means undefined. Both → None.
         out["oos_is_sharpe_ratio"] = (
-            None if is_r.sharpe == 0 else round(oos_r.sharpe / is_r.sharpe, 2))
+            None if is_r.sharpe <= 0 else round(oos_r.sharpe / is_r.sharpe, 2))
     return out
