@@ -264,10 +264,39 @@ async def backfill_mcx_bars(
     """
     _assert_off_hours("backfill_mcx_bars", now)
     if interval is not None:
-        # Dhan's intraday endpoint caps each call at 90 days (DH-905), so split
-        # the full range into consecutive ≤90-day windows and fetch+upsert each.
-        windows = _intraday_windows(from_date, to_date)
+        # Resume from a prior checkpoint if one exists for this exact request:
+        # advance the effective start past the furthest completed window and
+        # carry forward its row count, so an interrupted intraday run re-fetches
+        # only the REMAINING windows (not all of them). A checkpoint is honoured
+        # only when its recorded from_date matches the requested from_date (a
+        # different requested range must NOT wrongly skip) and its to_date falls
+        # within [from_date, to_date); anything malformed/missing → full range.
+        eff_from = from_date
         total = 0
+        cp = read_checkpoint(security_id, timeframe)
+        if cp is not None:
+            try:
+                req_from = date.fromisoformat(from_date.strip())
+                req_to = date.fromisoformat(to_date.strip())
+                cp_from = date.fromisoformat(str(cp["from_date"]).strip())
+                cp_to = date.fromisoformat(str(cp["to_date"]).strip())
+                if cp_from == req_from and req_from <= cp_to < req_to:
+                    eff_from = (cp_to + timedelta(days=1)).strftime("%Y-%m-%d")
+                    total = int(cp.get("rows", 0) or 0)
+                    logger.info(
+                        "mcx_bars: resuming %s/%s from checkpoint (cp to=%s) → "
+                        "start %s, carried rows=%d",
+                        symbol, security_id, cp["to_date"], eff_from, total,
+                    )
+            except (KeyError, TypeError, ValueError):
+                logger.warning(
+                    "mcx_bars: malformed checkpoint for %s/%s — full re-fetch",
+                    security_id, timeframe,
+                )
+        # Dhan's intraday endpoint caps each call at 90 days (DH-905), so split
+        # the (possibly resumed) range into consecutive ≤90-day windows and
+        # fetch+upsert each.
+        windows = _intraday_windows(eff_from, to_date)
         for idx, (win_from, win_to) in enumerate(windows):
             raw = await _fetch_intraday_window(
                 client, security_id, str(interval), win_from, win_to
