@@ -24,7 +24,7 @@ headline; the **OOS (last-30%) ROM** is what gates the PRELIMINARY verdict (spec
 Defined-risk only. PAPER / research only — no live order paths.
 
 Trend + IV-rank wiring (spec 01 §7 option 2): the router needs two trailing histories
-per cycle that ``cycles_from_db`` does not carry — VIX/100 closes and NIFTY closes
+per cycle that ``cycles_from_db`` does not carry — VIX/100 closes and index closes
 ≤ entry_date. ``RegimeSidecar`` runs ONE read-only ``index_bars`` query at run time and,
 per cycle, computes a PIT-safe ``iv_rank`` (252-day percentile) + ``trend`` (normalised
 20DMA slope). It degrades to ``None`` (→ STAND_ASIDE-safe) when history is short, and is
@@ -407,7 +407,7 @@ def iv_rank(iv_today: float, iv_hist: list[float], *, min_periods: int = IV_RANK
 def trend_slope(closes: list[float], *, ma_window: int = TREND_MA_WINDOW) -> Optional[float]:
     """Normalised 20DMA slope (estimator B: ``(spot − SMA20) / SMA20``), PIT-safe (spec 01 §4).
 
-    ``closes`` must be NIFTY closes ≤ entry_date (inclusive, no future bars); the
+    ``closes`` must be index closes ≤ entry_date (inclusive, no future bars); the
     last element is today's spot. Returns ``None`` when fewer than ``ma_window + 1``
     closes exist (fail-safe) — estimator B needs today's spot to be DISTINCT from
     the ``ma_window``-day MA it is compared against, so a full window PLUS the
@@ -493,7 +493,7 @@ def cycles_for_index(index: IndexParams) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 class RegimeSidecar:
     """Self-contained read-only ``index_bars`` reader that supplies per-cycle
-    ``trend`` (20DMA slope of NIFTY closes) + ``iv_rank`` (252d VIX/100 percentile),
+    ``trend`` (20DMA slope of index closes) + ``iv_rank`` (252d VIX/100 percentile),
     both strictly ≤ ``entry_date`` (no look-ahead).
 
     One DB query at construction loads two date→close maps; ``signals_for(cycle)``
@@ -506,12 +506,12 @@ class RegimeSidecar:
     def __init__(self, index: IndexParams, *, k: float = DEFAULT_K) -> None:
         self.index = index
         self.k = k
-        self._nifty_closes: list[tuple[date, float]] = []
+        self._index_closes: list[tuple[date, float]] = []
         self._vix_iv: list[tuple[date, float]] = []
         self._load()
 
     def _load(self) -> None:
-        """Load NIFTY closes + VIX/100 closes once (fail-open to empty maps)."""
+        """Load index closes + VIX/100 closes once (fail-open to empty maps)."""
         try:
             from sqlalchemy import text
 
@@ -530,7 +530,7 @@ class RegimeSidecar:
                 rows = session.execute(
                     sql, {"nid": self.index.index_security_id, "vid": vid}
                 ).fetchall()
-            nifty: list[tuple[date, float]] = []
+            index_closes: list[tuple[date, float]] = []
             vix: list[tuple[date, float]] = []
             for d, sid, close in rows:
                 try:
@@ -540,13 +540,13 @@ class RegimeSidecar:
                 if c <= 0:
                     continue
                 if str(sid) == str(self.index.index_security_id):
-                    nifty.append((d, c))
+                    index_closes.append((d, c))
                 elif str(sid) == str(vid):
                     vix.append((d, c / 100.0))  # VIX is quoted in pct → fraction
-            self._nifty_closes = nifty
+            self._index_closes = index_closes
             self._vix_iv = vix
         except Exception:  # noqa: BLE001 — sidecar is fail-open (spec 06 §5 posture)
-            self._nifty_closes = []
+            self._index_closes = []
             self._vix_iv = []
 
     def signals_for(self, cycle: dict[str, Any]) -> tuple[Optional[float], Optional[float]]:
@@ -555,9 +555,9 @@ class RegimeSidecar:
         Degrades to (None, None) when histories are short or the sidecar is empty.
         """
         entry = cycle.get("entry_date")
-        if entry is None or not self._nifty_closes:
+        if entry is None or not self._index_closes:
             return (None, None)
-        closes = [c for d, c in self._nifty_closes if d <= entry]
+        closes = [c for d, c in self._index_closes if d <= entry]
         # Cap the IV-rank history to the trailing IV_RANK_WINDOW (~1y) so the
         # percentile is a ROLLING rank, not an ever-growing all-time one (M-IVW).
         iv_hist = [v for d, v in self._vix_iv if d <= entry][-IV_RANK_WINDOW:]
@@ -1106,7 +1106,7 @@ def archive_s3(
 def main() -> None:  # pragma: no cover
     """``python -m research.backtest.fno_orchestrator --index NIFTY --gate both``."""
     parser = argparse.ArgumentParser(
-        description="F&O Strategy Orchestrator — regime-aware router + NIFTY backtest",
+        description="F&O Strategy Orchestrator — regime router + index backtest",
     )
     parser.add_argument("--index", default="NIFTY", choices=list(INDEX_REGISTRY))
     parser.add_argument("--mode", default=None, choices=["weekly", "expiry_calendar"],
