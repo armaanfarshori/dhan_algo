@@ -49,6 +49,40 @@ except (ImportError, AttributeError):
 needs_condor = pytest.mark.skipif(not _HAS_CONDOR, reason="fno_condor not yet written")
 
 
+# ---------------------------------------------------------------------------
+# SQL-dispatching fake session
+# ---------------------------------------------------------------------------
+# cycles_from_db now issues an EXTRA query (option_atm_iv, when use_real_iv=True
+# — the production default). A positional side_effect list is brittle against
+# that, so the fake execute() dispatches on the SQL text instead: each query is
+# routed to the right canned rows by a substring of its statement. Unmatched
+# queries (e.g. option_atm_iv when the test supplies no real-IV rows) return [].
+
+
+def _dispatch_execute(routes: dict[str, list]):
+    """Return a fake ``session.execute`` that routes by SQL substring.
+
+    ``routes`` maps a case-insensitive SQL substring → the rows ``fetchall()``
+    should return. The FIRST matching key (in dict order) wins. Any statement
+    matching no key returns an empty result (so option_atm_iv with no canned
+    rows naturally yields no real IV → VIX-proxy fallback).
+    """
+
+    def _make_result(rows):
+        result = MagicMock()
+        result.fetchall.return_value = rows
+        return result
+
+    def _execute(stmt, *args, **kwargs):
+        sql = str(stmt).lower()
+        for needle, rows in routes.items():
+            if needle.lower() in sql:
+                return _make_result(rows)
+        return _make_result([])
+
+    return _execute
+
+
 # ===========================================================================
 # SECTION 1 — COSTS (fno_costs.py)
 # ===========================================================================
@@ -981,11 +1015,12 @@ class TestCyclesFromDb:
             return result
 
         session = MagicMock()
-        session.execute.side_effect = [
-            _make_result(expiry_rows),          # expiry_calendar weekly
-            _make_result(nifty_rows),            # index_bars NIFTY
-            _make_result(vix_rows),              # index_bars VIX
-        ]
+        session.execute.side_effect = _dispatch_execute({
+            "from expiry_calendar": expiry_rows,
+            ":nid": nifty_rows,
+            ":vid": vix_rows,
+            # option_atm_iv: unmatched → [] → cycles stay on the VIX proxy.
+        })
 
         @contextmanager
         def fake_get_session():
@@ -1003,12 +1038,12 @@ class TestCyclesFromDb:
             return result
 
         session = MagicMock()
-        session.execute.side_effect = [
-            _make_result([]),               # weekly expiry query → empty
-            _make_result(all_expiry_rows),  # fallback all-expiries query
-            _make_result(nifty_rows),
-            _make_result(vix_rows),
-        ]
+        session.execute.side_effect = _dispatch_execute({
+            "expiry_type = 'weekly'": [],          # weekly query → empty → fallback
+            "from expiry_calendar": all_expiry_rows,  # all-expiries fallback
+            ":nid": nifty_rows,
+            ":vid": vix_rows,
+        })
 
         @contextmanager
         def fake_get_session():
@@ -1246,10 +1281,11 @@ class TestCyclesFromDbWeekly:
             return result
 
         session = MagicMock()
-        session.execute.side_effect = [
-            _make_result(nifty_rows),
-            _make_result(vix_rows),
-        ]
+        session.execute.side_effect = _dispatch_execute({
+            ":nid": nifty_rows,
+            ":vid": vix_rows,
+            # option_atm_iv: unmatched → [] → cycles stay on the VIX proxy.
+        })
 
         @contextmanager
         def fake_get_session():
@@ -1397,11 +1433,11 @@ class TestCyclesFromDbEndToEnd:
             return result
 
         session = MagicMock()
-        session.execute.side_effect = [
-            _make_result(expiry_rows),
-            _make_result(nifty_rows),
-            _make_result(vix_rows),
-        ]
+        session.execute.side_effect = _dispatch_execute({
+            "from expiry_calendar": expiry_rows,
+            ":nid": nifty_rows,
+            ":vid": vix_rows,
+        })
 
         @contextmanager
         def fake_get_session():
@@ -1474,10 +1510,10 @@ class TestCyclesFromDbWeeklyEndToEnd:
             return result
 
         session = MagicMock()
-        session.execute.side_effect = [
-            _make_result(nifty_rows),
-            _make_result(vix_rows),
-        ]
+        session.execute.side_effect = _dispatch_execute({
+            ":nid": nifty_rows,
+            ":vid": vix_rows,
+        })
 
         @contextmanager
         def fake_get_session():
@@ -1679,6 +1715,11 @@ class TestIndexConfigAgnostic:
         captured = {}
 
         def _execute(stmt, params):
+            # option_atm_iv query (keyed by :sym) → no real-IV rows for this index
+            # → cycles stay on the VIX proxy. Returning [] keeps the 3-col contract.
+            if "sym" in params:
+                captured.setdefault("syms", []).append(params.get("sym"))
+                return _make_result([])
             captured.setdefault("ids", []).append(params.get("nid") or params.get("vid"))
             # First call → index rows, second → vix rows
             if params.get("nid") == "999":
@@ -2297,3 +2338,288 @@ class TestPhase0cQaFixes:
         assert rf["n_trades"] > 0 and rr["n_trades"] > 0
         assert all(t.delta_iv_source == "flat_atm" for t in rf["trades"])
         assert any(t.delta_iv_source == "real_per_strike" for t in rr["trades"])
+
+
+# ===========================================================================
+# SECTION 12 — Real-IV wiring (option_atm_iv JOIN) + gate-v2 routing
+# ===========================================================================
+# Backtest-only. All dates are explicit (no date.today()/naive now()) so the
+# suite is TZ-safe and passes identically under TZ=UTC (CI) and IST (dev Mac).
+
+
+@needs_condor
+class TestRealIvSanityFilter:
+    """is_plausible_real_iv gates the real ATM straddle IV read."""
+
+    def test_plausible_in_band(self):
+        from research.backtest.fno_condor import is_plausible_real_iv
+        assert is_plausible_real_iv(0.10) is True
+        assert is_plausible_real_iv(0.55) is True
+        assert is_plausible_real_iv(1.99) is True
+
+    def test_rejects_above_max(self):
+        # The pull had expiry-day blowups up to 5.2 (520 %) → must be rejected.
+        from research.backtest.fno_condor import REAL_IV_MAX, is_plausible_real_iv
+        assert is_plausible_real_iv(2.01) is False
+        assert is_plausible_real_iv(5.2) is False
+        assert is_plausible_real_iv(REAL_IV_MAX) is True  # boundary inclusive
+
+    def test_rejects_degenerate_low_and_none_and_nan(self):
+        from research.backtest.fno_condor import is_plausible_real_iv
+        assert is_plausible_real_iv(0.0) is False
+        assert is_plausible_real_iv(0.001) is False  # below REAL_IV_MIN
+        assert is_plausible_real_iv(-0.1) is False
+        assert is_plausible_real_iv(None) is False
+        assert is_plausible_real_iv(float("nan")) is False
+
+
+@needs_condor
+class TestResolveAtmIvPit:
+    """_resolve_atm_iv_pit picks the latest observation on/before entry (no look-ahead)."""
+
+    def test_picks_latest_on_or_before_entry(self):
+        from research.backtest.fno_condor import _resolve_atm_iv_pit
+        exp = date(2026, 1, 22)
+        iv_map = {exp: [
+            (date(2026, 1, 16), 0.10),
+            (date(2026, 1, 19), 0.12),  # latest <= entry 01-20
+            (date(2026, 1, 21), 0.99),  # AFTER entry → must NOT be seen (look-ahead)
+        ]}
+        assert _resolve_atm_iv_pit(iv_map, exp, date(2026, 1, 20)) == 0.12
+
+    def test_exact_entry_day_value_used(self):
+        from research.backtest.fno_condor import _resolve_atm_iv_pit
+        exp = date(2026, 1, 22)
+        iv_map = {exp: [(date(2026, 1, 19), 0.12), (date(2026, 1, 20), 0.15)]}
+        assert _resolve_atm_iv_pit(iv_map, exp, date(2026, 1, 20)) == 0.15
+
+    def test_no_observation_before_entry_returns_none(self):
+        from research.backtest.fno_condor import _resolve_atm_iv_pit
+        exp = date(2026, 1, 22)
+        iv_map = {exp: [(date(2026, 1, 21), 0.13)]}
+        assert _resolve_atm_iv_pit(iv_map, exp, date(2026, 1, 20)) is None
+
+    def test_missing_expiry_returns_none(self):
+        from research.backtest.fno_condor import _resolve_atm_iv_pit
+        assert _resolve_atm_iv_pit({}, date(2026, 1, 22), date(2026, 1, 20)) is None
+
+
+@needs_condor
+class TestCyclesFromDbRealIvJoin:
+    """option_atm_iv JOIN populates cycle['atm_straddle_iv'] PIT-correctly."""
+
+    # Two NIFTY weekly cycles, pre-cutover (Thursday expiries).
+    #   ISO week 1: Mon 01-05, Thu 01-08
+    #   ISO week 2: Mon 01-12, Thu 01-15
+    #   ISO week 3: Mon 01-19, Thu 01-22
+    # boundaries [01-08, 01-15, 01-22] → cycles (01-08→01-15), (01-15→01-22)
+    _NIFTY_ROWS = [
+        (date(2026, 1, 5),  23000.0, 0.10),
+        (date(2026, 1, 8),  23000.0, 0.10),
+        (date(2026, 1, 12), 23000.0, 0.10),
+        (date(2026, 1, 15), 23000.0, 0.10),
+        (date(2026, 1, 19), 23000.0, 0.10),
+        (date(2026, 1, 22), 23000.0, 0.10),
+    ]
+    _VIX_ROWS = [(d, 14.0) for d, *_ in _NIFTY_ROWS]  # VIX/100 = 0.14 proxy
+
+    @staticmethod
+    def _run(atm_rows, use_real_iv=True):
+        from research.backtest.fno_condor import cycles_from_db
+        fake_gs_factory = TestCyclesFromDbRealIvJoin._make_gs(atm_rows)
+        with patch("research.backtest.fno_condor.get_session", new=fake_gs_factory, create=True), \
+             patch("db.get_session", new=fake_gs_factory):
+            return cycles_from_db(mode="weekly", use_real_iv=use_real_iv)
+
+    @staticmethod
+    def _make_gs(atm_rows):
+        session = MagicMock()
+        session.execute.side_effect = _dispatch_execute({
+            ":nid": TestCyclesFromDbRealIvJoin._NIFTY_ROWS,
+            ":vid": TestCyclesFromDbRealIvJoin._VIX_ROWS,
+            "from option_atm_iv": atm_rows,
+        })
+
+        @contextmanager
+        def fake_get_session():
+            yield session
+
+        return fake_get_session
+
+    def test_real_iv_populated_pit_for_matching_expiry(self):
+        # Real IV observed for expiry 01-15 on/before entry 01-08 → cycle 0 gets it.
+        # Columns: (expiry_date, obs_date, straddle_iv)
+        atm = [
+            (date(2026, 1, 15), date(2026, 1, 8), 0.20),
+            (date(2026, 1, 22), date(2026, 1, 15), 0.22),
+        ]
+        cycles = self._run(atm)
+        assert cycles[0]["expiry_date"] == date(2026, 1, 15)
+        assert cycles[0]["atm_straddle_iv"] == 0.20
+        assert cycles[1]["expiry_date"] == date(2026, 1, 22)
+        assert cycles[1]["atm_straddle_iv"] == 0.22
+        # VIX proxy still present as the fallback.
+        assert cycles[0]["straddle_iv"] == pytest.approx(0.14)
+
+    def test_no_lookahead_observation_after_entry_ignored(self):
+        # Real IV for expiry 01-15 observed only 01-12 (AFTER entry 01-08) → cycle 0
+        # must NOT pick it up (look-ahead) → no atm_straddle_iv → VIX fallback.
+        atm = [(date(2026, 1, 15), date(2026, 1, 12), 0.20)]
+        cycles = self._run(atm)
+        assert "atm_straddle_iv" not in cycles[0]
+
+    def test_implausible_iv_filtered_falls_back_to_vix(self):
+        # 5.2 (520 %) expiry-day blowup for cycle 0's expiry → filtered → VIX proxy.
+        # cycle 1 gets a valid 0.20.
+        atm = [
+            (date(2026, 1, 15), date(2026, 1, 8), 5.2),
+            (date(2026, 1, 22), date(2026, 1, 15), 0.20),
+        ]
+        cycles = self._run(atm)
+        assert "atm_straddle_iv" not in cycles[0]      # blowup filtered
+        assert cycles[1]["atm_straddle_iv"] == 0.20
+
+    def test_use_real_iv_false_skips_join_entirely(self):
+        # Even with real rows present, use_real_iv=False must not enrich.
+        atm = [(date(2026, 1, 15), date(2026, 1, 8), 0.20)]
+        cycles = self._run(atm, use_real_iv=False)
+        assert all("atm_straddle_iv" not in c for c in cycles)
+
+    def test_default_is_vix_only_no_real_iv(self):
+        # cycles_from_db default (use_real_iv unset → False) must NOT enrich, so
+        # existing callers keep VIX-proxy behaviour. Real rows present but ignored.
+        from research.backtest.fno_condor import cycles_from_db
+        atm = [(date(2026, 1, 15), date(2026, 1, 8), 0.20)]
+        fake_gs = self._make_gs(atm)
+        with patch("research.backtest.fno_condor.get_session", new=fake_gs, create=True), \
+             patch("db.get_session", new=fake_gs):
+            cycles = cycles_from_db(mode="weekly")  # no use_real_iv → default False
+        assert all("atm_straddle_iv" not in c for c in cycles)
+        assert all(c["straddle_iv"] == pytest.approx(0.14) for c in cycles)
+
+    def test_empty_option_atm_iv_falls_back_to_vix(self):
+        # use_real_iv=True but the option_atm_iv query returns NO rows → every
+        # cycle stays on the VIX proxy, no crash, no atm_straddle_iv key.
+        cycles = self._run([], use_real_iv=True)
+        assert len(cycles) == 2
+        assert all("atm_straddle_iv" not in c for c in cycles)
+        assert all(c["straddle_iv"] == pytest.approx(0.14) for c in cycles)
+
+
+@needs_condor
+class TestResolveIvSourcePreference:
+    """resolve_iv_source prefers real ATM IV, then the VIX proxy."""
+
+    def test_prefers_real_when_present(self):
+        from research.backtest.fno_condor import IV_SOURCE_REAL, resolve_iv_source
+        iv, src = resolve_iv_source({"atm_straddle_iv": 0.20, "straddle_iv": 0.14})
+        assert iv == 0.20 and src == IV_SOURCE_REAL
+
+    def test_falls_back_to_vix_when_real_absent(self):
+        from research.backtest.fno_condor import IV_SOURCE_VIX_PROXY, resolve_iv_source
+        iv, src = resolve_iv_source({"straddle_iv": 0.14})
+        assert iv == 0.14 and src == IV_SOURCE_VIX_PROXY
+
+    def test_falls_back_when_real_nonpositive(self):
+        from research.backtest.fno_condor import IV_SOURCE_VIX_PROXY, resolve_iv_source
+        iv, src = resolve_iv_source({"atm_straddle_iv": 0.0, "straddle_iv": 0.14})
+        assert iv == 0.14 and src == IV_SOURCE_VIX_PROXY
+
+    def test_implausible_real_in_handbuilt_cycle_falls_back_to_vix(self):
+        # Defence-in-depth: a hand-built cycle (not via cycles_from_db, so unfiltered)
+        # carrying a 5.2 blowup must NOT be used — resolve_iv_source rejects it and
+        # falls back to the VIX proxy, so it never reaches pricing.
+        from research.backtest.fno_condor import IV_SOURCE_VIX_PROXY, resolve_iv_source
+        iv, src = resolve_iv_source({"atm_straddle_iv": 5.2, "straddle_iv": 0.14})
+        assert iv == 0.14 and src == IV_SOURCE_VIX_PROXY
+
+
+@needs_condor
+class TestGateV2Routing:
+    """use_gate_v2 routes run_backtest's per-cycle decision through gate_v2_decision."""
+
+    @staticmethod
+    def _cycle(entry, expiry, rvol, iv, spot=23000.0, expiry_spot=23000.0):
+        return {
+            "entry_date": entry,
+            "expiry_date": expiry,
+            "spot": spot,
+            "realized_vol_20d": rvol,
+            "straddle_iv": iv,
+            "dte": (expiry - entry).days,
+            "expiry_spot": expiry_spot,
+        }
+
+    def _sell_cycles(self):
+        # rvol << iv → v1 SELL_PREMIUM (rvol 0.08 < 0.9 * iv 0.20). 6 weekly cycles
+        # so the v2 percentile sub-gate has trailing history to engage.
+        cs = []
+        d = date(2026, 1, 1)
+        for i in range(6):
+            entry = d + timedelta(days=7 * i)
+            expiry = entry + timedelta(days=7)
+            cs.append(self._cycle(entry, expiry, 0.08, 0.20))
+        return cs
+
+    def test_v1_default_trades_when_v2_off(self):
+        cs = self._sell_cycles()
+        r = run_backtest(cs, k=0.9, move_mult=1.0, use_gate_v2=False)
+        assert r["n_trades"] > 0
+
+    def test_event_veto_blocks_under_v2(self):
+        # Mark every cycle's entry as an event day → gate-v2 vetoes ALL → 0 trades,
+        # while v1 (no event awareness) still trades. Isolates the v2 routing.
+        cs = self._sell_cycles()
+        event_dates = [c["entry_date"] for c in cs]
+        r_v1 = run_backtest(cs, k=0.9, move_mult=1.0, use_gate_v2=False)
+        r_v2 = run_backtest(
+            cs, k=0.9, move_mult=1.0, use_gate_v2=True, event_dates=event_dates,
+        )
+        assert r_v1["n_trades"] > 0
+        assert r_v2["n_trades"] == 0
+
+    def test_v2_never_more_aggressive_than_v1(self):
+        # GATE-V2 can only ever turn a v1 SELL into STAND_ASIDE → n_trades(v2) <= v1.
+        cs = self._sell_cycles()
+        r_v1 = run_backtest(cs, k=0.9, move_mult=1.0, use_gate_v2=False)
+        r_v2 = run_backtest(cs, k=0.9, move_mult=1.0, use_gate_v2=True)
+        assert r_v2["n_trades"] <= r_v1["n_trades"]
+
+    def test_no_events_v2_does_not_block_on_event(self):
+        # Isolates the event veto: with NO event dates, the event sub-gate cannot
+        # be the reason any cycle is blocked. Contrast with the all-events case
+        # (test_event_veto_blocks_under_v2) which drops to 0 trades. Here trades
+        # remain > 0, proving the all-events 0 was caused by the event veto.
+        cs = self._sell_cycles()
+        r_v2_noevt = run_backtest(
+            cs, k=0.9, move_mult=1.0, use_gate_v2=True, event_dates=[],
+        )
+        assert r_v2_noevt["n_trades"] > 0
+
+    def test_v2_defensively_sorts_shuffled_cycles(self):
+        # gate-v2's PIT trailing window needs entry-date ascending order. Passing a
+        # SHUFFLED cycle list must yield the SAME result as the sorted list (the
+        # defensive sort inside run_backtest restores chronological order).
+        import random
+        cs = self._sell_cycles()
+        shuffled = cs[:]
+        random.Random(7).shuffle(shuffled)
+        r_sorted = run_backtest(cs, k=0.9, move_mult=1.0, use_gate_v2=True)
+        r_shuffled = run_backtest(shuffled, k=0.9, move_mult=1.0, use_gate_v2=True)
+        assert r_shuffled["n_trades"] == r_sorted["n_trades"]
+        assert r_shuffled["net_pnl"] == pytest.approx(r_sorted["net_pnl"])
+
+
+@needs_condor
+class TestRealIvAbCli:
+    """The A/B CLI helper formats both runs without touching the DB directly."""
+
+    def test_fmt_metrics_renders_go_flag(self):
+        from research.backtest.fno_condor import _fmt_metrics
+        m = {
+            "n_cycles": 10, "n_trades": 7, "win_rate": 0.71,
+            "return_on_capital": 0.04, "sharpe": 1.2, "net_pnl": 8000.0,
+            "go_no_go": (True, "GO — ok"),
+        }
+        line = _fmt_metrics("B: gate-v2 + real-IV", m)
+        assert "GO" in line and "n_trades=" in line and "ROM=" in line

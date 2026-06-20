@@ -52,7 +52,13 @@ from typing import Any
 # interfaces so this file is ruff-clean + ast-parseable immediately).
 # ---------------------------------------------------------------------------
 from core.fno_derived import implied_move as _implied_move
-from ml.fno_vol_gate import SELL_PREMIUM, gate_decision
+from ml.fno_vol_gate import (
+    GateV2Config,
+    SELL_PREMIUM,
+    gate_decision,
+    gate_v2_decision,
+    vrp_spread,
+)
 from research.backtest.fno_costs import NIFTY_LOT, condor_costs, slippage
 
 # db and sqlalchemy are lazy-imported inside cycles_from_db so that
@@ -263,6 +269,35 @@ def snap_to_expiry_weekday(
 IV_SOURCE_REAL = "real_atm"      # option_atm_iv.straddle_iv (forward-collected)
 IV_SOURCE_VIX_PROXY = "vix_proxy"  # India VIX / 100 (historical fallback)
 
+# Real-IV sanity bounds (Phase-3 real-IV wiring). The forward option_atm_iv pull
+# had a handful of outliers up to 5.2 (520 %) — these are near-zero-DTE expiry-day
+# blowups where the straddle-IV solve diverges. A short-tenor ATM straddle IV
+# realistically tops out well below 200 % even in crisis regimes, so anything
+# above this ceiling is treated as implausible and the cycle falls back to the
+# VIX/100 proxy. Values at/below the floor (e.g. a degenerate 0.0) are likewise
+# rejected. These bounds gate ONLY the real read; the VIX proxy is unaffected.
+REAL_IV_MAX = 2.0    # 200 % annualised straddle IV — above this = implausible
+REAL_IV_MIN = 0.005  # 0.5 % — below this = degenerate / missing
+
+
+def is_plausible_real_iv(iv: float | None) -> bool:
+    """True when a real ATM straddle IV is within sane annualised bounds.
+
+    Rejects ``None``, non-positive, NaN, the near-zero-DTE expiry-day blowups
+    (> :data:`REAL_IV_MAX`, the pull had outliers up to 5.2) and degenerate
+    near-zero solves (< :data:`REAL_IV_MIN`). A rejected real IV makes the cycle
+    fall back to the VIX/100 proxy.
+    """
+    if iv is None:
+        return False
+    try:
+        v = float(iv)
+    except (TypeError, ValueError):
+        return False
+    if v != v:  # NaN
+        return False
+    return REAL_IV_MIN <= v <= REAL_IV_MAX
+
 
 def resolve_iv_source(cycle: dict[str, Any]) -> tuple[float | None, str]:
     """Pick the IV to price a cycle, preferring real ATM IV over the VIX proxy.
@@ -280,7 +315,11 @@ def resolve_iv_source(cycle: dict[str, Any]) -> tuple[float | None, str]:
     if real is not None:
         try:
             real_f = float(real)
-            if real_f > 0:
+            # Defence-in-depth: cycles_from_db already drops implausible reads in
+            # _build_atm_iv_map, but a hand-built cycle dict could carry one. Apply
+            # the same sanity bound here so an outlier (e.g. a 5.2 expiry-day
+            # blowup) can never reach pricing — it falls back to the VIX proxy.
+            if is_plausible_real_iv(real_f):
                 return real_f, IV_SOURCE_REAL
         except (TypeError, ValueError):
             pass
@@ -966,6 +1005,9 @@ def run_backtest(
     strike_method: str = STRIKE_METHOD_MOVE,
     target_delta: float = 0.16,
     exit_params: ExitParams | None = None,
+    use_gate_v2: bool = False,
+    gate_v2_cfg: GateV2Config | None = None,
+    event_dates: list[date] | None = None,
 ) -> dict[str, Any]:
     """Run the iron-condor backtest over a list of weekly NIFTY cycles.
 
@@ -1026,8 +1068,39 @@ def run_backtest(
     * ``"net_pnl"``           — total net P&L (₹)
     * ``"return_on_capital"`` — net_pnl / capital
     * ``"go_no_go"``          — output of :func:`go_no_go`
+
+    Gate selection (Phase-3)
+    ------------------------
+    ``use_gate_v2=False`` (default) keeps the v1 ``gate_decision`` (VRP threshold
+    ``k``). ``use_gate_v2=True`` routes the per-cycle SELL/STAND decision through
+    :func:`ml.fno_vol_gate.gate_v2_decision` — the v1 gate AND a VRP-percentile
+    sub-gate (PIT trailing IV−RV spreads from STRICTLY EARLIER cycles, no
+    look-ahead) AND an event/expiry veto (``event_dates``).
+
+    The backwardation sub-gate FAILS OPEN here: ``cycles_from_db`` only pulls the
+    FRONT-expiry ATM IV, so ``next_iv`` is unknown and the term-structure veto
+    cannot fire (it never blocks). This is a documented limitation of the
+    backtest path — the live/forward path can supply ``next_iv`` to enable it.
     """
     trades: list[CondorTrade] = []
+
+    # GATE-V2 needs chronological order for its PIT trailing-spread window (cycle N
+    # may only see spreads from cycles < N). cycles_from_db already returns
+    # entry-date ascending, but a future opt-in caller might not — so defensively
+    # sort ONLY on the gate-v2 path. The v1 (default) path is left in caller order
+    # so order-dependent metrics (max_drawdown peak-to-trough) stay faithful to the
+    # input sequence. Sorting an already-sorted list is idempotent.
+    if use_gate_v2:
+        cycles = sorted(cycles, key=lambda c: c.get("entry_date") or date.min)
+
+    # GATE-V2 state. ``k`` (the function arg) is the calibrated VRP threshold; mirror
+    # it into the v2 config so v1-inside-v2 uses the SAME k as the v1 path (an
+    # A/B on the same cycles differs ONLY in the v2 refinements, not in k).
+    v2_cfg = gate_v2_cfg or GateV2Config(k=k)
+    # PIT trailing IV−RV spreads — appended AFTER each cycle's decision so cycle N
+    # only ever sees spreads from cycles < N (now guaranteed: gate-v2 input is
+    # sorted entry-date ascending just above).
+    trailing_spreads: list[float | None] = []
 
     for cycle in cycles:
         # Guard: skip malformed cycles (missing required keys or None-valued fields).
@@ -1085,11 +1158,40 @@ def run_backtest(
         # Day-count fix #2: rebase √252 realized vol onto the calendar (365)
         # basis so it is comparable to the calendar-annualised implied vol.
         realized_vol_cal = realized_vol_to_calendar_basis(realized_vol_20d)
-        decision = gate_decision(realized_vol_cal, straddle_iv, k=k)
+
+        if use_gate_v2:
+            # GATE-V2: v1 AND VRP-percentile (PIT) AND event/expiry veto.
+            # backwardation veto fails open (only front-expiry IV available).
+            # trailing_spreads holds spreads from STRICTLY EARLIER cycles → no
+            # look-ahead (we append THIS cycle's spread only after deciding).
+            v2 = gate_v2_decision(
+                realized_vol_cal,
+                straddle_iv,
+                trailing_spreads=trailing_spreads,
+                front_iv=straddle_iv,
+                next_iv=None,  # next-expiry IV not pulled → backwardation fails open
+                cycle_date=entry_date,
+                expiry_date=expiry_date,
+                event_dates=event_dates,
+                rv_is_trading_basis=False,  # realized_vol_cal already calendar-basis
+                cfg=v2_cfg,
+            )
+            decision = v2.decision
+            gate_label = "gate_v2"
+        else:
+            decision = gate_decision(realized_vol_cal, straddle_iv, k=k)
+            gate_label = "gate_v1"
+
+        # PIT trailing-spread bookkeeping — record THIS cycle's IV−RV spread AFTER
+        # deciding, so the next cycle (and only the next) can see it. Done for
+        # both gate paths so an A/B shares an identical trailing series.
+        _spread = vrp_spread(realized_vol_cal, straddle_iv)
+        trailing_spreads.append(_spread)
+
         logger.debug(
-            "Cycle %s: iv_source=%s iv=%.4f settle_source=%s realized(252)=%.4f "
+            "Cycle %s: %s iv_source=%s iv=%.4f settle_source=%s realized(252)=%.4f "
             "realized(365)=%.4f gate=%s",
-            cycle.get("cycle_id", entry_date), iv_source, straddle_iv,
+            cycle.get("cycle_id", entry_date), gate_label, iv_source, straddle_iv,
             settlement_source, realized_vol_20d, realized_vol_cal or 0.0, decision,
         )
         if decision != SELL_PREMIUM:
@@ -1472,6 +1574,7 @@ def cycles_from_db(
     timeframe: str = "1d",
     mode: str = "weekly",
     entry_dte: int | None = None,
+    use_real_iv: bool = False,
 ) -> list[dict]:
     """Assemble weekly iron-condor cycles from the DB tables created in migrations 009/010.
 
@@ -1501,6 +1604,12 @@ def cycles_from_db(
                 ``mode="weekly"``** — the ``expiry_calendar`` (forward/live) path
                 ignores it (it pairs consecutive expiry dates and has no
                 intermediate trading-day grid to re-anchor onto).
+    use_real_iv: When True, JOIN ``option_atm_iv`` and PIT-enrich each cycle with
+                the real front-expiry ATM straddle IV (``atm_straddle_iv``);
+                :func:`resolve_iv_source` then prefers it over the VIX/100 proxy,
+                falling back to VIX where no plausible real IV exists. Default
+                **False** — OPT-IN, so existing callers keep their VIX-proxy
+                behaviour unchanged; the real-IV A/B (``_ab_main``) flips it on.
     mode:       Cycle-boundary strategy:
 
                 ``"weekly"`` *(default — historical backtest path)*
@@ -1577,13 +1686,19 @@ def cycles_from_db(
 
     tf = timeframe
 
+    # Real-IV symbol: option_atm_iv keys on the underlying symbol (e.g. "NIFTY"),
+    # which matches the effective index symbol. None when real IV is disabled.
+    iv_symbol = eff_symbol if use_real_iv else None
+
     if mode == "weekly":
         return _cycles_from_db_weekly(
-            eff_index_id, eff_vix_id, tf, get_session, text, index, entry_dte=entry_dte
+            eff_index_id, eff_vix_id, tf, get_session, text, index,
+            entry_dte=entry_dte, iv_symbol=iv_symbol,
         )
     else:
         return _cycles_from_db_expiry_calendar(
-            eff_symbol, eff_index_id, eff_vix_id, tf, get_session, text
+            eff_symbol, eff_index_id, eff_vix_id, tf, get_session, text,
+            iv_symbol=iv_symbol,
         )
 
 
@@ -1623,14 +1738,103 @@ def _build_bar_maps(
     return index_map, vix_map
 
 
+def _build_atm_iv_map(
+    session: Any,
+    text: Any,
+    symbol: str,
+    tf: str | None = None,  # noqa: ARG001 — option_atm_iv has no timeframe column
+) -> dict[date, list[tuple[date, float]]]:
+    """Query ``option_atm_iv`` for ``symbol`` → per-expiry PIT-sorted IV series.
+
+    Returns a map ``{expiry_date: [(obs_date, straddle_iv), ...]}`` where each
+    per-expiry list is sorted ascending by observation date. This lets
+    :func:`_resolve_atm_iv_pit` pick the latest straddle IV observed **on or
+    before** a cycle's entry date for that cycle's expiry — strict point-in-time,
+    no look-ahead (an entry on day T can only see ``time::date <= T`` rows).
+
+    The IV-sanity filter (:func:`is_plausible_real_iv`) is applied here so
+    implausible rows (>200 % expiry-day blowups, degenerate ~0) never enter the
+    map and the cycle naturally falls back to the VIX proxy.
+
+    ``straddle_iv`` is already an annualised fraction (core/fno_backfill stores
+    it normalised) — used as-is, NOT divided by 100 (unlike the VIX path).
+    """
+    rows = session.execute(
+        text(
+            "SELECT expiry_date, (time AT TIME ZONE 'UTC')::date AS d, straddle_iv "
+            "FROM option_atm_iv "
+            "WHERE symbol = :sym AND straddle_iv IS NOT NULL "
+            # ORDER BY ... time ASC so when a single date carries multiple samples
+            # the PIT loop (which keeps the LAST row <= entry) lands on the LATEST
+            # observation of that day — deterministic, no future leak (still same
+            # day). Ingestion is once/day today; this is defensive for intraday.
+            "ORDER BY expiry_date, d, time"
+        ),
+        {"sym": symbol},
+    ).fetchall()
+
+    iv_map: dict[date, list[tuple[date, float]]] = {}
+    n_total = 0
+    n_filtered = 0
+    for r in rows:
+        exp, d, siv = r[0], r[1], r[2]
+        n_total += 1
+        if not is_plausible_real_iv(siv):
+            n_filtered += 1
+            continue
+        iv_map.setdefault(exp, []).append((d, float(siv)))
+
+    if n_filtered:
+        logger.info(
+            "cycles_from_db: option_atm_iv[%s] dropped %d/%d rows by IV-sanity "
+            "filter (straddle_iv outside [%.3f, %.1f]); these cycles fall back to VIX.",
+            symbol, n_filtered, n_total, REAL_IV_MIN, REAL_IV_MAX,
+        )
+    return iv_map
+
+
+def _resolve_atm_iv_pit(
+    iv_map: dict[date, list[tuple[date, float]]],
+    expiry_date: date,
+    entry_date: date,
+) -> float | None:
+    """PIT-resolve the real ATM straddle IV for one cycle (no look-ahead).
+
+    Picks the latest ``straddle_iv`` observed on or before ``entry_date`` for the
+    cycle's ``expiry_date``. Returns ``None`` when no qualifying observation
+    exists (caller then leaves the cycle on the VIX proxy).
+    """
+    series = iv_map.get(expiry_date)
+    if not series:
+        return None
+    # series is sorted ascending by obs date; take the last one <= entry_date.
+    chosen: float | None = None
+    for obs_date, siv in series:
+        if obs_date <= entry_date:
+            chosen = siv
+        else:
+            break
+    return chosen
+
+
 def _build_cycles_from_pairs(
     boundary_pairs: list[tuple[date, date]],
     index_map: dict,
     vix_map: dict,
     mode: str,
+    atm_iv_map: dict[date, list[tuple[date, float]]] | None = None,
 ) -> list[dict]:
-    """Convert (entry, expiry) date pairs into cycle dicts, skipping incomplete ones."""
+    """Convert (entry, expiry) date pairs into cycle dicts, skipping incomplete ones.
+
+    When ``atm_iv_map`` is supplied (real option_atm_iv data), each cycle is
+    enriched with a PIT-resolved ``atm_straddle_iv`` so :func:`resolve_iv_source`
+    prefers the real per-expiry IV over the VIX/100 proxy. Cycles with no
+    qualifying real observation keep only the VIX proxy. Per-run real-vs-proxy
+    counts are logged.
+    """
     cycles: list[dict] = []
+    n_real = 0
+    n_proxy = 0
     for e_i, e_next in boundary_pairs:
         na = index_map.get(e_i)
         if na is None or na[1] is None:
@@ -1657,16 +1861,37 @@ def _build_cycles_from_pairs(
             continue
 
         spot, rvol = na
-        cycles.append(
-            {
-                "entry_date": e_i,
-                "expiry_date": e_next,
-                "spot": spot,
-                "realized_vol_20d": rvol,
-                "straddle_iv": va / 100.0,
-                "dte": (e_next - e_i).days,
-                "expiry_spot": nb[0],
-            }
+        cycle: dict[str, Any] = {
+            "entry_date": e_i,
+            "expiry_date": e_next,
+            "spot": spot,
+            "realized_vol_20d": rvol,
+            "straddle_iv": va / 100.0,
+            "dte": (e_next - e_i).days,
+            "expiry_spot": nb[0],
+        }
+
+        # Real-IV enrichment (Phase-3): PIT-resolve the front-expiry ATM straddle
+        # IV as of the cycle's entry date. resolve_iv_source then prefers this
+        # real value; VIX/100 stays as the fallback. Plausibility-filtered rows
+        # were already dropped in _build_atm_iv_map → those cycles use VIX.
+        if atm_iv_map is not None:
+            real_iv = _resolve_atm_iv_pit(atm_iv_map, e_next, e_i)
+            if real_iv is not None:
+                cycle["atm_straddle_iv"] = real_iv
+                n_real += 1
+            else:
+                n_proxy += 1
+        else:
+            n_proxy += 1
+
+        cycles.append(cycle)
+
+    if atm_iv_map is not None:
+        logger.info(
+            "cycles_from_db[%s]: built %d cycles — %d on REAL ATM IV (option_atm_iv), "
+            "%d on VIX/100 proxy (no PIT real-IV row).",
+            mode, len(cycles), n_real, n_proxy,
         )
     return cycles
 
@@ -1680,6 +1905,7 @@ def _cycles_from_db_weekly(
     index: IndexConfig = NIFTY,
     *,
     entry_dte: int | None = None,
+    iv_symbol: str | None = None,
 ) -> list[dict]:
     """Historical-backtest path: synthetic ISO-week boundaries from index_bars.
 
@@ -1688,9 +1914,15 @@ def _cycles_from_db_weekly(
     pairs as (entry, expiry) windows. This avoids the forward-only limitation of
     ``expiry_calendar``. Validated live on NIFTY: 233 weekly cycles / 164 trades
     over the full bar history.
+
+    When ``iv_symbol`` is given, ``option_atm_iv`` for that symbol is loaded and
+    each cycle is PIT-enriched with the real front-expiry ATM straddle IV.
     """
     with get_session() as session:
         index_map, vix_map = _build_bar_maps(session, text, index_id, vix_id, tf)
+        atm_iv_map = (
+            _build_atm_iv_map(session, text, iv_symbol) if iv_symbol else None
+        )
 
     if len(index_map) < 2:
         logger.warning(
@@ -1737,7 +1969,7 @@ def _cycles_from_db_weekly(
             entry_day = pick_entry_day_for_dte(all_days, expiry, entry_dte)
             if entry_day is not None and entry_day < expiry:
                 pairs.append((entry_day, expiry))
-    cycles = _build_cycles_from_pairs(pairs, index_map, vix_map, "weekly")
+    cycles = _build_cycles_from_pairs(pairs, index_map, vix_map, "weekly", atm_iv_map)
 
     if len(cycles) == 0:
         logger.warning(
@@ -1757,12 +1989,16 @@ def _cycles_from_db_expiry_calendar(
     tf: str,
     get_session: Any,
     text: Any,
+    iv_symbol: str | None = None,
 ) -> list[dict]:
     """Forward/live path: cycle boundaries from expiry_calendar.
 
     Reads weekly (or all) expiry dates from ``expiry_calendar`` and pairs
     consecutive dates as (entry, expiry) windows.  Suitable once historical
     expiries are recorded in the table, or for forward-looking simulation.
+
+    When ``iv_symbol`` is given, ``option_atm_iv`` is loaded and each cycle is
+    PIT-enriched with the real front-expiry ATM straddle IV.
     """
     with get_session() as session:
         # ── 1. Expiry dates ──────────────────────────────────────────────────
@@ -1797,9 +2033,14 @@ def _cycles_from_db_expiry_calendar(
             return []
 
         index_map, vix_map = _build_bar_maps(session, text, index_id, vix_id, tf)
+        atm_iv_map = (
+            _build_atm_iv_map(session, text, iv_symbol) if iv_symbol else None
+        )
 
     pairs = list(zip(expiry_dates[:-1], expiry_dates[1:]))
-    cycles = _build_cycles_from_pairs(pairs, index_map, vix_map, "expiry_calendar")
+    cycles = _build_cycles_from_pairs(
+        pairs, index_map, vix_map, "expiry_calendar", atm_iv_map
+    )
 
     if len(cycles) == 0 and len(expiry_dates) >= 2:
         if not index_map and not vix_map:
@@ -1819,3 +2060,104 @@ def _cycles_from_db_expiry_calendar(
             )
 
     return cycles
+
+
+# ---------------------------------------------------------------------------
+# A/B CLI — gate-v1 + VIX  vs  gate-v2 + real-IV, on the SAME cycles
+# ---------------------------------------------------------------------------
+# Backtest-only. Reads index_bars + option_atm_iv (dhan_trading); NEVER touches
+# the live trader/engine/Kronos. Runs two backtests over one cycle pull and
+# prints a side-by-side A/B so the real-IV + gate-v2 effect is isolated.
+
+
+def _fmt_metrics(label: str, m: dict[str, Any]) -> str:
+    """One-line metrics summary for the A/B printout."""
+    go, reason = m.get("go_no_go", (False, "n/a"))
+    return (
+        f"  {label:<22} n_cycles={m['n_cycles']:>4}  n_trades={m['n_trades']:>4}  "
+        f"win={m['win_rate']:.2%}  ROM={m['return_on_capital']:.2%}  "
+        f"sharpe={m['sharpe']:.2f}  net=₹{m['net_pnl']:,.0f}  "
+        f"{'GO' if go else 'NO-GO'}"
+    )
+
+
+def _ab_main(argv: list[str] | None = None) -> int:
+    """A/B: (gate-v1 + VIX proxy)  vs  (gate-v2 + real-IV) on identical cycles.
+
+    The two runs differ ONLY in the gate (v1 vs v2) and the IV source (VIX proxy
+    vs real option_atm_iv), so the diff isolates the real-IV + gate-v2 effect.
+    """
+    import argparse  # noqa: PLC0415
+
+    p = argparse.ArgumentParser(
+        prog="python -m research.backtest.fno_condor",
+        description="A/B the iron-condor backtest: gate-v1+VIX vs gate-v2+real-IV "
+        "(backtest-only — does NOT touch the live trader).",
+    )
+    p.add_argument("--symbol", default=NIFTY.symbol, help="underlying symbol (default NIFTY)")
+    p.add_argument("--mode", default="weekly", choices=["weekly", "expiry_calendar"])
+    p.add_argument("--timeframe", default="1d")
+    p.add_argument("--k", type=float, default=0.9, help="VRP gate threshold (default 0.9)")
+    p.add_argument("--capital", type=float, default=200_000.0)
+    p.add_argument("--entry-dte", type=int, default=None)
+    p.add_argument(
+        "--json", default=None, help="write the A/B result dict to this JSON path"
+    )
+    args = p.parse_args(argv)
+
+    from dotenv import load_dotenv  # noqa: PLC0415
+
+    load_dotenv()
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s — %(message)s")
+
+    from config import get_config  # noqa: PLC0415
+    from db import init_db  # noqa: PLC0415
+
+    cfg = get_config()
+    init_db(cfg.db_url)  # F&O tables (index_bars/option_atm_iv) live in dhan_trading
+    logger.info("F&O A/B DB = %s", cfg.db_name)
+
+    # Side A: VIX-proxy cycles (real-IV OFF) + gate-v1.
+    cycles_vix = cycles_from_db(
+        symbol=args.symbol, mode=args.mode, timeframe=args.timeframe,
+        entry_dte=args.entry_dte, use_real_iv=False,
+    )
+    # Side B: real-IV cycles (option_atm_iv) + gate-v2.
+    cycles_real = cycles_from_db(
+        symbol=args.symbol, mode=args.mode, timeframe=args.timeframe,
+        entry_dte=args.entry_dte, use_real_iv=True,
+    )
+
+    a = run_backtest(cycles_vix, k=args.k, capital=args.capital, use_gate_v2=False)
+    b = run_backtest(
+        cycles_real, k=args.k, capital=args.capital,
+        use_gate_v2=True, gate_v2_cfg=GateV2Config(k=args.k),
+    )
+
+    print("\n=== F&O iron-condor A/B  (symbol=%s, mode=%s) ===" % (args.symbol, args.mode))
+    print(_fmt_metrics("A: gate-v1 + VIX", a))
+    print(_fmt_metrics("B: gate-v2 + real-IV", b))
+    print(
+        "  NOTE: backwardation veto fails-open (only front-expiry IV pulled — "
+        "next_iv unavailable), so gate-v2 here is LOOSER than live would be. "
+        "PRELIMINARY — close-not-FSP, expiry-only.\n"
+    )
+
+    if args.json:
+        import json  # noqa: PLC0415
+
+        with open(args.json, "w") as fh:
+            json.dump(
+                {
+                    "symbol": args.symbol, "mode": args.mode, "k": args.k,
+                    "A_gate_v1_vix": {kk: vv for kk, vv in a.items() if kk != "trades"},
+                    "B_gate_v2_real": {kk: vv for kk, vv in b.items() if kk != "trades"},
+                },
+                fh, indent=2, default=str,
+            )
+        logger.info("A/B result written → %s", args.json)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_ab_main())
