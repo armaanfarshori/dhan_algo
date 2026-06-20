@@ -139,6 +139,254 @@ def test_backfill_mcx_bars_intraday_uses_interval(monkeypatch, tmp_path):
     assert captured["rows"][0]["timeframe"] == "5min"
 
 
+# ── intraday 90-day windowing (DH-905 fix) ─────────────────────────────────────────
+def test_intraday_windows_single_window_under_90_days():
+    w = mb._intraday_windows("2026-06-01", "2026-06-18")
+    assert w == [("2026-06-01", "2026-06-18")]
+
+
+def test_intraday_windows_exactly_90_days_is_one_window():
+    # 2026-01-01 .. 2026-03-31 inclusive = 90 distinct days → single window.
+    w = mb._intraday_windows("2026-01-01", "2026-03-31")
+    assert len(w) == 1
+    assert w[0] == ("2026-01-01", "2026-03-31")
+
+
+def test_intraday_windows_over_90_days_splits_with_no_gaps_or_overlaps():
+    from datetime import date as _date, datetime as _dt, timedelta as _td
+
+    from_d, to_d = "2025-01-01", "2026-06-18"
+    w = mb._intraday_windows(from_d, to_d)
+    assert len(w) > 1
+    # First window starts at from_date; last window ends at to_date.
+    assert w[0][0] == from_d
+    assert w[-1][1] == to_d
+    # Every window is ≤90 days and contiguous (next.from == prev.to + 1 day),
+    # with no overlap and no gap.
+    for (f, t) in w:
+        fd = _dt.strptime(f, "%Y-%m-%d").date()
+        td = _dt.strptime(t, "%Y-%m-%d").date()
+        assert fd <= td
+        assert (td - fd).days + 1 <= mb._MAX_INTRADAY_CHUNK
+    for prev, nxt in zip(w, w[1:]):
+        prev_to = _dt.strptime(prev[1], "%Y-%m-%d").date()
+        nxt_from = _dt.strptime(nxt[0], "%Y-%m-%d").date()
+        assert nxt_from == prev_to + _td(days=1)
+    # Full span is covered exactly once.
+    assert _dt.strptime(w[0][0], "%Y-%m-%d").date() == _date(2025, 1, 1)
+    assert _dt.strptime(w[-1][1], "%Y-%m-%d").date() == _date(2026, 6, 18)
+
+
+def test_intraday_windows_inverted_range_raises():
+    with pytest.raises(ValueError):
+        mb._intraday_windows("2026-06-18", "2026-01-01")
+
+
+def test_backfill_mcx_bars_intraday_windows_long_range(monkeypatch, tmp_path):
+    """A >90-day intraday range fans out into multiple windowed intraday calls
+    covering the full span with ≤90-day bounds; row counts sum across windows."""
+    monkeypatch.setattr(mb, "_upsert_mcx_bars", lambda rows: len(rows))
+    monkeypatch.setattr(mb, "CHECKPOINT_DIR", tmp_path / "cp")
+    # No real sleeping in tests.
+    async def _no_sleep(*_a, **_k):
+        return None
+    monkeypatch.setattr(mb.asyncio, "sleep", _no_sleep)
+
+    client = _FakeClient()
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=IST)
+    n = asyncio.run(
+        mb.backfill_mcx_bars(
+            client, "GOLDM", "222222", "2025-01-01", "2026-06-18",
+            timeframe="5min", interval="5", now=now,
+        )
+    )
+    intraday_calls = [c for c in client.calls if c[0] == "intraday"]
+    expected_windows = mb._intraday_windows("2025-01-01", "2026-06-18")
+    assert len(intraday_calls) == len(expected_windows) > 1
+    # Each call carried the right segment/instrument/interval + ≤90-day bounds.
+    seen = []
+    for (_, kw) in intraday_calls:
+        assert kw["exchange_segment"] == "MCX_COMM"
+        assert kw["instrument"] == "FUTCOM"
+        assert kw["interval"] == "5"
+        seen.append((kw["from_date"], kw["to_date"]))
+    assert seen == expected_windows  # exact span coverage, in order
+    # Each FakeClient call yields 1 row → summed across windows.
+    assert n == len(expected_windows)
+    # Checkpoint advanced to the final window end, total rows recorded.
+    cp = mb.read_checkpoint("222222", "5min")
+    assert cp["to_date"] == "2026-06-18"
+    assert cp["rows"] == n
+
+
+def test_backfill_mcx_bars_intraday_resumes_from_checkpoint(monkeypatch, tmp_path):
+    """A pre-existing checkpoint (matching from_date, partial to_date) makes the
+    next run fetch ONLY the remaining windows (after cp["to_date"]) and return a
+    total that includes the carried-forward checkpoint rows."""
+    monkeypatch.setattr(mb, "_upsert_mcx_bars", lambda rows: len(rows))
+    monkeypatch.setattr(mb, "CHECKPOINT_DIR", tmp_path / "cp")
+    async def _no_sleep(*_a, **_k):
+        return None
+    monkeypatch.setattr(mb.asyncio, "sleep", _no_sleep)
+
+    from_d, to_d = "2025-01-01", "2026-06-18"
+    all_windows = mb._intraday_windows(from_d, to_d)
+    assert len(all_windows) > 2  # need a partial checkpoint mid-range
+    # Pretend the first two windows already completed, carrying 7 rows.
+    cp_to = all_windows[1][1]
+    mb.write_checkpoint(
+        "222222", "5min",
+        {"symbol": "GOLDM", "security_id": "222222", "from_date": from_d,
+         "to_date": cp_to, "timeframe": "5min", "rows": 7},
+    )
+
+    client = _FakeClient()
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=IST)
+    n = asyncio.run(
+        mb.backfill_mcx_bars(
+            client, "GOLDM", "222222", from_d, to_d,
+            timeframe="5min", interval="5", now=now,
+        )
+    )
+    # Only the windows AFTER the checkpoint should be fetched.
+    from datetime import date as _date, timedelta as _td
+    resume_from = (_date.fromisoformat(cp_to) + _td(days=1)).strftime("%Y-%m-%d")
+    remaining = mb._intraday_windows(resume_from, to_d)
+    intraday_calls = [c for c in client.calls if c[0] == "intraday"]
+    assert len(intraday_calls) == len(remaining)
+    seen = [(kw["from_date"], kw["to_date"]) for (_, kw) in intraday_calls]
+    assert seen == remaining
+    # Total = carried 7 + 1 row per remaining window.
+    assert n == 7 + len(remaining)
+    # Checkpoint advanced to the requested end.
+    assert mb.read_checkpoint("222222", "5min")["to_date"] == to_d
+
+
+def test_backfill_mcx_bars_intraday_mismatched_checkpoint_full_refetch(monkeypatch, tmp_path):
+    """A checkpoint whose from_date differs from the requested from_date is
+    ignored → the full range is re-fetched and rows are NOT carried forward."""
+    monkeypatch.setattr(mb, "_upsert_mcx_bars", lambda rows: len(rows))
+    monkeypatch.setattr(mb, "CHECKPOINT_DIR", tmp_path / "cp")
+    async def _no_sleep(*_a, **_k):
+        return None
+    monkeypatch.setattr(mb.asyncio, "sleep", _no_sleep)
+
+    from_d, to_d = "2025-01-01", "2026-06-18"
+    all_windows = mb._intraday_windows(from_d, to_d)
+    # Checkpoint for a DIFFERENT requested from_date — must be ignored.
+    mb.write_checkpoint(
+        "222222", "5min",
+        {"symbol": "GOLDM", "security_id": "222222", "from_date": "2024-01-01",
+         "to_date": all_windows[1][1], "timeframe": "5min", "rows": 999},
+    )
+
+    client = _FakeClient()
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=IST)
+    n = asyncio.run(
+        mb.backfill_mcx_bars(
+            client, "GOLDM", "222222", from_d, to_d,
+            timeframe="5min", interval="5", now=now,
+        )
+    )
+    intraday_calls = [c for c in client.calls if c[0] == "intraday"]
+    assert len(intraday_calls) == len(all_windows)  # full re-fetch
+    seen = [(kw["from_date"], kw["to_date"]) for (_, kw) in intraday_calls]
+    assert seen == all_windows
+    assert n == len(all_windows)  # no carried-forward 999
+
+
+def test_backfill_mcx_bars_intraday_single_day(monkeypatch, tmp_path):
+    """A single-day (from==to) intraday range = exactly one window, one fetch."""
+    monkeypatch.setattr(mb, "_upsert_mcx_bars", lambda rows: len(rows))
+    monkeypatch.setattr(mb, "CHECKPOINT_DIR", tmp_path / "cp")
+    async def _no_sleep(*_a, **_k):
+        return None
+    monkeypatch.setattr(mb.asyncio, "sleep", _no_sleep)
+
+    client = _FakeClient()
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=IST)
+    n = asyncio.run(
+        mb.backfill_mcx_bars(
+            client, "GOLDM", "222222", "2026-06-10", "2026-06-10",
+            timeframe="5min", interval="5", now=now,
+        )
+    )
+    intraday_calls = [c for c in client.calls if c[0] == "intraday"]
+    assert len(intraday_calls) == 1
+    _, kw = intraday_calls[0]
+    assert kw["from_date"] == "2026-06-10"
+    assert kw["to_date"] == "2026-06-10"
+    assert n == 1
+
+
+def test_backfill_mcx_bars_intraday_retries_on_dh904(monkeypatch, tmp_path):
+    """A DH-904 on a window is retried (with backoff) rather than dropped, on a
+    MULTI-window range — and the loop proceeds to the next window after retry."""
+    monkeypatch.setattr(mb, "_upsert_mcx_bars", lambda rows: len(rows))
+    monkeypatch.setattr(mb, "CHECKPOINT_DIR", tmp_path / "cp")
+    sleeps: list = []
+    async def _rec_sleep(s):
+        sleeps.append(s)
+    monkeypatch.setattr(mb.asyncio, "sleep", _rec_sleep)
+
+    # >90 days → multiple windows.
+    from_d, to_d = "2025-01-01", "2026-06-18"
+    expected_windows = mb._intraday_windows(from_d, to_d)
+    assert len(expected_windows) > 1
+
+    class _FlakyClient(_FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.attempts = 0
+
+        async def get_intraday_historical(self, **kw):
+            self.attempts += 1
+            # DH-904 only on the very first attempt of the first window.
+            if self.attempts == 1:
+                raise RuntimeError("DH-904: Too many requests")
+            return await super().get_intraday_historical(**kw)
+
+    client = _FlakyClient()
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=IST)
+    n = asyncio.run(
+        mb.backfill_mcx_bars(
+            client, "GOLDM", "222222", from_d, to_d,
+            timeframe="5min", interval="5", now=now,
+        )
+    )
+    # First window: 1 DH-904 + 1 success = 2 attempts; remaining windows: 1 each.
+    assert client.attempts == len(expected_windows) + 1
+    # The loop still covered every window (one successful intraday call each).
+    intraday_calls = [c for c in client.calls if c[0] == "intraday"]
+    assert len(intraday_calls) == len(expected_windows)
+    seen = [(kw["from_date"], kw["to_date"]) for (_, kw) in intraday_calls]
+    assert seen == expected_windows
+    assert n == len(expected_windows)
+    assert mb._DH904_RETRY_WAIT[0] in sleeps  # backed off
+
+
+def test_backfill_mcx_bars_intraday_non_dh904_propagates(monkeypatch, tmp_path):
+    """A non-DH-904 error is NOT swallowed by the retry loop."""
+    monkeypatch.setattr(mb, "_upsert_mcx_bars", lambda rows: len(rows))
+    monkeypatch.setattr(mb, "CHECKPOINT_DIR", tmp_path / "cp")
+    async def _no_sleep(*_a, **_k):
+        return None
+    monkeypatch.setattr(mb.asyncio, "sleep", _no_sleep)
+
+    class _BoomClient(_FakeClient):
+        async def get_intraday_historical(self, **kw):
+            raise RuntimeError("DH-905: boom")
+
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=IST)
+    with pytest.raises(RuntimeError, match="DH-905"):
+        asyncio.run(
+            mb.backfill_mcx_bars(
+                _BoomClient(), "GOLDM", "222222", "2026-06-01", "2026-06-18",
+                timeframe="5min", interval="5", now=now,
+            )
+        )
+
+
 def test_backfill_mcx_bars_refuses_in_market_hours(monkeypatch):
     monkeypatch.setattr(mb, "_upsert_mcx_bars", lambda rows: 1 / 0)  # must never run
     client = _FakeClient()
