@@ -240,6 +240,7 @@ def extract_atm_iv(
     expiry_type: Optional[str] = None,
     step: int = 50,
     now: Optional[datetime] = None,
+    nearest: bool = False,
 ) -> Optional[dict[str, Any]]:
     """Pull the ATM call/put IV out of a Dhan option-chain response.
 
@@ -247,6 +248,11 @@ def extract_atm_iv(
     {"ce": {"implied_volatility": .., "greeks": {..}}, "pe": {..}}, ...}}}``.
     Returns one option_atm_iv row, or None if the ATM strike is missing.
     IV is normalised to a fraction; ``straddle_iv`` = mean(call_iv, put_iv).
+
+    ``nearest`` (default False, preserving the strict index behaviour): if the
+    computed ATM strike is absent from the chain, snap to the chain strike NEAREST
+    to spot instead of returning None. Enabled for stock options, whose per-
+    underlying strike step is not a fixed constant.
     """
     data = (chain.get("data") or chain) if isinstance(chain, dict) else {}
     spot = data.get("last_price")
@@ -268,7 +274,27 @@ def extract_atm_iv(
 
     node = _find(atm)
     if node is None:
-        return None
+        if not nearest:
+            return None
+        # Fallback for stock options (per-underlying strike step is not a fixed
+        # constant): snap to the chain strike NEAREST to spot.
+        nearest_strike: Optional[int] = None
+        nearest_node: Optional[dict[str, Any]] = None
+        best_dist = float("inf")
+        for k, v in oc.items():
+            try:
+                kf = float(k)
+            except (TypeError, ValueError):
+                continue
+            dist = abs(kf - spot)
+            if dist < best_dist:
+                best_dist = dist
+                nearest_strike = int(round(kf))
+                nearest_node = v if isinstance(v, dict) else None
+        if nearest_node is None:
+            return None
+        atm = nearest_strike if nearest_strike is not None else atm
+        node = nearest_node
     call_iv = _normalize_iv((node.get("ce") or {}).get("implied_volatility"))
     put_iv = _normalize_iv((node.get("pe") or {}).get("implied_volatility"))
     straddle_iv = (call_iv + put_iv) / 2 if (call_iv is not None and put_iv is not None) else None
@@ -580,12 +606,15 @@ async def backfill_futures_bars(
     to_date: str,
     *,
     timeframe: str = "1d",
+    instrument: str = "FUTIDX",
     expiry_date: Optional[date] = None,
     now: Optional[datetime] = None,
 ) -> int:
-    """Fetch NSE_FNO index-futures OHLCV+OI for one contract and upsert into
+    """Fetch NSE_FNO futures OHLCV+OI for one contract and upsert into
     futures_bars. ``security_id`` is the futures contract id (from the
-    instruments master). Off-hours only.
+    instruments master). ``instrument`` selects the contract class —
+    ``"FUTIDX"`` (index futures, default) or ``"FUTSTK"`` (single-stock
+    futures, for the equity F&O universe). Off-hours only.
 
     WARNING: each ``symbol`` must be ONE continuous/front-month series — writing
     two different physical expiry contracts under the same symbol collides on the
@@ -598,7 +627,7 @@ async def backfill_futures_bars(
     raw = await client.get_daily_historical(
         security_id=security_id,
         exchange_segment="NSE_FNO",
-        instrument="FUTIDX",
+        instrument=instrument,
         from_date=from_date,
         to_date=to_date,
     )
@@ -685,7 +714,12 @@ async def snapshot_option_chain(
     )
 
     # Project ATM IV into option_atm_iv (keep that table current) — same `now`.
-    atm_row = extract_atm_iv(chain, symbol, expiry_date, expiry_type, step, now)
+    # Stock options (NSE_FNO) have a per-underlying strike step, so snap ATM to the
+    # nearest available strike; index chains keep the strict computed-strike match.
+    atm_row = extract_atm_iv(
+        chain, symbol, expiry_date, expiry_type, step, now,
+        nearest=(underlying_seg == "NSE_FNO"),
+    )
     atm_count = 0
     if atm_row is not None:
         _upsert_atm_iv([atm_row])
@@ -724,7 +758,11 @@ async def build_expiry_calendar(
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="F&O Phase-0 data backfill (off-hours only)")
     p.add_argument("--symbol", default="NIFTY")
-    p.add_argument("--futures", action="store_true", help="backfill index-futures bars")
+    p.add_argument("--futures", action="store_true", help="backfill futures bars")
+    p.add_argument(
+        "--instrument", default="FUTIDX",
+        help="futures instrument class for --futures: FUTIDX (default) or FUTSTK (stock)",
+    )
     p.add_argument("--security-id", help="security id (for --futures and --index)")
     p.add_argument("--from", dest="from_date")
     p.add_argument("--to", dest="to_date")
@@ -762,7 +800,8 @@ async def _amain(args: argparse.Namespace) -> None:
             if not args.from_date or not args.to_date:
                 raise SystemExit("--futures requires --from and --to")
             await backfill_futures_bars(
-                client, args.symbol, args.security_id, args.from_date, args.to_date
+                client, args.symbol, args.security_id, args.from_date, args.to_date,
+                instrument=args.instrument,
             )
         if args.index:
             if not args.security_id:
