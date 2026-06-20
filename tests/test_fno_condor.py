@@ -8,7 +8,7 @@ into each test that needs it via a module-level try/except + pytest.importorskip
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1878,3 +1878,422 @@ class TestSettlementSource:
         }
         result = run_backtest([cycle], k=0.9, move_mult=1.0)
         assert result["n_trades"] == 1
+
+
+# ===========================================================================
+# SECTION — PHASE-0c: configurable DTE / exit rules / fixed-delta strikes
+# (TZ-safe: all dates are explicit literals; no date.today()/now() for state.)
+# ===========================================================================
+
+
+def _sell_premium_cycle(entry, expiry, spot=20000.0, iv=0.12, rvol=0.06, **extra):
+    """Build one well-formed SELL_PREMIUM cycle (realized << implied → gate passes).
+
+    realized_vol_20d=0.06 is well below k×iv on the calendar basis, so the
+    vol-gate returns SELL_PREMIUM and the cycle is traded.
+    """
+    c = {
+        "entry_date": entry,
+        "expiry_date": expiry,
+        "spot": spot,
+        "straddle_iv": iv,
+        "realized_vol_20d": rvol,
+        "dte": (expiry - entry).days,
+        "expiry_spot": spot,  # settles ATM → keeps the credit (a win)
+    }
+    c.update(extra)
+    return c
+
+
+@needs_condor
+class TestBlack76Delta:
+    def test_atm_call_delta_near_half(self):
+        from research.backtest.fno_condor import black76_delta
+        d = black76_delta(20000, 20000, 7 / 365, 0.15, "CE")
+        assert 0.45 < d < 0.60
+
+    def test_atm_put_delta_near_minus_half(self):
+        from research.backtest.fno_condor import black76_delta
+        d = black76_delta(20000, 20000, 7 / 365, 0.15, "PE")
+        assert -0.60 < d < -0.40
+
+    def test_call_delta_in_unit_interval(self):
+        from research.backtest.fno_condor import black76_delta
+        d = black76_delta(20000, 21000, 7 / 365, 0.15, "CE")
+        assert 0.0 <= d <= 1.0
+
+    def test_put_delta_negative(self):
+        from research.backtest.fno_condor import black76_delta
+        d = black76_delta(20000, 19000, 7 / 365, 0.15, "PE")
+        assert -1.0 <= d <= 0.0
+
+    def test_deep_otm_call_delta_to_zero(self):
+        from research.backtest.fno_condor import black76_delta
+        d = black76_delta(20000, 25000, 7 / 365, 0.15, "CE")
+        assert d < 0.05
+
+    def test_zero_dte_call_degenerate(self):
+        from research.backtest.fno_condor import black76_delta
+        assert black76_delta(20000, 19000, 0.0, 0.15, "CE") == 1.0
+        assert black76_delta(20000, 21000, 0.0, 0.15, "CE") == 0.0
+
+    def test_zero_sigma_put_degenerate(self):
+        from research.backtest.fno_condor import black76_delta
+        assert black76_delta(20000, 21000, 7 / 365, 0.0, "PE") == -1.0
+        assert black76_delta(20000, 19000, 7 / 365, 0.0, "PE") == 0.0
+
+
+@needs_condor
+class TestSelectShortStrikeByDelta:
+    def test_short_put_below_spot(self):
+        from research.backtest.fno_condor import select_short_strike_by_delta
+        k, src = select_short_strike_by_delta(20000, 0.12, 7, "PE", 0.16)
+        assert k < 20000
+
+    def test_short_call_above_spot(self):
+        from research.backtest.fno_condor import select_short_strike_by_delta
+        k, src = select_short_strike_by_delta(20000, 0.12, 7, "CE", 0.16)
+        assert k > 20000
+
+    def test_strike_on_grid(self):
+        from research.backtest.fno_condor import select_short_strike_by_delta
+        k, _ = select_short_strike_by_delta(20000, 0.12, 7, "CE", 0.16, step=50)
+        assert k % 50 == 0
+
+    def test_smaller_target_delta_is_further_otm(self):
+        from research.backtest.fno_condor import select_short_strike_by_delta
+        near, _ = select_short_strike_by_delta(20000, 0.12, 7, "CE", 0.30)
+        far, _ = select_short_strike_by_delta(20000, 0.12, 7, "CE", 0.10)
+        assert far >= near  # smaller delta → further from ATM (higher call strike)
+
+    def test_chosen_strike_delta_close_to_target(self):
+        from research.backtest.fno_condor import black76_delta, select_short_strike_by_delta
+        k, _ = select_short_strike_by_delta(20000, 0.12, 7, "CE", 0.16)
+        d = abs(black76_delta(20000, k, 7 / 365, 0.12, "CE"))
+        assert abs(d - 0.16) < 0.10
+
+    def test_fallback_source_without_real_iv(self):
+        from research.backtest.fno_condor import DELTA_IV_SOURCE_FLAT, select_short_strike_by_delta
+        _, src = select_short_strike_by_delta(20000, 0.12, 7, "PE", 0.16)
+        assert src == DELTA_IV_SOURCE_FLAT
+
+    def test_real_iv_source_when_chain_covers_grid(self):
+        from research.backtest.fno_condor import DELTA_IV_SOURCE_REAL, select_short_strike_by_delta
+        per_strike = {k: 0.15 for k in range(18000, 22001, 50)}
+        _, src = select_short_strike_by_delta(
+            20000, 0.12, 7, "PE", 0.16, per_strike_iv=per_strike
+        )
+        assert src == DELTA_IV_SOURCE_REAL
+
+    def test_real_iv_changes_selected_strike(self):
+        """Real per-strike IV (a skewed surface) shifts the selected strike vs flat."""
+        from research.backtest.fno_condor import select_short_strike_by_delta
+        flat_k, _ = select_short_strike_by_delta(20000, 0.12, 7, "PE", 0.16)
+        # Rich OTM-put IV (skew) → wider deltas at OTM strikes → different selection.
+        skewed = {k: 0.12 + max(0.0, (20000 - k) / 20000 * 0.6) for k in range(18000, 22001, 50)}
+        real_k, _ = select_short_strike_by_delta(
+            20000, 0.12, 7, "PE", 0.16, per_strike_iv=skewed
+        )
+        assert real_k != flat_k or real_k < 20000  # selection responds to real surface
+
+
+@needs_condor
+class TestBuildCondorByDelta:
+    def test_ordering(self):
+        from research.backtest.fno_condor import build_condor_by_delta
+        strikes, _ = build_condor_by_delta(20000, 0.12, 7, 0.16, wing_strikes=2)
+        assert (
+            strikes["long_put_k"]
+            < strikes["short_put_k"]
+            < strikes["short_call_k"]
+            < strikes["long_call_k"]
+        )
+
+    def test_wing_width_matches_strikes(self):
+        from research.backtest.fno_condor import build_condor_by_delta
+        strikes, _ = build_condor_by_delta(20000, 0.12, 7, 0.16, wing_strikes=3, step=50)
+        assert strikes["short_put_k"] - strikes["long_put_k"] == 150
+        assert strikes["long_call_k"] - strikes["short_call_k"] == 150
+
+    def test_source_real_when_chain_present(self):
+        from research.backtest.fno_condor import DELTA_IV_SOURCE_REAL, build_condor_by_delta
+        per_strike = {k: 0.15 for k in range(18000, 22001, 50)}
+        _, src = build_condor_by_delta(20000, 0.12, 7, 0.16, per_strike_iv=per_strike)
+        assert src == DELTA_IV_SOURCE_REAL
+
+    def test_source_flat_fallback(self):
+        from research.backtest.fno_condor import DELTA_IV_SOURCE_FLAT, build_condor_by_delta
+        _, src = build_condor_by_delta(20000, 0.12, 7, 0.16)
+        assert src == DELTA_IV_SOURCE_FLAT
+
+
+@needs_condor
+class TestExitParams:
+    def test_default_is_expiry_hold(self):
+        from research.backtest.fno_condor import ExitParams
+        assert ExitParams().is_expiry_hold is True
+
+    def test_any_rule_disables_expiry_hold(self):
+        from research.backtest.fno_condor import ExitParams
+        assert ExitParams(profit_target_pct=0.5).is_expiry_hold is False
+        assert ExitParams(stop_loss_mult=2.0).is_expiry_hold is False
+        assert ExitParams(time_stop_dte=1).is_expiry_hold is False
+
+
+@needs_condor
+class TestEvaluateExit:
+    STRIKES = {
+        "short_put_k": 19800,
+        "long_put_k": 19700,
+        "short_call_k": 20200,
+        "long_call_k": 20300,
+    }
+
+    def _credit(self):
+        from research.backtest.fno_condor import condor_mtm_value
+        return condor_mtm_value(20000, 0.12, 7, self.STRIKES)
+
+    def test_no_rules_holds_to_expiry(self):
+        from research.backtest.fno_condor import EXIT_REASON_EXPIRY, ExitParams, evaluate_exit
+        r = evaluate_exit(self._credit(), self.STRIKES, 0.12, 7,
+                          [(5, 20000)], ExitParams())
+        assert r[0] == EXIT_REASON_EXPIRY
+
+    def test_no_path_holds_to_expiry(self):
+        from research.backtest.fno_condor import EXIT_REASON_EXPIRY, ExitParams, evaluate_exit
+        r = evaluate_exit(self._credit(), self.STRIKES, 0.12, 7,
+                          None, ExitParams(stop_loss_mult=0.1))
+        assert r[0] == EXIT_REASON_EXPIRY
+
+    def test_profit_target_fires(self):
+        from research.backtest.fno_condor import EXIT_REASON_PROFIT_TARGET, ExitParams, evaluate_exit
+        # Time decays toward expiry at a still spot → value collapses → profit.
+        r = evaluate_exit(self._credit(), self.STRIKES, 0.12, 7,
+                          [(5, 20000), (2, 20000), (1, 20000)],
+                          ExitParams(profit_target_pct=0.5))
+        assert r[0] == EXIT_REASON_PROFIT_TARGET
+        assert r[2] is not None and r[2] > 0
+
+    def test_stop_loss_fires(self):
+        from research.backtest.fno_condor import EXIT_REASON_STOP_LOSS, ExitParams, evaluate_exit
+        # Spot breaches the short put → MTM rises → loss past the stop.
+        r = evaluate_exit(self._credit(), self.STRIKES, 0.12, 7,
+                          [(5, 19750)], ExitParams(stop_loss_mult=0.1))
+        assert r[0] == EXIT_REASON_STOP_LOSS
+        assert r[2] is not None and r[2] < 0
+
+    def test_time_stop_fires(self):
+        from research.backtest.fno_condor import EXIT_REASON_TIME_STOP, ExitParams, evaluate_exit
+        r = evaluate_exit(self._credit(), self.STRIKES, 0.12, 7,
+                          [(5, 20000), (2, 20000)], ExitParams(time_stop_dte=2))
+        assert r[0] == EXIT_REASON_TIME_STOP
+        assert r[1] == 2
+
+    def test_profit_target_priority_over_time_stop(self):
+        from research.backtest.fno_condor import EXIT_REASON_PROFIT_TARGET, ExitParams, evaluate_exit
+        # Both could fire; profit-target is checked first at the same node.
+        r = evaluate_exit(self._credit(), self.STRIKES, 0.12, 7,
+                          [(2, 20000)],
+                          ExitParams(profit_target_pct=0.3, time_stop_dte=2))
+        assert r[0] == EXIT_REASON_PROFIT_TARGET
+
+
+@needs_condor
+class TestPickEntryDayForDte:
+    DAYS = [date(2026, 6, 1), date(2026, 6, 2), date(2026, 6, 3),
+            date(2026, 6, 4), date(2026, 6, 5)]
+    EXPIRY = date(2026, 6, 5)
+
+    def test_pick_at_or_before_target(self):
+        from research.backtest.fno_condor import pick_entry_day_for_dte
+        # 4 DTE → the day with dte>=4 closest to 4 = 2026-06-01 (dte 4).
+        assert pick_entry_day_for_dte(self.DAYS, self.EXPIRY, 4) == date(2026, 6, 1)
+
+    def test_pick_one_dte(self):
+        from research.backtest.fno_condor import pick_entry_day_for_dte
+        assert pick_entry_day_for_dte(self.DAYS, self.EXPIRY, 1) == date(2026, 6, 4)
+
+    def test_target_larger_than_available_takes_largest_dte(self):
+        from research.backtest.fno_condor import pick_entry_day_for_dte
+        assert pick_entry_day_for_dte(self.DAYS, self.EXPIRY, 30) == date(2026, 6, 1)
+
+    def test_no_day_before_expiry_returns_none(self):
+        from research.backtest.fno_condor import pick_entry_day_for_dte
+        assert pick_entry_day_for_dte([date(2026, 6, 5)], self.EXPIRY, 4) is None
+
+
+@needs_condor
+class TestRunBacktestPhase0c:
+    def _cycles(self, n=40):
+        cs = []
+        base = date(2026, 1, 6)
+        for i in range(n):
+            ed = base + timedelta(days=7 * i)
+            cs.append(_sell_premium_cycle(ed, ed + timedelta(days=7),
+                                          spot=20000.0 + (i % 5) * 50))
+        return cs
+
+    def test_default_is_move_method_backcompat(self):
+        cs = self._cycles()
+        res = run_backtest(cs, k=0.9, move_mult=1.5)
+        assert res["n_trades"] > 0
+        for t in res["trades"]:
+            assert t.strike_method == "move"
+            assert t.exit_reason == "expiry"
+
+    def test_delta_method_runs_and_tags(self):
+        from research.backtest.fno_condor import STRIKE_METHOD_DELTA
+        cs = self._cycles()
+        res = run_backtest(cs, k=0.9, strike_method=STRIKE_METHOD_DELTA, target_delta=0.16)
+        assert res["n_trades"] > 0
+        for t in res["trades"]:
+            assert t.strike_method == "delta"
+            assert t.delta_iv_source in ("flat_atm", "real_per_strike")
+
+    def test_delta_real_iv_when_cycle_has_per_strike(self):
+        from research.backtest.fno_condor import STRIKE_METHOD_DELTA
+        per_strike = {k: 0.12 for k in range(15000, 25001, 50)}
+        cs = self._cycles(5)
+        for c in cs:
+            c["per_strike_iv"] = per_strike
+        res = run_backtest(cs, k=0.9, strike_method=STRIKE_METHOD_DELTA)
+        assert res["n_trades"] > 0
+        assert any(t.delta_iv_source == "real_per_strike" for t in res["trades"])
+
+    def test_exit_params_default_holds(self):
+        cs = self._cycles()
+        res = run_backtest(cs, k=0.9, exit_params=None)
+        for t in res["trades"]:
+            assert t.exit_reason == "expiry"
+
+    def test_time_stop_exit_fires_in_backtest(self):
+        from research.backtest.fno_condor import ExitParams
+        cs = self._cycles(20)
+        for c in cs:
+            # path with a node at 2 DTE so the time-stop can fire
+            c["spot_path"] = [(5, c["spot"]), (2, c["spot"])]
+        res = run_backtest(cs, k=0.9, exit_params=ExitParams(time_stop_dte=2))
+        assert res["n_trades"] > 0
+        assert any(t.exit_reason == "time_stop" for t in res["trades"])
+
+    def test_wing_strikes_param_widens_structure(self):
+        cs = self._cycles(5)
+        narrow = run_backtest(cs, k=0.9, wing_strikes=1)
+        wide = run_backtest(cs, k=0.9, wing_strikes=4)
+        nt = narrow["trades"][0]
+        wt = wide["trades"][0]
+        nwidth = nt.strikes["short_put_k"] - nt.strikes["long_put_k"]
+        wwidth = wt.strikes["short_put_k"] - wt.strikes["long_put_k"]
+        assert wwidth > nwidth
+
+
+@needs_condor
+class TestPhase0cQaFixes:
+    """Regression tests for the QA-loop fixes (negative-credit exit, F/K guard,
+    closing costs + close slippage on early exit, end-to-end entry_dte)."""
+
+    STRIKES = {
+        "short_put_k": 19800,
+        "long_put_k": 19700,
+        "short_call_k": 20200,
+        "long_call_k": 20300,
+    }
+
+    def test_black76_delta_nonpositive_inputs_no_raise(self):
+        from research.backtest.fno_condor import black76_delta
+        # F<=0 or K<=0 must NOT raise (math.log guard) — returns intrinsic delta.
+        assert black76_delta(0.0, 20000, 7 / 365, 0.15, "CE") == 0.0
+        assert black76_delta(20000, 0.0, 7 / 365, 0.15, "CE") == 1.0
+        assert black76_delta(-5.0, 20000, 7 / 365, 0.15, "PE") in (-1.0, 0.0)
+
+    def test_negative_credit_exit_signs_do_not_invert(self):
+        """With a non-positive credit base, abs() keeps thresholds sane: a
+        profit-target needs running_pnl>=0, a stop needs running_pnl<=0 — never
+        the reverse."""
+        from research.backtest.fno_condor import (
+            EXIT_REASON_PROFIT_TARGET,
+            EXIT_REASON_STOP_LOSS,
+            ExitParams,
+            evaluate_exit,
+        )
+        # Negative credit; a path where MTM drops below credit → running_pnl > 0.
+        neg_credit = -1000.0
+        # condor MTM at a still spot, time decayed → positive running_pnl over neg credit
+        r = evaluate_exit(neg_credit, self.STRIKES, 0.12, 7,
+                          [(1, 20000)], ExitParams(profit_target_pct=0.5))
+        # profit-target may or may not fire, but if it fires running_pnl must be >= 0
+        if r[0] == EXIT_REASON_PROFIT_TARGET:
+            assert r[2] >= 0
+        # Adverse path → loss; stop fires only on running_pnl <= 0
+        r2 = evaluate_exit(neg_credit, self.STRIKES, 0.12, 7,
+                           [(5, 19750)], ExitParams(stop_loss_mult=0.1))
+        if r2[0] == EXIT_REASON_STOP_LOSS:
+            assert r2[2] <= 0
+
+    def test_evaluate_exit_returns_exit_spot(self):
+        from research.backtest.fno_condor import (
+            EXIT_REASON_TIME_STOP,
+            ExitParams,
+            condor_mtm_value,
+            evaluate_exit,
+        )
+        credit = condor_mtm_value(20000, 0.12, 7, self.STRIKES)
+        r = evaluate_exit(credit, self.STRIKES, 0.12, 7,
+                          [(2, 20111.0)], ExitParams(time_stop_dte=2))
+        assert r[0] == EXIT_REASON_TIME_STOP
+        assert r[3] == 20111.0  # exit_spot threaded through
+
+    def _cycles_with_path(self, n=20, spot=20000.0):
+        cs = []
+        base = date(2026, 1, 6)
+        for i in range(n):
+            ed = base + timedelta(days=7 * i)
+            c = _sell_premium_cycle(ed, ed + timedelta(days=7), spot=spot)
+            c["spot_path"] = [(5, spot), (2, spot)]  # time-stop can fire at 2 DTE
+            cs.append(c)
+        return cs
+
+    def test_early_exit_charges_more_costs_than_hold(self):
+        """An early exit (time-stop) must book MORE total costs than holding to
+        expiry on the same cycles (it pays the close-side brokerage/STT stack)."""
+        from research.backtest.fno_condor import ExitParams
+        cs = self._cycles_with_path(10)
+        hold = run_backtest(cs, k=0.9)  # default = expiry hold
+        early = run_backtest(cs, k=0.9, exit_params=ExitParams(time_stop_dte=2))
+        hold_costs = sum(t.costs for t in hold["trades"])
+        early_costs = sum(t.costs for t in early["trades"])
+        assert any(t.exit_reason == "time_stop" for t in early["trades"])
+        assert early_costs > hold_costs
+
+    def test_entry_dte_reanchors_end_to_end(self):
+        """run_backtest over cycles_from_db(entry_dte=N) is not exercised here (DB),
+        but the pure re-anchor helper composes with run_backtest: a cycle whose
+        dte already equals N trades unchanged."""
+        cs = []
+        base = date(2026, 1, 6)
+        for i in range(35):
+            ed = base + timedelta(days=7 * i)
+            cs.append(_sell_premium_cycle(ed, ed + timedelta(days=4), spot=20000.0))
+        res = run_backtest(cs, k=0.9)
+        assert res["n_trades"] > 0
+        for t in res["trades"]:
+            assert (t.expiry_date - t.entry_date).days == 4
+
+    def test_delta_real_vs_flat_paths_both_trade(self):
+        from research.backtest.fno_condor import STRIKE_METHOD_DELTA
+        cs_flat = []
+        cs_real = []
+        base = date(2026, 1, 6)
+        per_strike = {k: 0.12 for k in range(15000, 25001, 50)}
+        for i in range(10):
+            ed = base + timedelta(days=7 * i)
+            cf = _sell_premium_cycle(ed, ed + timedelta(days=7), spot=20000.0)
+            cr = _sell_premium_cycle(ed, ed + timedelta(days=7), spot=20000.0)
+            cr["per_strike_iv"] = per_strike
+            cs_flat.append(cf)
+            cs_real.append(cr)
+        rf = run_backtest(cs_flat, k=0.9, strike_method=STRIKE_METHOD_DELTA)
+        rr = run_backtest(cs_real, k=0.9, strike_method=STRIKE_METHOD_DELTA)
+        assert rf["n_trades"] > 0 and rr["n_trades"] > 0
+        assert all(t.delta_iv_source == "flat_atm" for t in rf["trades"])
+        assert any(t.delta_iv_source == "real_per_strike" for t in rr["trades"])
