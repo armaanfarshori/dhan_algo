@@ -40,12 +40,19 @@ LOT = 65
 
 
 def _now() -> datetime:
-    """Current IST time."""
-    return datetime.now(IST)
+    """Fixed mid-session IST base (today @ 11:00), NOT the wall clock.
+
+    Using datetime.now(IST) directly made these tests pass only during market
+    hours and fail before 09:15 / after the 15:25 EOD square-off (and on the UTC
+    CI runner outside that window) — the IST-time trap. Pinning the time to 11:00
+    keeps every tick mid-session and deterministic; today's date is retained so
+    _inject_session's session_date still matches on_tick's now.date().
+    """
+    return datetime.now(IST).replace(hour=11, minute=0, second=0, microsecond=0)
 
 
 def _t(offset_minutes: float) -> datetime:
-    """Wall-clock IST + offset_minutes (can be fractional)."""
+    """Fixed mid-session IST base + offset_minutes (can be fractional)."""
     return _now() + timedelta(minutes=offset_minutes)
 
 
@@ -800,8 +807,9 @@ def test_future_skew_guard():
     scalper.vwap = 22000.0
     bars_before = scalper._bars_seen
 
-    # Feed a tick 5 min in the future
-    future_tick = _now() + timedelta(minutes=5)
+    # Feed a tick 5 min ahead of the REAL wall clock (the skew guard compares to
+    # datetime.now, so this must be genuinely future — not the pinned _now() base).
+    future_tick = datetime.now(IST) + timedelta(minutes=5)
     result = scalper.on_tick(future_tick, 22500.0, option_premium=None,
                               high=22505.0, low=22495.0)
 
