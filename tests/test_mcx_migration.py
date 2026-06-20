@@ -2,11 +2,24 @@
 
 No DB: this only imports the migration module and asserts its revision linkage,
 that upgrade()/downgrade() are callable, and — by driving a recording fake
-``op``/``sa`` — that upgrade creates the ``mcx_bars`` hypertable with the
-expected PK/index and downgrade drops only that table. Additive: it must never
-reference any pre-existing table.
+``op`` — that upgrade creates the ``mcx_bars`` hypertable with the expected
+PK/index and downgrade drops only that table. Additive: it must never reference
+any pre-existing table.
+
+CI-robustness note: the repo root carries a local ``alembic/`` directory (no
+``__init__.py``). With the repo root first on ``sys.path`` (as on CI), that
+directory shadows the INSTALLED ``alembic`` package as a namespace package with
+NO ``op`` attribute, so ``from alembic import op`` raises
+``ImportError: cannot import name 'op' from 'alembic'`` at migration import
+time. To stay independent of which ``alembic`` wins, we inject a fake
+``alembic`` module exposing a recording ``op`` into ``sys.modules`` BEFORE
+exec'ing the migration, then restore the real modules on teardown so no other
+test is affected. ``sqlalchemy`` stays real — the PK/column assertions inspect
+genuine ``sa.Column``/``sa.PrimaryKeyConstraint`` objects.
 """
 import importlib.util
+import sys
+import types
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -15,28 +28,51 @@ import pytest
 _MIG = Path(__file__).parent.parent / "alembic" / "versions" / "012_mcx_foundation.py"
 
 
-def _load_migration():
-    spec = importlib.util.spec_from_file_location("mig_012_mcx", _MIG)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+@pytest.fixture
+def loaded_migration():
+    """Load 012 with a fake ``alembic.op`` injected, regardless of sys.path.
+
+    Yields ``(module, fake_op)``. The fake ``op`` is a MagicMock so the test
+    can attach ``side_effect`` recorders and assert on the calls the migration
+    makes. Real ``alembic``/``alembic.op`` modules are restored on teardown.
+    """
+    saved = {k: sys.modules.get(k) for k in ("alembic", "alembic.op")}
+
+    fake_op = MagicMock(name="alembic.op")
+    fake_alembic = types.ModuleType("alembic")
+    fake_alembic.op = fake_op
+    sys.modules["alembic"] = fake_alembic
+    sys.modules["alembic.op"] = fake_op
+
+    try:
+        spec = importlib.util.spec_from_file_location("mig_012_mcx", _MIG)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        # The migration did ``from alembic import op`` → mod.op is our fake.
+        assert mod.op is fake_op
+        yield mod, fake_op
+    finally:
+        sys.modules.pop("mig_012_mcx", None)
+        for name, original in saved.items():
+            if original is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
 
 
-def test_revision_linkage():
-    mod = _load_migration()
+def test_revision_linkage(loaded_migration):
+    mod, _ = loaded_migration
     assert mod.revision == "012"
     assert mod.down_revision == "011"
 
 
-def test_upgrade_creates_mcx_bars_hypertable(monkeypatch):
-    mod = _load_migration()
+def test_upgrade_creates_mcx_bars_hypertable(loaded_migration):
+    mod, fake_op = loaded_migration
     create_calls = []
     execute_sql = []
 
-    fake_op = MagicMock()
     fake_op.create_table.side_effect = lambda name, *cols, **kw: create_calls.append((name, cols))
     fake_op.execute.side_effect = lambda sql: execute_sql.append(sql)
-    monkeypatch.setattr(mod, "op", fake_op)
 
     mod.upgrade()
 
@@ -50,17 +86,15 @@ def test_upgrade_creates_mcx_bars_hypertable(monkeypatch):
     assert "mcx_bars (symbol, timeframe, time DESC)" in joined
 
 
-def test_upgrade_pk_mirrors_index_bars(monkeypatch):
+def test_upgrade_pk_mirrors_index_bars(loaded_migration):
     """PK must be (security_id, timeframe, time) like index_bars."""
-    mod = _load_migration()
+    mod, fake_op = loaded_migration
     captured = {}
 
     def _create_table(name, *cols, **kw):
         captured["cols"] = cols
 
-    fake_op = MagicMock()
     fake_op.create_table.side_effect = _create_table
-    monkeypatch.setattr(mod, "op", fake_op)
     mod.upgrade()
 
     pk = [c for c in captured["cols"] if c.__class__.__name__ == "PrimaryKeyConstraint"]
@@ -76,12 +110,10 @@ def test_upgrade_pk_mirrors_index_bars(monkeypatch):
         assert required in colnames, f"missing column {required}"
 
 
-def test_downgrade_drops_only_mcx_bars(monkeypatch):
-    mod = _load_migration()
+def test_downgrade_drops_only_mcx_bars(loaded_migration):
+    mod, fake_op = loaded_migration
     execute_sql = []
-    fake_op = MagicMock()
     fake_op.execute.side_effect = lambda sql: execute_sql.append(sql)
-    monkeypatch.setattr(mod, "op", fake_op)
 
     mod.downgrade()
 
