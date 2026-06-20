@@ -20,8 +20,10 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
 
+from core.sessions import EQUITY, MarketSession
+
 # Reuse the shared market-session constants from ORB so they never drift.
-from strategies.orb import (  # noqa: F401 — MARKET_OPEN re-exported for parity
+from strategies.orb import (  # noqa: F401 — MARKET_OPEN/MARKET_CLOSE re-exported for parity
     IST,
     MARKET_CLOSE,
     MARKET_OPEN,
@@ -46,9 +48,14 @@ class VwapMeanRevParams:
 
 
 class VwapMeanReversion:
-    def __init__(self, security_id: str, params: Optional[VwapMeanRevParams] = None):
+    def __init__(self, security_id: str, params: Optional[VwapMeanRevParams] = None,
+                 session: MarketSession = EQUITY):
+        """``session`` binds the EOD square-off / no-entry window to a MarketSession
+        profile (defaults to EQUITY → byte-identical legacy 15:30 behaviour). Pass
+        session=MCX for the evening commodity session (DST-aware close)."""
         self.security_id = security_id
         self.p = params or VwapMeanRevParams()
+        self.session = session
 
         # Position view — updated ONLY via notify_fill / notify_flat
         self.position: int = 0
@@ -112,7 +119,7 @@ class VwapMeanReversion:
             self._reset_session(today)
 
         squareoff_time = (
-            datetime.combine(today, MARKET_CLOSE)
+            datetime.combine(today, self.session.close_time_for(today))
             - timedelta(minutes=self.p.squareoff_before_close_min)
         ).time()
 
@@ -145,7 +152,7 @@ class VwapMeanReversion:
 
         # 5. No-entry near close
         no_entry_time = (
-            datetime.combine(today, MARKET_CLOSE)
+            datetime.combine(today, self.session.close_time_for(today))
             - timedelta(minutes=self.p.no_entry_before_close_min)
         ).time()
         if t >= no_entry_time:

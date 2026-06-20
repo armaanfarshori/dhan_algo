@@ -30,7 +30,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from strategies.orb import Decision, IST, MARKET_CLOSE, MAX_FUTURE_SKEW
+from core.sessions import EQUITY, MarketSession
+from strategies.orb import Decision, IST, MAX_FUTURE_SKEW
 
 logger = logging.getLogger("dhan.strategy.bollinger_mr")
 
@@ -52,9 +53,14 @@ class BollingerMeanReversionParams:
 
 class BollingerMeanReversion:
     def __init__(self, security_id: str,
-                 params: Optional[BollingerMeanReversionParams] = None):
+                 params: Optional[BollingerMeanReversionParams] = None,
+                 session: MarketSession = EQUITY):
+        """``session`` binds the EOD square-off to a MarketSession profile (defaults
+        to EQUITY → byte-identical legacy 15:30 behaviour). Pass session=MCX for the
+        evening commodity session (DST-aware close)."""
         self.security_id = security_id
         self.p = params or BollingerMeanReversionParams()
+        self.session = session
 
         self._session_date: Optional[date] = None
 
@@ -140,7 +146,7 @@ class BollingerMeanReversion:
 
         # 3. EOD square-off — UNCONDITIONAL, above every readiness gate
         squareoff = (
-            datetime.combine(today, MARKET_CLOSE)
+            datetime.combine(today, self.session.close_time_for(today))
             - timedelta(minutes=self.p.squareoff_before_close_min)
         ).time()
         if t >= squareoff:

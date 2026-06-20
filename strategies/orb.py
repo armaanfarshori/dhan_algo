@@ -15,11 +15,11 @@ the strategy never assumes an order it requested was actually executed
 """
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from core.sessions import EQUITY
+from core.sessions import EQUITY, MarketSession
 
 logger = logging.getLogger("dhan.strategy.orb")
 
@@ -28,7 +28,10 @@ IST = ZoneInfo("Asia/Kolkata")
 # so the platform has a single source of truth for session hours. The names and
 # values (09:15 / 15:30) are preserved verbatim: ~10 sibling strategies import
 # MARKET_OPEN/MARKET_CLOSE from this module, and equity behaviour must stay
-# byte-identical. The MCX profile lives in the same module for a future runner.
+# byte-identical. These remain the EQUITY defaults; a strategy instance may be
+# bound to a DIFFERENT session (e.g. MCX evening) via the optional `session`
+# ctor arg, which overrides open/close per-instance WITHOUT touching these
+# module-level names (sibling strategies still import them unchanged).
 MARKET_OPEN = EQUITY.open_time
 MARKET_CLOSE = EQUITY.close_time
 # A tick stamped further than this ahead of the wall clock is implausible —
@@ -55,9 +58,20 @@ class Decision:
 
 
 class ORB:
-    def __init__(self, security_id: str, params: Optional[ORBParams] = None):
+    def __init__(self, security_id: str, params: Optional[ORBParams] = None,
+                 session: MarketSession = EQUITY,
+                 or_start_time: Optional[dtime] = None):
+        """``session`` binds the strategy to a MarketSession profile (defaults to
+        EQUITY → byte-identical legacy behaviour). ``or_start_time`` anchors the
+        opening-range window; when None it defaults to ``session.open_time``. An
+        EVENING ORB (e.g. MCX, US-overlap) passes session=MCX + or_start_time=18:00
+        so the OR builds from 18:00 IST while the EOD square-off still keys off the
+        session's (DST-aware) close."""
         self.security_id = security_id
         self.p = params or ORBParams()
+        self.session = session
+        # OR window anchor; default to the session open.
+        self.or_start_time: dtime = or_start_time or session.open_time
 
         self._session_date: Optional[date] = None
         self.or_high: float = 0.0
@@ -111,11 +125,13 @@ class ORB:
         if self._session_date != today:
             self._reset_session(today)
 
-        or_end = (datetime.combine(today, MARKET_OPEN)
+        or_start = self.or_start_time
+        or_end = (datetime.combine(today, or_start)
                   + timedelta(minutes=self.p.orb_minutes)).time()
 
-        # 1. Build the opening range
-        if MARKET_OPEN <= t < or_end and not self.or_locked:
+        # 1. Build the opening range — anchored at or_start (session.open_time by
+        # default; e.g. 18:00 IST for an evening/US-overlap MCX ORB).
+        if or_start <= t < or_end and not self.or_locked:
             self.or_high = max(self.or_high, high or price)
             self.or_low = min(self.or_low, low or price)
             return None
@@ -128,7 +144,7 @@ class ORB:
         # 3. EOD square-off — must NOT depend on a locked OR: after a
         # mid-session restart the range can be unknown, but an open
         # (DB-reconciled) position must still flatten before close.
-        squareoff = (datetime.combine(today, MARKET_CLOSE)
+        squareoff = (datetime.combine(today, self.session.close_time_for(today))
                      - timedelta(minutes=self.p.squareoff_before_close_min)).time()
         if t >= squareoff:
             if self.position != 0:

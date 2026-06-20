@@ -20,7 +20,14 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
-from strategies.orb import Decision, IST, MARKET_CLOSE, MARKET_OPEN, MAX_FUTURE_SKEW
+from core.sessions import EQUITY, MarketSession
+from strategies.orb import (  # noqa: F401 — MARKET_OPEN/MARKET_CLOSE re-exported for parity
+    Decision,
+    IST,
+    MARKET_CLOSE,
+    MARKET_OPEN,
+    MAX_FUTURE_SKEW,
+)
 
 logger = logging.getLogger("dhan.strategy.vwap_trend")
 
@@ -47,9 +54,14 @@ class VwapTrend:
     the strategy stays in warm-up (returns None) until valid volume arrives.
     """
 
-    def __init__(self, security_id: str, params: Optional[VwapTrendParams] = None):
+    def __init__(self, security_id: str, params: Optional[VwapTrendParams] = None,
+                 session: MarketSession = EQUITY):
+        """``session`` binds the entry-start open-anchor + EOD square-off to a
+        MarketSession profile (defaults to EQUITY → byte-identical legacy 09:15/15:30
+        behaviour). Pass session=MCX for the evening commodity session (DST-aware close)."""
         self.security_id = security_id
         self.p = params or VwapTrendParams()
+        self.session = session
 
         # Position state — updated only by notify_fill / notify_flat
         self.position: int = 0
@@ -108,7 +120,7 @@ class VwapTrend:
 
         # 1. EOD square-off — UNCONDITIONAL, before any VWAP-readiness gate
         squareoff = (
-            datetime.combine(today, MARKET_CLOSE)
+            datetime.combine(today, self.session.close_time_for(today))
             - timedelta(minutes=self.p.squareoff_before_close_min)
         ).time()
         if t >= squareoff:
@@ -173,7 +185,7 @@ class VwapTrend:
         # 5. ENTRIES (flat) — need slope, within window, prior bar available
         decision: Optional[Decision] = None
         entry_start = (
-            datetime.combine(today, MARKET_OPEN)
+            datetime.combine(today, self.session.open_time)
             + timedelta(minutes=self.p.entry_start_min)
         ).time()
 

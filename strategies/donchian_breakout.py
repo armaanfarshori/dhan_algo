@@ -12,7 +12,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from strategies.orb import Decision, IST, MARKET_CLOSE, MARKET_OPEN, MAX_FUTURE_SKEW
+from core.sessions import EQUITY, MarketSession
+from strategies.orb import Decision, IST, MAX_FUTURE_SKEW
 
 logger = logging.getLogger("dhan.strategy.donchian")
 
@@ -42,9 +43,14 @@ class DonchianBreakout:
     """
 
     def __init__(self, security_id: str,
-                 params: Optional[DonchianBreakoutParams] = None):
+                 params: Optional[DonchianBreakoutParams] = None,
+                 session: MarketSession = EQUITY):
+        """``session`` binds the warm-up open-anchor + EOD square-off to a
+        MarketSession profile (defaults to EQUITY → byte-identical legacy 09:15/15:30
+        behaviour). Pass session=MCX for the evening commodity session."""
         self.security_id = security_id
         self.p = params or DonchianBreakoutParams()
+        self.session = session
 
         # Position view — ONLY updated by notify_fill / notify_flat
         self.position: int = 0
@@ -135,7 +141,7 @@ class DonchianBreakout:
 
         # 5. EOD square-off — unconditional; must NOT depend on channel ready
         squareoff = (
-            datetime.combine(today, MARKET_CLOSE)
+            datetime.combine(today, self.session.close_time_for(today))
             - timedelta(minutes=self.p.squareoff_before_close_min)
         ).time()
         if t >= squareoff:
@@ -170,7 +176,7 @@ class DonchianBreakout:
 
         # 7. Warm-up / armed gate
         warm_until = (
-            datetime.combine(today, MARKET_OPEN)
+            datetime.combine(today, self.session.open_time)
             + timedelta(minutes=self.p.warmup_skip_open_min)
         ).time()
         channel_ready = self._channel_ready()
