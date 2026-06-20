@@ -142,6 +142,56 @@ class TestYangZhang:
         assert yz is not None and cc is not None
         assert yz > 0 and cc > 0
 
+    def test_yz_lower_than_close_close_on_trending_series(self):
+        """On a TRENDING series with noisy close-to-close moves but a TIGHT
+        intrabar range, the close-to-close estimator picks up the full close
+        dispersion while Yang-Zhang (which leans on the small high/low range and
+        is drift-independent) reports a lower vol → YZ < close-close.
+
+        This asserts the defining INEQUALITY (variance reduction), not just that
+        both estimates are positive.
+        """
+        bars = []
+        p = 100.0
+        for i in range(40):
+            o = p
+            # Upward drift + alternating noise so close-to-close returns have
+            # real dispersion (close-close > 0), but the intrabar range is tiny.
+            step = 0.01 + (0.006 if i % 2 == 0 else -0.006)
+            c = p * (1 + step)
+            h = max(o, c) * 1.0003   # very tight intrabar range
+            low = min(o, c) * 0.9997
+            bars.append((o, h, low, c))
+            p = c
+        yz = yang_zhang_realized_vol(bars, window=20)
+        cc = close_close_realized_vol([b[3] for b in bars], window=20)
+        assert yz is not None and cc is not None
+        assert yz > 0 and cc > 0
+        assert yz < cc  # variance-reduction inequality holds on a trending series
+
+    def test_rv_window_only_uses_last_n_bars(self):
+        """rv_window must be respected: prepending old, unrelated bars beyond the
+        window must NOT change the estimate (only the last window+1 bars count)."""
+        recent = [
+            (100.0, 101.0, 99.0, 100.5),
+            (100.5, 102.0, 100.0, 101.0),
+            (101.0, 101.5, 100.0, 100.2),
+            (100.2, 101.0, 99.5, 100.8),
+        ]
+        # Wildly different older bars that, if included, would blow up the vol.
+        noise = [(50.0, 80.0, 20.0, 70.0)] * 10
+        rv_recent = yang_zhang_realized_vol(recent, window=3)
+        rv_padded = yang_zhang_realized_vol(noise + recent, window=3)
+        assert rv_recent is not None and rv_padded is not None
+        assert rv_padded == pytest.approx(rv_recent, rel=1e-12)
+
+        # Same for close-close.
+        closes = [100.5, 101.0, 100.2, 100.8]
+        cc_recent = close_close_realized_vol(closes, window=3)
+        cc_padded = close_close_realized_vol([10.0] * 10 + closes, window=3)
+        assert cc_recent is not None and cc_padded is not None
+        assert cc_padded == pytest.approx(cc_recent, rel=1e-12)
+
 
 # ===========================================================================
 # 2. close-close estimator + realized_vol dispatcher
@@ -191,6 +241,29 @@ class TestRealizedVolDispatcher:
         cfg = GateV2Config(rv_source=RV_SOURCE_CLOSE_CLOSE)
         rv = realized_vol(ohlc_bars=bars, cfg=cfg)
         assert rv is not None
+
+    def test_calendar_basis_flag_rebases(self):
+        """calendar_basis=True rebases √252 → √365 (factor √(252/365) ≈ 0.831)."""
+        closes = [100.0, 101.0, 100.0, 102.0, 101.0, 103.0, 102.0] * 4
+        cfg = GateV2Config(rv_source=RV_SOURCE_CLOSE_CLOSE, rv_window=20)
+        trading = realized_vol(closes=closes, cfg=cfg)
+        calendar = realized_vol(closes=closes, cfg=cfg, calendar_basis=True)
+        assert trading is not None and calendar is not None
+        assert calendar < trading  # calendar basis is smaller
+        assert calendar == pytest.approx(trading * math.sqrt(252 / 365), rel=1e-12)
+
+    def test_calendar_basis_default_is_trading(self):
+        """Default (no flag) preserves the trading basis (back-compat)."""
+        closes = [100.0, 101.0] * 13
+        cfg = GateV2Config(rv_source=RV_SOURCE_CLOSE_CLOSE)
+        assert realized_vol(closes=closes, cfg=cfg) == realized_vol(
+            closes=closes, cfg=cfg, calendar_basis=False
+        )
+
+    def test_calendar_basis_none_input_stays_none(self):
+        """Rebasing a None (insufficient data) stays None — never raises."""
+        cfg = GateV2Config(rv_source=RV_SOURCE_CLOSE_CLOSE)
+        assert realized_vol(closes=[100.0] * 5, cfg=cfg, calendar_basis=True) is None
 
 
 # ===========================================================================
@@ -294,6 +367,14 @@ class TestBackwardation:
 
     def test_equal_is_false(self):
         assert is_backwardation(0.20, 0.20) is False
+
+    def test_default_min_ratio_has_noise_buffer(self):
+        """Default min_ratio is 1.02 (2% noise buffer): a 1% front-over-next jitter
+        does NOT trip the veto; a 3% inversion does."""
+        assert is_backwardation(0.202, 0.20) is False   # +1% → within buffer
+        assert is_backwardation(0.206, 0.20) is True     # +3% → real inversion
+        # Exactly the 2% threshold is NOT backwardation (strict >).
+        assert is_backwardation(0.204, 0.20) is False
 
     def test_min_ratio_cushion(self):
         # front only 5% above next, require 1.10× → not backwardation
@@ -534,3 +615,75 @@ class TestConfigIndexAgnostic:
         cfg = GateV2Config()
         with pytest.raises((AttributeError, TypeError)):
             cfg.k = 1.0  # type: ignore[misc]
+
+    def test_weekly_cadence_defaults(self):
+        """The VRP-percentile defaults are WEEKLY-appropriate (≈52 obs / quarter
+        minimum), not daily (252/60). At weekly cadence an ~18mo (~78-obs) sample
+        clears vrp_min_obs so the percentile sub-gate actually engages instead of
+        silently failing open (the HIGH finding)."""
+        cfg = GateV2Config()
+        assert cfg.vrp_window == 52
+        assert cfg.vrp_min_obs == 13
+        # ~18 months of weekly cycles must exceed the minimum (gate engages).
+        weekly_obs_18mo = 78
+        assert weekly_obs_18mo >= cfg.vrp_min_obs
+
+
+# ===========================================================================
+# 9. Look-ahead guard + short/missing-IV percentile path
+# ===========================================================================
+
+class TestLookAheadGuard:
+    def test_current_spread_excluded_from_trailing(self):
+        """The current cycle's own spread must not be ranked against itself.
+
+        If the caller leaks the current spread into trailing_spreads, the gate
+        drops it before ranking, so the verdict matches the clean-history case.
+        """
+        d = _today_ist()
+        # rv_trading 0.05 → rv_cal ≈ 0.0415; iv 0.20 → current spread ≈ 0.1585.
+        clean = [-0.05, -0.02, 0.0, 0.01, 0.02, 0.03]
+        res_clean = gate_v2_decision(
+            0.05, 0.20,
+            trailing_spreads=clean,
+            front_iv=0.18, next_iv=0.22,
+            cycle_date=d, expiry_date=d + timedelta(days=4),
+            cfg=GateV2Config(vrp_min_obs=5),
+        )
+        # Leak the exact current spread into the window.
+        leaked = list(clean) + [res_clean.current_spread]
+        res_leaked = gate_v2_decision(
+            0.05, 0.20,
+            trailing_spreads=leaked,
+            front_iv=0.18, next_iv=0.22,
+            cycle_date=d, expiry_date=d + timedelta(days=4),
+            cfg=GateV2Config(vrp_min_obs=5),
+        )
+        assert res_leaked.vrp_percentile == pytest.approx(res_clean.vrp_percentile)
+        assert res_leaked.decision == res_clean.decision
+
+
+class TestShortMissingIvPath:
+    def test_missing_iv_array_short_circuits_fail_open(self):
+        """Empty / short trailing-spread window → percentile fails open (no veto),
+        v1 SELL survives, percentile reported as None."""
+        d = _today_ist()
+        for window in ([], None, [0.01], [None, None]):
+            res = gate_v2_decision(
+                0.05, 0.20,
+                trailing_spreads=window,
+                front_iv=0.18, next_iv=0.22,
+                cycle_date=d, expiry_date=d + timedelta(days=4),
+                cfg=GateV2Config(vrp_min_obs=5),
+            )
+            assert res.decision == SELL_PREMIUM
+            assert res.vrp_percentile is None
+
+    def test_short_iv_array_does_not_raise(self):
+        """A short / ragged trailing window never raises (fail-open contract)."""
+        res = gate_v2_decision(
+            0.05, 0.20,
+            trailing_spreads=[0.01],
+            cfg=GateV2Config(vrp_min_obs=5),
+        )
+        assert res.decision in (SELL_PREMIUM, STAND_ASIDE)

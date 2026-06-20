@@ -131,6 +131,18 @@ def gate_decision(
 ) -> str:
     """Classify the volatility regime from a single (realized_vol, implied_vol) pair.
 
+    BASIS WARNING
+    -------------
+    This comparison is only valid when BOTH vols are on the SAME annualisation
+    basis. The realized-vol estimators in this module
+    (:func:`close_close_realized_vol`, :func:`yang_zhang_realized_vol`,
+    :func:`realized_vol`) emit the **TRADING basis** (√252), while implied vol
+    (India VIX / ATM straddle IV) is **calendar**-annualised (√365). A DIRECT v1
+    caller that passes a raw trading-basis RV here is silently biased ~17% toward
+    SELL (√(252/365) ≈ 0.831). Rebase the RV onto the calendar basis first
+    (:func:`_rebase_to_calendar`, or :func:`realized_vol` with
+    ``calendar_basis=True``). ``gate_v2_decision`` already does this internally.
+
     Parameters
     ----------
     realized_vol:
@@ -509,8 +521,16 @@ RV_SOURCE_CLOSE_CLOSE = "close_close"  # √252 close-to-close (core.fno_derived
 RV_SOURCE_YANG_ZHANG = "yang_zhang"    # OHLC Yang-Zhang (lower-variance estimator)
 
 # Default trailing window + minimum sample count for the VRP-percentile gate.
-_VRP_PCTL_WINDOW: int = 252        # ~1 trading year of trailing VRP observations
-_VRP_PCTL_MIN_OBS: int = 60        # need ≥60 obs before the percentile is meaningful
+#
+# OBSERVATION CADENCE = WEEKLY. The F&O gate runs once per WEEKLY expiry cycle,
+# so one VRP observation accrues per WEEK — NOT per trading day. The defaults
+# below are therefore WEEKLY-appropriate: ~1 year of weekly cycles, with a small
+# minimum before the percentile engages. Using daily-scale values here (252/60)
+# would mean the percentile sub-gate never accumulates enough obs on an ~18-month
+# weekly sample (~78 obs) and would silently fail-open (inert). If a caller drives
+# the gate at DAILY cadence, override vrp_window/vrp_min_obs on GateV2Config.
+_VRP_PCTL_WINDOW: int = 52         # ~1 year of WEEKLY trailing VRP observations
+_VRP_PCTL_MIN_OBS: int = 13        # need ≥~1 quarter of weekly obs before meaningful
 # Sell premium only when the *current* VRP spread sits at/above this percentile
 # of its trailing window (richer = more positive IV-RV). 0.50 = top half.
 _VRP_RICH_PERCENTILE: float = 0.50
@@ -527,6 +547,17 @@ class GateV2Config:
 
     Pass a customised instance per underlying (the orchestrator owns the registry
     of per-index configs); the defaults reproduce the NIFTY Phase-0 behaviour.
+
+    OBSERVATION CADENCE
+    -------------------
+    The VRP-percentile defaults (``vrp_window=52``, ``vrp_min_obs=13``) assume the
+    gate runs at **WEEKLY** cadence — one VRP observation per weekly expiry cycle,
+    matching how the F&O orchestrator drives this gate. ``vrp_window`` and
+    ``vrp_min_obs`` are counts of OBSERVATIONS, not trading days; at weekly cadence
+    52 obs ≈ one year and 13 obs ≈ one quarter. If a caller drives the gate at a
+    different cadence (e.g. daily), override both fields accordingly (daily-scale
+    would be ~252 / ~60). ``rv_window`` is unrelated — it counts OHLC *bars* fed to
+    the realized-vol estimator (typically daily bars).
 
     Attributes
     ----------
@@ -598,6 +629,15 @@ def close_close_realized_vol(
     """Trailing close-to-close annualised realized vol over the LAST ``window``
     log-returns (√``trading_days`` annualised; sample stdev, ddof=1).
 
+    BASIS WARNING
+    -------------
+    The returned vol is on the **TRADING-day basis** (√252). Implied vol (India
+    VIX / ATM straddle IV) is calendar-annualised (√365). Comparing the two
+    directly biases SELL by ~17% (√(252/365) ≈ 0.831). Rebase with
+    :func:`_rebase_to_calendar` (or :func:`realized_vol` with
+    ``calendar_basis=True``) before any IV comparison. ``gate_v2_decision``
+    already rebases internally.
+
     Returns ``None`` (fail-open) when there are fewer than ``window``+1 usable
     closes, when any close in the window is non-positive/None, or on any error.
     Numerically consistent with ``core.fno_derived.realized_vol_series`` for the
@@ -644,6 +684,14 @@ def yang_zhang_realized_vol(
 
     Less noisy than close-close (uses the full OHLC range), which is exactly why
     it is offered as a selectable RV source for the gate.
+
+    BASIS WARNING
+    -------------
+    The returned vol is on the **TRADING-day basis** (√252), same as
+    :func:`close_close_realized_vol`. Implied vol is calendar-annualised (√365);
+    rebase (:func:`_rebase_to_calendar` / :func:`realized_vol` with
+    ``calendar_basis=True``) before comparing to IV, or SELL is ~17% over-favoured.
+    ``gate_v2_decision`` rebases internally.
 
     Returns ``None`` (fail-open) when there are fewer than ``window``+1 bars (an
     overnight term needs the prior close), when any OHLC value is
@@ -709,6 +757,8 @@ def realized_vol(
     closes: Optional[Sequence[float]] = None,
     ohlc_bars: Optional[Sequence[tuple[float, float, float, float]]] = None,
     cfg: GateV2Config = GateV2Config(),
+    *,
+    calendar_basis: bool = False,
 ) -> Optional[float]:
     """Compute trailing realized vol with the estimator selected by ``cfg.rv_source``.
 
@@ -716,23 +766,36 @@ def realized_vol(
     * ``RV_SOURCE_CLOSE_CLOSE`` (default) → :func:`close_close_realized_vol` on
       ``closes`` (or the close column of ``ohlc_bars`` if ``closes`` is None).
 
+    BASIS
+    -----
+    Both estimators annualise with √252 (**TRADING basis**). Implied vol (VIX /
+    ATM straddle IV) is calendar-annualised (√365), so a raw trading-basis RV
+    over-favours SELL by ~17% when compared directly. Pass ``calendar_basis=True``
+    to rebase the result onto the calendar (365) basis (via
+    :func:`_rebase_to_calendar`) so it is apples-to-apples with implied vol.
+    Default ``False`` preserves the trading basis (back-compat). Note
+    ``gate_v2_decision`` does its own internal rebasing and does NOT route through
+    this flag.
+
     Returns ``None`` (fail-open) when the required input is missing for the chosen
-    source, or on any error. Both estimators annualise with √252 (trading basis);
-    rebase to calendar with :func:`_rebase_to_calendar` before comparing to
-    implied vol (the gate functions do this internally).
+    source, or on any error.
     """
     try:
         if cfg.rv_source == RV_SOURCE_YANG_ZHANG:
             if ohlc_bars is None:
                 return None
-            return yang_zhang_realized_vol(ohlc_bars, window=cfg.rv_window)
-        # close-close (default)
-        src = closes
-        if src is None and ohlc_bars is not None:
-            src = [b[3] for b in ohlc_bars if b is not None and len(b) >= 4]
-        if src is None:
-            return None
-        return close_close_realized_vol(src, window=cfg.rv_window)
+            rv = yang_zhang_realized_vol(ohlc_bars, window=cfg.rv_window)
+        else:
+            # close-close (default)
+            src = closes
+            if src is None and ohlc_bars is not None:
+                src = [b[3] for b in ohlc_bars if b is not None and len(b) >= 4]
+            if src is None:
+                return None
+            rv = close_close_realized_vol(src, window=cfg.rv_window)
+        if calendar_basis:
+            return _rebase_to_calendar(rv)
+        return rv
     except Exception as exc:  # noqa: BLE001
         logger.warning("realized_vol: error (%s) → None", exc)
         return None
@@ -746,6 +809,14 @@ def vrp_spread(realized_vol_in: Optional[float], implied_vol: Optional[float]) -
     ``None`` on any None / non-positive implied vol / negative realized vol.
     Never raises. (Spread, not ratio: the percentile gate ranks spreads so the
     sign convention "more positive = richer" is intuitive.)
+
+    BASIS WARNING
+    -------------
+    ``implied_vol`` is calendar-annualised (√365); pass a **calendar-basis**
+    ``realized_vol_in`` (rebase a √252 trading-basis RV via
+    :func:`_rebase_to_calendar` / :func:`realized_vol` with ``calendar_basis=True``
+    first), otherwise the spread is inflated by ~17% and over-favours SELL.
+    ``gate_v2_decision`` rebases before calling this.
     """
     try:
         if realized_vol_in is None or implied_vol is None:
@@ -827,7 +898,7 @@ def vrp_percentile_gate(
 def is_backwardation(
     front_iv: Optional[float],
     next_iv: Optional[float],
-    min_ratio: float = 1.0,
+    min_ratio: float = 1.02,
 ) -> bool:
     """Front-expiry IV in backwardation vs the next expiry → stress regime.
 
@@ -835,6 +906,9 @@ def is_backwardation(
     near-term stress (event/crash pricing): premium-selling is dangerous there.
     Returns True ONLY when both IVs are usable positives AND
     ``front_iv > min_ratio * next_iv``.
+
+    The default ``min_ratio`` is 1.02 (a 2% noise buffer) so trivial front-vs-next
+    IV jitter does not trip a stress veto; require a real inversion.
 
     FAIL-OPEN: any None / non-positive IV → ``False`` (do NOT veto on missing
     term-structure data; the gate then relies on the other checks). Never raises.
@@ -945,6 +1019,14 @@ def gate_v2_decision(
     trailing_spreads:
         Trailing (PIT, ≤ decision-date) IV−RV spreads for the percentile gate.
         ``None``/short → percentile sub-gate fails open (does not veto).
+        **NO LOOK-AHEAD:** this MUST exclude the current cycle's own spread —
+        include only spreads from cycles STRICTLY BEFORE the decision date.
+        Passing the current spread inflates the percentile rank (the value is
+        ranked against itself) and biases toward SELL. The current spread is
+        computed here from ``realized_vol_in``/``implied_vol`` and ranked against
+        the trailing window; as a defensive guard the exact current spread is
+        dropped from the window before ranking (a backstop, not a substitute for
+        the caller supplying a properly trailing series).
     front_iv, next_iv:
         Front- vs next-expiry ATM IV for the term-structure veto. Prefer real
         ATM IV (resolve_iv_source / option_atm_iv); VIX is the fallback front IV.
@@ -966,7 +1048,13 @@ def gate_v2_decision(
         v1 = gate_decision(rv_cal, implied_vol, k=cfg.k)
 
         spread = vrp_spread(rv_cal, implied_vol)
-        rich, pct = vrp_percentile_gate(spread, trailing_spreads or [], cfg=cfg)
+        # Look-ahead guard: trailing_spreads must EXCLUDE the current cycle's own
+        # spread (PIT discipline). As a defensive backstop, drop any entry exactly
+        # equal to the current spread so the value is never ranked against itself.
+        trailing = trailing_spreads or []
+        if spread is not None:
+            trailing = [s for s in trailing if s is None or s != spread]
+        rich, pct = vrp_percentile_gate(spread, trailing, cfg=cfg)
         backwardation = is_backwardation(front_iv, next_iv)
         event = is_event_day(cycle_date, expiry_date, event_dates)
 
