@@ -382,6 +382,40 @@ def black76_put(F: float, K: float, T: float, sigma: float) -> float:
     return call - (F - K)
 
 
+def black76_delta(F: float, K: float, T: float, sigma: float, option_type: str) -> float:
+    """Undiscounted Black-76 option delta.
+
+    Call delta = Φ(d1); put delta = Φ(d1) − 1 = −Φ(−d1).  Returned as a SIGNED
+    value (call ∈ [0, 1], put ∈ [−1, 0]).  Callers that select on a target |delta|
+    (e.g. the 16-delta short strike) should compare ``abs(delta)``.
+
+    Guards
+    ------
+    T ≤ 0 or sigma ≤ 0 → degenerate: delta collapses to the moneyness step
+    (call = 1.0 if F > K else 0.0; put = −1.0 if F < K else 0.0).
+
+    Parameters
+    ----------
+    F:           Forward price (≈ spot for index options).
+    K:           Strike.
+    T:           Time to expiry in years (= DTE / 365).
+    sigma:       Annualised implied volatility.
+    option_type: ``"CE"`` (call) or ``"PE"`` (put).
+    """
+    is_call = option_type == "CE"
+    # Degenerate / non-positive inputs → intrinsic-moneyness delta (no math.log
+    # on a non-positive ratio). F<=0 or K<=0 cannot arise from valid NIFTY data
+    # but is guarded defensively so corrupt cycles can never raise.
+    if T <= 0.0 or sigma <= 0.0 or F <= 0.0 or K <= 0.0:
+        if is_call:
+            return 1.0 if F > K else 0.0
+        return -1.0 if F < K else 0.0
+    sqrt_T = math.sqrt(T)
+    d1 = (math.log(F / K) + 0.5 * sigma * sigma * T) / (sigma * sqrt_T)
+    nd1 = _ncdf(d1)
+    return nd1 if is_call else nd1 - 1.0
+
+
 # ---------------------------------------------------------------------------
 # Condor construction
 # ---------------------------------------------------------------------------
@@ -432,6 +466,350 @@ def build_condor(
 
 
 # ---------------------------------------------------------------------------
+# Configurable entry DTE (Phase-0c)
+# ---------------------------------------------------------------------------
+# The historical weekly path anchors entry on the PRIOR expiry boundary (entry
+# DTE ≈ the full inter-expiry gap, ~7 calendar days for NIFTY weeklies). Phase-0c
+# lets a caller enter at a target N DTE (e.g. 4) by re-anchoring the entry day to
+# the latest available trading day whose (expiry − day).days ≈ entry_dte. This is
+# pure: it operates on a sorted list of candidate trading days + the expiry date.
+
+
+def pick_entry_day_for_dte(
+    candidate_days: list[date],
+    expiry_date: date,
+    entry_dte: int,
+) -> date | None:
+    """Pick the trading day from ``candidate_days`` whose DTE to ``expiry_date`` is
+    closest to (but not less than) ``entry_dte``; fall back to the closest overall.
+
+    Only days strictly before ``expiry_date`` are eligible. Returns ``None`` when
+    no candidate precedes the expiry. Preference order:
+      1. The latest day with DTE >= entry_dte (so we never enter LATER than asked).
+      2. If none qualifies (all candidates are nearer than entry_dte), the day with
+         the largest DTE (the earliest available — closest to the request).
+    """
+    eligible = [d for d in candidate_days if d < expiry_date]
+    if not eligible:
+        return None
+    with_dte = [(d, (expiry_date - d).days) for d in eligible]
+    at_or_before = [(d, dte) for d, dte in with_dte if dte >= entry_dte]
+    if at_or_before:
+        # Latest such day = smallest DTE that is still >= entry_dte.
+        return min(at_or_before, key=lambda t: t[1])[0]
+    # All candidates nearer than entry_dte → take the one with the largest DTE.
+    return max(with_dte, key=lambda t: t[1])[0]
+
+
+# ---------------------------------------------------------------------------
+# Fixed-delta short-strike selection (Phase-0c)
+# ---------------------------------------------------------------------------
+# Two strike-placement methods are supported:
+#
+#   "move"  (default, back-compat) — short strikes at spot ± move_mult × implied
+#           move, rounded to the grid (the legacy build_condor path).
+#   "delta" — short strikes chosen so the SHORT leg's |delta| ≈ target_delta.
+#           Uses REAL per-strike IV from the forward-collected option chain
+#           (option_chain_snapshot, projected onto the cycle as ``per_strike_iv``)
+#           when available; FALLS BACK to a single flat IV (the cycle's resolved
+#           ATM straddle IV) for the Black-76 delta when no per-strike IV exists.
+#
+# The fallback means the delta method works TODAY on historical cycles (flat-IV
+# Black-76 delta) and sharpens automatically once real per-strike IV lands — no
+# code change required, only richer cycle dicts.
+
+STRIKE_METHOD_MOVE = "move"
+STRIKE_METHOD_DELTA = "delta"
+
+# Provenance labels for the delta-selection IV source (mirrors IV_SOURCE_*).
+DELTA_IV_SOURCE_REAL = "real_per_strike"   # per-strike IV from the option chain
+DELTA_IV_SOURCE_FLAT = "flat_atm"          # single ATM IV fallback
+
+
+def _strike_iv(
+    strike: int,
+    flat_iv: float,
+    per_strike_iv: dict[int, float] | None,
+) -> tuple[float, str]:
+    """Resolve the IV to use for ``strike``: real per-strike IV if present + valid,
+    else the flat ATM IV fallback. Returns ``(iv, source_label)``."""
+    if per_strike_iv:
+        raw = per_strike_iv.get(int(strike))
+        if raw is not None:
+            try:
+                raw_f = float(raw)
+                if raw_f > 0:
+                    return raw_f, DELTA_IV_SOURCE_REAL
+            except (TypeError, ValueError):
+                pass
+    return flat_iv, DELTA_IV_SOURCE_FLAT
+
+
+def select_short_strike_by_delta(
+    spot: float,
+    flat_iv: float,
+    dte: int,
+    option_type: str,
+    target_delta: float,
+    *,
+    step: int = 50,
+    per_strike_iv: dict[int, float] | None = None,
+    max_strikes: int = 60,
+) -> tuple[int, str]:
+    """Pick the short strike whose |Black-76 delta| is closest to ``target_delta``.
+
+    Walks the strike grid OTM from the ATM strike (calls upward, puts downward)
+    and returns the grid strike whose absolute delta is nearest the target. Uses
+    real per-strike IV (``per_strike_iv`` map keyed by int strike) when present,
+    falling back to ``flat_iv`` per strike otherwise.
+
+    Parameters
+    ----------
+    spot:          Index level (Black-76 forward F).
+    flat_iv:       Fallback annualised IV (the cycle's resolved ATM straddle IV).
+    dte:           Calendar days to expiry.
+    option_type:   ``"CE"`` (short call, walk up) or ``"PE"`` (short put, walk down).
+    target_delta:  Target |delta| of the short leg (e.g. 0.16 ≈ 1-σ short strike).
+    step:          Strike-grid spacing.
+    per_strike_iv: Optional ``{int(strike): iv_fraction}`` from the real chain.
+    max_strikes:   Safety bound on how many strikes to scan from ATM.
+
+    Returns
+    -------
+    (short_strike, iv_source) — the chosen grid strike and the IV-source label of
+    that strike (``real_per_strike`` | ``flat_atm``).
+    """
+    T = dte / 365.0
+    atm = _round_to_step(spot, step)
+    direction = 1 if option_type == "CE" else -1
+    target = abs(target_delta)
+
+    best_k = atm
+    best_err = float("inf")
+    best_src = DELTA_IV_SOURCE_FLAT
+    for i in range(max_strikes + 1):
+        k = atm + direction * i * step
+        if k <= 0:
+            break
+        iv, src = _strike_iv(k, flat_iv, per_strike_iv)
+        d = abs(black76_delta(float(spot), float(k), T, iv, option_type))
+        err = abs(d - target)
+        if err < best_err:
+            best_err = err
+            best_k = k
+            best_src = src
+        # Delta is monotone in moneyness as we move OTM (shrinks toward 0); once
+        # we have passed the target and the error starts growing, stop.
+        elif d < target and err > best_err:
+            break
+    return best_k, best_src
+
+
+def build_condor_by_delta(
+    spot: float,
+    flat_iv: float,
+    dte: int,
+    target_delta: float,
+    *,
+    wing_strikes: int = 2,
+    step: int = 50,
+    per_strike_iv: dict[int, float] | None = None,
+) -> tuple[dict[str, int], str]:
+    """Build the four condor strikes by fixed-delta short-strike selection.
+
+    Short put / short call are each placed at the grid strike whose |delta| ≈
+    ``target_delta`` (via :func:`select_short_strike_by_delta`); the long legs sit
+    ``wing_strikes`` grid steps further OTM, identical to :func:`build_condor`.
+
+    Returns ``(strikes_dict, delta_iv_source)`` where ``delta_iv_source`` is
+    ``real_per_strike`` if EITHER short strike resolved a real per-strike IV, else
+    ``flat_atm`` (the conservative fallback).
+    """
+    short_put_k, sp_src = select_short_strike_by_delta(
+        spot, flat_iv, dte, "PE", target_delta, step=step, per_strike_iv=per_strike_iv,
+    )
+    short_call_k, sc_src = select_short_strike_by_delta(
+        spot, flat_iv, dte, "CE", target_delta, step=step, per_strike_iv=per_strike_iv,
+    )
+    long_put_k = short_put_k - wing_strikes * step
+    long_call_k = short_call_k + wing_strikes * step
+    source = (
+        DELTA_IV_SOURCE_REAL
+        if DELTA_IV_SOURCE_REAL in (sp_src, sc_src)
+        else DELTA_IV_SOURCE_FLAT
+    )
+    return (
+        {
+            "short_put_k": short_put_k,
+            "long_put_k": long_put_k,
+            "short_call_k": short_call_k,
+            "long_call_k": long_call_k,
+        },
+        source,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Exit-rule engine (Phase-0c) — pure, testable, default = expiry-hold
+# ---------------------------------------------------------------------------
+# The historical backtest is daily-step: a cycle carries an entry and an expiry
+# settlement, plus (optionally) a per-day spot path between them. The exit engine
+# walks that path (when present) and applies, in priority order:
+#
+#   1. profit-target — exit when mark-to-market profit ≥ pt_pct × credit.
+#   2. stop-loss     — exit when mark-to-market loss ≥ sl_mult × credit.
+#   3. time-stop     — exit at time_stop_dte calendar days-to-expiry.
+#
+# Without an intra-cycle spot path, only the time-stop can fire on the day grid;
+# profit-target / stop-loss need a path. When NO rule is configured (the default)
+# the position is simply held to expiry — fully back-compatible with the legacy
+# behaviour. The mark-to-market uses Black-76 on the remaining DTE with the entry
+# IV (a flat-IV approximation; honest caveat carried).
+#
+# Honesty caveats specific to early exits:
+#   * MTM uses the ENTRY IV held flat — it does not see a vol path. The TRIGGER
+#     decision (profit/stop threshold) is made on the un-slippaged Black-76 mark
+#     (mid), while the REALISED gross applies adverse close-side slippage + the
+#     close-side brokerage/STT stack (run_backtest), so the booked P&L is
+#     conservative relative to the trigger mark.
+#   * ROM in the sweep is net_pnl / (theoretical max_loss at expiry). For an
+#     early-exit trade the capital genuinely at risk while open is the SAME
+#     defined-risk max_loss (the broker blocks it until you close), so ROM stays
+#     a valid return-on-blocked-margin — but the per-trade realised loss can be
+#     smaller than max_loss, so ROM is a return-on-RISK-BUDGET, not on realised
+#     loss. Read it as the former.
+
+EXIT_REASON_EXPIRY = "expiry"
+EXIT_REASON_PROFIT_TARGET = "profit_target"
+EXIT_REASON_STOP_LOSS = "stop_loss"
+EXIT_REASON_TIME_STOP = "time_stop"
+
+
+@dataclass(frozen=True)
+class ExitParams:
+    """Configurable exit rules for a condor cycle. All-None → hold to expiry.
+
+    Attributes
+    ----------
+    profit_target_pct:
+        Exit when running profit ≥ ``profit_target_pct`` × entry credit
+        (0.5 = take 50 % of max credit). ``None`` disables.
+    stop_loss_mult:
+        Exit when running loss ≥ ``stop_loss_mult`` × entry credit (2.0 = stop at
+        2× credit lost). ``None`` disables.
+    time_stop_dte:
+        Exit when calendar DTE drops to ``time_stop_dte`` (e.g. 1 = exit the day
+        before expiry). ``None`` disables.
+    """
+
+    profit_target_pct: float | None = None
+    stop_loss_mult: float | None = None
+    time_stop_dte: int | None = None
+
+    @property
+    def is_expiry_hold(self) -> bool:
+        """True when no exit rule is configured (legacy hold-to-expiry)."""
+        return (
+            self.profit_target_pct is None
+            and self.stop_loss_mult is None
+            and self.time_stop_dte is None
+        )
+
+
+def condor_mtm_value(
+    spot: float,
+    iv: float,
+    dte_remaining: int,
+    strikes: dict[str, int],
+    lot: int = NIFTY_LOT,
+) -> float:
+    """Mark-to-market value (per lot, ₹) of the SHORT condor at a point in time.
+
+    Returns the cost to CLOSE the position now: the net premium that would be paid
+    to buy back the shorts and sell the longs. A short condor opened for ``credit``
+    has running P&L = ``credit − condor_mtm_value`` (both per lot).
+    """
+    T = dte_remaining / 365.0
+    F = spot
+    sp = black76_put(F, strikes["short_put_k"], T, iv)
+    lp = black76_put(F, strikes["long_put_k"], T, iv)
+    sc = black76_call(F, strikes["short_call_k"], T, iv)
+    lc = black76_call(F, strikes["long_call_k"], T, iv)
+    # cost to close = buy back shorts (pay sp+sc) − sell longs (receive lp+lc)
+    close_cost_per_unit = (sp + sc) - (lp + lc)
+    return close_cost_per_unit * lot
+
+
+def evaluate_exit(
+    credit_per_lot: float,
+    strikes: dict[str, int],
+    iv: float,
+    entry_dte: int,
+    spot_path: list[tuple[int, float]] | None,
+    exit_params: ExitParams,
+    lot: int = NIFTY_LOT,
+) -> tuple[str, int | None, float | None, float | None]:
+    """Decide when/whether an exit rule fires along the cycle's day path.
+
+    Parameters
+    ----------
+    credit_per_lot:
+        Entry credit received (₹ per lot, after slippage). Used as the base for
+        the profit-target and stop-loss thresholds.
+    strikes:        The condor strikes (for the MTM repricing).
+    iv:             Entry IV (flat-IV MTM approximation).
+    entry_dte:      Calendar DTE at entry.
+    spot_path:
+        Optional chronological ``[(dte_remaining, spot), ...]`` between entry
+        (exclusive) and expiry (exclusive). ``None``/empty → no path; only a
+        time-stop AT entry could match (it won't, since entry_dte > time_stop_dte
+        normally) so the result is hold-to-expiry.
+    exit_params:    The configured rules.
+    lot:            Lot size.
+
+    Returns
+    -------
+    (reason, exit_dte, mtm_pnl_per_lot, exit_spot)
+        ``reason`` is one of the EXIT_REASON_* constants. When the position holds
+        to expiry, ``exit_dte``/``mtm_pnl_per_lot``/``exit_spot`` are ``None`` (the
+        caller uses the real expiry settlement instead). When a rule fires,
+        ``exit_dte`` is the DTE it fired at, ``mtm_pnl_per_lot`` the realised P&L
+        per lot at the mark (credit − cost-to-close, BEFORE brokerage/STT costs),
+        and ``exit_spot`` the spot at the exit node (so the caller can reprice the
+        closing legs for the close-side brokerage/STT stack).
+    """
+    if exit_params.is_expiry_hold or not spot_path:
+        return EXIT_REASON_EXPIRY, None, None, None
+
+    pt = exit_params.profit_target_pct
+    sl = exit_params.stop_loss_mult
+    ts = exit_params.time_stop_dte
+
+    # Threshold base: the % profit-target and ×-credit stop-loss scale off the
+    # MAGNITUDE of the entry credit. Using abs() keeps the thresholds sensible
+    # even if a degenerate cycle yields a non-positive credit (then a profit-
+    # target requires running_pnl >= 0 and a stop-loss requires it <= 0 — the
+    # signs never invert). For the normal positive-credit condor this is identical
+    # to credit_per_lot.
+    base = abs(credit_per_lot)
+
+    for dte_rem, path_spot in spot_path:
+        # Time-stop fires at/after the configured DTE (lowest priority among the
+        # path checks; profit/stop checked first at this same node).
+        mtm = condor_mtm_value(path_spot, iv, max(dte_rem, 0), strikes, lot)
+        running_pnl = credit_per_lot - mtm  # ₹ per lot
+
+        if pt is not None and running_pnl >= pt * base:
+            return EXIT_REASON_PROFIT_TARGET, dte_rem, running_pnl, path_spot
+        if sl is not None and running_pnl <= -sl * base:
+            return EXIT_REASON_STOP_LOSS, dte_rem, running_pnl, path_spot
+        if ts is not None and dte_rem <= ts:
+            return EXIT_REASON_TIME_STOP, dte_rem, running_pnl, path_spot
+
+    return EXIT_REASON_EXPIRY, None, None, None
+
+
+# ---------------------------------------------------------------------------
 # Trade record
 # ---------------------------------------------------------------------------
 
@@ -458,6 +836,11 @@ class CondorTrade:
     # Phase-0a fidelity provenance
     iv_source: str = ""            # real_atm | vix_proxy (fix #3)
     settlement_source: str = ""    # fsp_official | halfhour_vwap | close_proxy (fix #4)
+    # Phase-0c provenance
+    strike_method: str = STRIKE_METHOD_MOVE   # move | delta
+    delta_iv_source: str = ""      # real_per_strike | flat_atm (delta method only)
+    exit_reason: str = EXIT_REASON_EXPIRY     # expiry | profit_target | stop_loss | time_stop
+    exit_dte: int = 0              # DTE at which a non-expiry exit fired (0 = held to expiry)
 
 
 # ---------------------------------------------------------------------------
@@ -578,6 +961,11 @@ def run_backtest(
     k: float = 0.9,
     move_mult: float = 1.5,
     capital: float = 200_000.0,
+    *,
+    wing_strikes: int = 2,
+    strike_method: str = STRIKE_METHOD_MOVE,
+    target_delta: float = 0.16,
+    exit_params: ExitParams | None = None,
 ) -> dict[str, Any]:
     """Run the iron-condor backtest over a list of weekly NIFTY cycles.
 
@@ -726,8 +1114,18 @@ def run_backtest(
             )
             continue
 
-        # Build strikes
-        strikes = build_condor(spot, em, move_mult=move_mult)
+        # Build strikes — move-multiple (default) or fixed-delta (Phase-0c).
+        # Delta selection prefers REAL per-strike IV (cycle["per_strike_iv"]) and
+        # falls back to the flat ATM IV when absent (works now, sharpens later).
+        if strike_method == STRIKE_METHOD_DELTA:
+            per_strike_iv = cycle.get("per_strike_iv")
+            strikes, delta_iv_source = build_condor_by_delta(
+                spot, straddle_iv, dte, target_delta,
+                wing_strikes=wing_strikes, per_strike_iv=per_strike_iv,
+            )
+        else:
+            strikes = build_condor(spot, em, wing_strikes=wing_strikes, move_mult=move_mult)
+            delta_iv_source = ""
 
         # Price condor (no slippage yet — applied below to OTM wings only)
         price_result = price_condor(spot, straddle_iv, dte, strikes)
@@ -756,15 +1154,66 @@ def run_backtest(
         wing_width_pts = strikes["short_put_k"] - strikes["long_put_k"]  # same for call side
         max_loss_per_lot = max(0.0, wing_width_pts - credit_per_unit_adj) * NIFTY_LOT
 
-        # Gross P&L at expiry
-        gross = resolve_condor(strikes, credit_per_unit_adj, expiry_spot)["gross_pnl"]
+        # Exit rule (Phase-0c). Default (no rules) → hold to expiry. When a
+        # profit-target / stop-loss / time-stop fires along the cycle's day path
+        # (cycle["spot_path"] = [(dte_remaining, spot), ...]), close at the mark.
+        ep = exit_params or ExitParams()
+        spot_path = cycle.get("spot_path")
+        exit_reason, exit_dte_fired, mtm_pnl_per_lot, exit_spot = evaluate_exit(
+            credit_per_lot_adj, strikes, straddle_iv, dte, spot_path, ep,
+        )
+
+        # Closing legs (only populated on an early exit) — reversed sides, repriced
+        # at the exit node. Their brokerage/STT/exchange/stamp stack is added to
+        # total_costs below; this is the realistic cost of unwinding before expiry
+        # that a hold-to-expiry trade does not pay (hold-to-expiry settles in cash).
+        closing_legs: list[tuple[float, int, str]] = []
+
+        if exit_reason != EXIT_REASON_EXPIRY and mtm_pnl_per_lot is not None:
+            # Closed early at the MTM mark. Reprice the four legs at the exit node
+            # and apply close-side slippage (adverse, mirrors entry): we BUY back the
+            # shorts (pay mid+slip) and SELL the longs (receive mid−slip). The gross
+            # is then credit(entry, slippage-adj) − cost-to-close(slippage-adj), so
+            # entry and exit are on the SAME slippage convention (removes the
+            # MTM-optimism the QA flagged).
+            T_exit = max(exit_dte_fired or 0, 0) / 365.0
+            c_sp = black76_put(exit_spot, strikes["short_put_k"], T_exit, straddle_iv)
+            c_lp = black76_put(exit_spot, strikes["long_put_k"], T_exit, straddle_iv)
+            c_sc = black76_call(exit_spot, strikes["short_call_k"], T_exit, straddle_iv)
+            c_lc = black76_call(exit_spot, strikes["long_call_k"], T_exit, straddle_iv)
+            c_sp_slip, c_lp_slip = slippage(c_sp), slippage(c_lp)
+            c_sc_slip, c_lc_slip = slippage(c_sc), slippage(c_lc)
+            # Cost to close per unit (adverse): buy back shorts at mid+slip, sell
+            # longs at mid−slip.
+            close_cost_per_unit = (
+                (c_sp + c_sp_slip) + (c_sc + c_sc_slip)
+                - (c_lp - c_lp_slip) - (c_lc - c_lc_slip)
+            )
+            gross = credit_per_lot_adj - close_cost_per_unit * NIFTY_LOT
+            exit_dte_record = int(exit_dte_fired) if exit_dte_fired is not None else 0
+            # Closing-leg cost legs: shorts BUY-to-close, longs SELL-to-close.
+            closing_legs = [
+                (c_sp + c_sp_slip, NIFTY_LOT, "BUY"),
+                (c_lp - c_lp_slip, NIFTY_LOT, "SELL"),
+                (c_sc + c_sc_slip, NIFTY_LOT, "BUY"),
+                (c_lc - c_lc_slip, NIFTY_LOT, "SELL"),
+            ]
+        else:
+            # Gross P&L at expiry
+            gross = resolve_condor(strikes, credit_per_unit_adj, expiry_spot)["gross_pnl"]
+            exit_reason = EXIT_REASON_EXPIRY
+            exit_dte_record = 0
 
         # Exercise intrinsic for costs: amount of intrinsic value exercised at expiry
-        # (relevant for STT on exercise — ITM at expiry means the long legs have value)
-        S = expiry_spot
-        lp_intrinsic = max(strikes["long_put_k"] - S, 0.0) * NIFTY_LOT
-        lc_intrinsic = max(S - strikes["long_call_k"], 0.0) * NIFTY_LOT
-        exercise_intrinsic = lp_intrinsic + lc_intrinsic
+        # (relevant for STT on exercise — ITM at expiry means the long legs have value).
+        # On an EARLY exit the position is closed before expiry → no exercise STT.
+        if exit_reason == EXIT_REASON_EXPIRY:
+            S = expiry_spot
+            lp_intrinsic = max(strikes["long_put_k"] - S, 0.0) * NIFTY_LOT
+            lc_intrinsic = max(S - strikes["long_call_k"], 0.0) * NIFTY_LOT
+            exercise_intrinsic = lp_intrinsic + lc_intrinsic
+        else:
+            exercise_intrinsic = 0.0
 
         # Leg list: (slippage-adjusted premium_per_unit, lot, side) for all 4 legs
         # Short legs filled at (mid - slip); long legs filled at (mid + slip).
@@ -777,6 +1226,12 @@ def run_backtest(
         ]
         cost_result = condor_costs(legs, exercise_intrinsic=exercise_intrinsic)
         total_costs = cost_result.total
+
+        # On an early exit, add the close-side brokerage/STT/exchange/stamp stack
+        # for unwinding the four legs (QA: hold-to-expiry pays none of this; early
+        # exits must, or the edge is optimistic for tight profit-targets).
+        if closing_legs:
+            total_costs += condor_costs(closing_legs).total
 
         net = gross - total_costs
 
@@ -798,6 +1253,10 @@ def run_backtest(
                 leg_premiums=leg_premiums,
                 iv_source=iv_source,
                 settlement_source=settlement_source,
+                strike_method=strike_method,
+                delta_iv_source=delta_iv_source,
+                exit_reason=exit_reason,
+                exit_dte=exit_dte_record,
             )
         )
 
@@ -1012,6 +1471,7 @@ def cycles_from_db(
     vix_id: str | None = None,
     timeframe: str = "1d",
     mode: str = "weekly",
+    entry_dte: int | None = None,
 ) -> list[dict]:
     """Assemble weekly iron-condor cycles from the DB tables created in migrations 009/010.
 
@@ -1033,6 +1493,14 @@ def cycles_from_db(
     vix_id:     ``security_id`` of the volatility index row in index_bars.
                 Defaults to ``index.vix_security_id``.
     timeframe:  Bar timeframe stored in index_bars (default ``"1d"``).
+    entry_dte:  Optional target entry days-to-expiry (Phase-0c). When set, each
+                cycle's entry day is re-anchored (via ``pick_entry_day_for_dte``)
+                to the latest trading day with DTE >= ``entry_dte`` before the
+                expiry boundary, instead of the prior-expiry anchor. ``None``
+                (default) keeps the legacy prior-expiry entry. **Only honoured in
+                ``mode="weekly"``** — the ``expiry_calendar`` (forward/live) path
+                ignores it (it pairs consecutive expiry dates and has no
+                intermediate trading-day grid to re-anchor onto).
     mode:       Cycle-boundary strategy:
 
                 ``"weekly"`` *(default — historical backtest path)*
@@ -1110,7 +1578,9 @@ def cycles_from_db(
     tf = timeframe
 
     if mode == "weekly":
-        return _cycles_from_db_weekly(eff_index_id, eff_vix_id, tf, get_session, text, index)
+        return _cycles_from_db_weekly(
+            eff_index_id, eff_vix_id, tf, get_session, text, index, entry_dte=entry_dte
+        )
     else:
         return _cycles_from_db_expiry_calendar(
             eff_symbol, eff_index_id, eff_vix_id, tf, get_session, text
@@ -1208,6 +1678,8 @@ def _cycles_from_db_weekly(
     get_session: Any,
     text: Any,
     index: IndexConfig = NIFTY,
+    *,
+    entry_dte: int | None = None,
 ) -> list[dict]:
     """Historical-backtest path: synthetic ISO-week boundaries from index_bars.
 
@@ -1252,7 +1724,19 @@ def _cycles_from_db_weekly(
         )
         return []
 
-    pairs = list(zip(bounds[:-1], bounds[1:]))
+    # Entry boundaries: by default each cycle enters on the PRIOR expiry boundary.
+    # When entry_dte is set, re-anchor the entry to a trading day at ≈entry_dte
+    # calendar days before the expiry (Phase-0c configurable entry DTE).
+    all_days = sorted(index_map)
+    if entry_dte is None:
+        pairs = list(zip(bounds[:-1], bounds[1:]))
+    else:
+        pairs = []
+        for expiry in bounds:
+            # Candidate entry days: trading days strictly before this expiry.
+            entry_day = pick_entry_day_for_dte(all_days, expiry, entry_dte)
+            if entry_day is not None and entry_day < expiry:
+                pairs.append((entry_day, expiry))
     cycles = _build_cycles_from_pairs(pairs, index_map, vix_map, "weekly")
 
     if len(cycles) == 0:
