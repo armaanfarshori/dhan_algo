@@ -1,5 +1,6 @@
 """
-Intraday Options Scalper (Ladder) — pure signal/ladder engine for NIFTY long options.
+Intraday Options Scalper — pure signal/ladder engine for index long options
+(NIFTY, BANKNIFTY, … — per-index step/lot/points; NEVER NIFTY-only).
 
 This class is **deliberately synchronous and IO-free**: underlying ticks in, ScalpDecisions
 out.  It mirrors the structure and hard rules of ``strategies/orb.py`` (session reset,
@@ -45,19 +46,70 @@ MAX_FUTURE_SKEW = timedelta(minutes=2)
 
 
 # ---------------------------------------------------------------------------
+# Per-index identity (NEVER NIFTY-only)
+# ---------------------------------------------------------------------------
+#
+# step (strike grid) + lot (contract size) come from core.instruments
+# (INDEX_CONFIGS) — the single source of truth used by the live ATM lookup —
+# so the scalper can never drift from the broker's real grid/lot.  The
+# POINTS-based activity/spacing fields are NOT in INDEX_CONFIGS (they are a
+# strategy concern), so they live here, scaled to each index's price level and
+# typical 1-min range.  Percentage/bps fields (vwap_band, mom_thresh, stop_pct,
+# trail_pct, tp_ladder_pct) are dimensionless and stay index-agnostic.
+#
+# min_atr_pts / rung_spacing_pts heuristics:
+#   NIFTY     (~25k)  : min_atr_pts 6.0,  rung_spacing_pts 10.0
+#   BANKNIFTY (~55k)  : min_atr_pts 16.0, rung_spacing_pts 27.0  (~BANKNIFTY/NIFTY
+#                       price ratio ≈ 2.5–2.7× the NIFTY points figures)
+# Any index present in INDEX_CONFIGS works; unseen indices fall back to the
+# NIFTY points figures (with that index's real step/lot) rather than crashing.
+INDEX_POINTS = {
+    "NIFTY":     {"min_atr_pts": 6.0,  "rung_spacing_pts": 10.0},
+    "BANKNIFTY": {"min_atr_pts": 16.0, "rung_spacing_pts": 27.0},
+}
+# Default points used for any index without an explicit INDEX_POINTS entry.
+_DEFAULT_POINTS = INDEX_POINTS["NIFTY"]
+
+
+def _index_step_lot(index_name: str) -> tuple[int, int]:
+    """Return (step, lot) for an index from core.instruments.INDEX_CONFIGS.
+
+    INDEX_CONFIGS is the single source of truth (also used by the live ATM
+    lookup), so step/lot are never hardcoded here.  Falls back to NIFTY's
+    50/65 only if the index is unknown.
+    """
+    from core.instruments import InstrumentMaster
+
+    cfg = InstrumentMaster.INDEX_CONFIGS.get(index_name.upper())
+    if not cfg:
+        logger.warning(
+            "[OptionsScalper] unknown index %r — falling back to NIFTY step/lot",
+            index_name,
+        )
+        return 50, 65
+    return int(cfg["strike_step"]), int(cfg["lot_size"])
+
+
+# ---------------------------------------------------------------------------
 # Params
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class ScalperParams:
+    # ── index identity (§1d) ───────────────────────────────────────────────
+    # Drives the POINTS-based + grid/lot fields below.  Use
+    # ScalperParams.for_index("BANKNIFTY") to populate step/lot (from
+    # core.instruments) and the points fields for any index — NEVER NIFTY-only.
+    index: str = "NIFTY"
+
     # ── direction signal (§1) ──────────────────────────────────────────────
     signal: str = "vwap_mom"      # "vwap_mom" | "ema" | "orb" | "momentum"
     vwap_band: float = 0.0005     # deadband around VWAP (5 bps) for LONG/SHORT/FLAT
     mom_k: int = 5                # trailing minutes for the momentum trigger
     mom_thresh: float = 0.0008    # min |k-min return| to trigger (8 bps)
     atr_window: int = 14          # ATR-style activity filter window (min)
-    min_atr_pts: float = 6.0      # min avg true range (NIFTY pts) to allow entries
+    min_atr_pts: float = 6.0      # min avg true range (index pts) to allow entries
     ema_fast: int = 5             # used when signal == "ema"
     ema_slow: int = 20
     orb_minutes: int = 15         # used when signal == "orb"
@@ -65,20 +117,26 @@ class ScalperParams:
 
     # ── strike (§1d) ───────────────────────────────────────────────────────
     strike_offset: int = 0        # grid steps; - = ITM for the side, + = OTM
-    step: int = 50                # NIFTY strike grid
+    step: int = 50                # strike grid (per-index; from instruments)
 
     # ── ladder entries (§2a) ───────────────────────────────────────────────
+    # SIMPLE-MODE DEFAULT: max_rungs=1 (single tranche, no pyramiding).  The
+    # ladder is a SUPERSET reachable with max_rungs>1 (and is what for_index(
+    # simple=False) restores).
     ladder_mode: str = "pyramid"          # "pyramid" | "scale_in_dips"
-    rung_spacing_pts: float = 10.0        # underlying-pt spacing between adds
-    tranche_lots: int = 1                 # lots per rung (×65 units)
-    max_rungs: int = 3                    # max tranches per ladder
+    rung_spacing_pts: float = 10.0        # underlying-pt spacing between adds (per-index)
+    tranche_lots: int = 1                 # lots per rung (×lot units)
+    max_rungs: int = 1                    # SIMPLE: 1; ladder superset when >1
     ladder_size_mode: str = "flat"        # "flat" | "decreasing"
 
     # ── ladder exits / scalp (§2b, §3) ─────────────────────────────────────
-    tp_ladder_pct: list = field(default_factory=lambda: [0.10, 0.20, 0.35])
-    trail_pct: float = 0.12               # trail remainder off premium high-water
-    stop_pct: float = 0.20                # hard stop per tranche (% of fill premium)
-    time_stop_min: int = 12               # theta time-stop per tranche
+    # SIMPLE-MODE DEFAULT: single +20% TP, 15% hard stop, 5-min time-stop,
+    # convexity trail OFF (trail only engages when max_rungs>1, after the last
+    # TP level leaves a runner tranche).
+    tp_ladder_pct: list = field(default_factory=lambda: [0.20])
+    trail_pct: float = 0.12               # trail remainder off premium high-water (ladder only)
+    stop_pct: float = 0.15                # hard stop per tranche (% of fill premium)
+    time_stop_min: int = 5                # theta time-stop per tranche (cut losers fast)
     cooldown_min: int = 3                 # after a full flatten, before new ladder
 
     # ── risk / session limits (§3) ─────────────────────────────────────────
@@ -89,7 +147,68 @@ class ScalperParams:
     squareoff_before_close_min: int = 5
 
     # ── contract ───────────────────────────────────────────────────────────
-    lot: int = 65                          # NIFTY_LOT
+    lot: int = 65                          # contract size (per-index; from instruments)
+
+    @property
+    def trail_enabled(self) -> bool:
+        """Convexity trail is only active for the ladder (max_rungs>1).
+
+        In SIMPLE mode (max_rungs==1) there is never a runner tranche left
+        after the (single) TP, so trailing is OFF by construction.
+        """
+        return self.max_rungs > 1
+
+    @classmethod
+    def for_index(
+        cls,
+        index: str,
+        simple: bool = True,
+        **overrides,
+    ) -> "ScalperParams":
+        """Build params for a named index.
+
+        step/lot are pulled from core.instruments.INDEX_CONFIGS (source of
+        truth); the POINTS fields (min_atr_pts, rung_spacing_pts) come from
+        INDEX_POINTS scaled to that index.  Percentage/bps fields stay
+        index-agnostic (the class defaults).
+
+        Parameters
+        ----------
+        index : "NIFTY" | "BANKNIFTY" | any key in INDEX_CONFIGS
+        simple : True (default) → simple mode (max_rungs=1, +20% TP, 15% stop,
+            5-min time-stop, trail off).  False → ladder superset (max_rungs=3,
+            graduated TP ladder, convexity trail on).
+        overrides : any ScalperParams field, applied last (wins over everything).
+        """
+        step, lot = _index_step_lot(index)
+        pts = INDEX_POINTS.get(index.upper(), _DEFAULT_POINTS)
+
+        params: dict = {
+            "index": index.upper(),
+            "step": step,
+            "lot": lot,
+            "min_atr_pts": pts["min_atr_pts"],
+            "rung_spacing_pts": pts["rung_spacing_pts"],
+        }
+
+        if simple:
+            params.update(
+                max_rungs=1,
+                tp_ladder_pct=[0.20],
+                stop_pct=0.15,
+                time_stop_min=5,
+            )
+        else:
+            # Ladder superset (the original pre-simple defaults).
+            params.update(
+                max_rungs=3,
+                tp_ladder_pct=[0.10, 0.20, 0.35],
+                stop_pct=0.20,
+                time_stop_min=12,
+            )
+
+        params.update(overrides)
+        return cls(**params)
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +370,13 @@ def _round_to_step(value: float, step: int) -> int:
 
 
 class OptionsScalper:
-    """Intraday long-option ladder scalper for NIFTY.
+    """Intraday long-option scalper for index options (NIFTY, BANKNIFTY, …).
+
+    SIMPLE by default (single tranche, +20% TP, 15% stop, 5-min time-stop,
+    convexity trail OFF); a multi-rung convexity ladder is the SUPERSET reached
+    with ``ScalperParams.for_index(idx, simple=False)`` or ``max_rungs>1``.  The
+    index identity (and its strike step / lot / points fields) lives in
+    ``params.index`` — build per-index params with ``ScalperParams.for_index``.
 
     API mirrors ``strategies/orb.py``:
     - ``on_tick(now, underlying_price, option_premium, high, low)``
@@ -420,7 +545,7 @@ class OptionsScalper:
         Parameters
         ----------
         now : IST timestamp
-        underlying_price : current NIFTY index price
+        underlying_price : current index price (NIFTY, BANKNIFTY, …)
         option_premium : LTP of the currently held ATM CE/PE (₹/unit);
             None if no live feed or no position.  If a position is open
             and this is None, premium-dependent exits are suppressed (fail-safe).
@@ -624,12 +749,14 @@ class OptionsScalper:
                         # hits the next TP level.
                         self._tp_ladder_index += 1
 
-                        if is_last_tp:
+                        if is_last_tp and self.p.trail_enabled:
                             # The final TP level was reached.  After the caller
                             # calls notify_fill to remove this tranche, any
                             # remaining tranche becomes the trailing remainder.
                             # Pre-mark the next tranche now so it trails
-                            # immediately on the next tick.
+                            # immediately on the next tick.  SIMPLE mode
+                            # (trail_enabled False) never reaches here with a
+                            # runner, so the convexity trail stays OFF.
                             if len(self._tranches) > 1:
                                 self._tranches[1].trailing = True
                                 self._tranches[1].hi_water_premium = max(
@@ -951,6 +1078,9 @@ class OptionsScalper:
     def status(self) -> dict:
         return {
             "security_id": self.security_id,
+            "index": self.p.index,
+            "step": self.p.step,
+            "lot": self.p.lot,
             "session_date": str(self._session_date),
             "vwap": round(self.vwap, 2),
             "direction": self._current_direction,

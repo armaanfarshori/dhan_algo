@@ -35,7 +35,9 @@ import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from core.instruments import InstrumentMaster
 from strategies.options_scalper import (
+    INDEX_POINTS,
     OptionsScalper,
     ScalperParams,
     _Tranche,
@@ -948,3 +950,327 @@ def test_direction_signal_momentum_only():
     closes_dn = [22000.0, 21990.0, 21980.0, 21940.0]
     sig2 = direction_signal(closes_dn, highs_u, lows_u, p, vwap=22000.0)
     assert sig2 == "SHORT", f"Expected SHORT from momentum, got {sig2}"
+
+
+# ===========================================================================
+# Per-index parameterization (NIFTY vs BANKNIFTY) — NEVER NIFTY-only
+# ===========================================================================
+
+
+def test_for_index_nifty_step_lot_points():
+    """for_index('NIFTY') uses NIFTY step/lot (from instruments) + NIFTY points."""
+    p = ScalperParams.for_index("NIFTY")
+    assert p.index == "NIFTY"
+    assert p.step == 50, f"NIFTY step must be 50, got {p.step}"
+    assert p.lot == 65, f"NIFTY lot must be 65, got {p.lot}"
+    assert p.min_atr_pts == 6.0, f"NIFTY min_atr_pts must be 6.0, got {p.min_atr_pts}"
+    assert p.rung_spacing_pts == 10.0, (
+        f"NIFTY rung_spacing_pts must be 10.0, got {p.rung_spacing_pts}"
+    )
+
+
+def test_for_index_banknifty_step_lot_points():
+    """for_index('BANKNIFTY') uses BANKNIFTY's OWN step/lot/points — not NIFTY's."""
+    p = ScalperParams.for_index("BANKNIFTY")
+    assert p.index == "BANKNIFTY"
+    assert p.step == 100, f"BANKNIFTY step must be 100, got {p.step}"
+    # BANKNIFTY lot is verified against the live source of truth below.
+    assert p.lot == 30, f"BANKNIFTY lot must be 30, got {p.lot}"
+    assert p.min_atr_pts == 16.0, (
+        f"BANKNIFTY min_atr_pts must be 16.0, got {p.min_atr_pts}"
+    )
+    assert p.rung_spacing_pts == 27.0, (
+        f"BANKNIFTY rung_spacing_pts must be 27.0, got {p.rung_spacing_pts}"
+    )
+
+    # Distinct from NIFTY on every per-index field.
+    nifty = ScalperParams.for_index("NIFTY")
+    assert p.step != nifty.step
+    assert p.lot != nifty.lot
+    assert p.min_atr_pts != nifty.min_atr_pts
+    assert p.rung_spacing_pts != nifty.rung_spacing_pts
+
+
+def test_step_lot_match_instruments_source_of_truth():
+    """step/lot MUST equal core.instruments.INDEX_CONFIGS (single source of truth)."""
+    for idx in ("NIFTY", "BANKNIFTY"):
+        cfg = InstrumentMaster.INDEX_CONFIGS[idx]
+        p = ScalperParams.for_index(idx)
+        assert p.step == cfg["strike_step"], (
+            f"{idx} step {p.step} != instruments {cfg['strike_step']}"
+        )
+        assert p.lot == cfg["lot_size"], (
+            f"{idx} lot {p.lot} != instruments {cfg['lot_size']}"
+        )
+
+
+def test_for_index_percentage_fields_are_index_agnostic():
+    """vwap_band/mom_thresh/tp/stop/trail are dimensionless → same across indices."""
+    n = ScalperParams.for_index("NIFTY")
+    b = ScalperParams.for_index("BANKNIFTY")
+    assert n.vwap_band == b.vwap_band
+    assert n.mom_thresh == b.mom_thresh
+    assert n.stop_pct == b.stop_pct
+    assert n.trail_pct == b.trail_pct
+    assert n.tp_ladder_pct == b.tp_ladder_pct
+
+
+def test_for_index_unknown_falls_back_not_crash():
+    """An index absent from INDEX_CONFIGS falls back to NIFTY step/lot + points."""
+    p = ScalperParams.for_index("DOES_NOT_EXIST")
+    assert p.step == 50 and p.lot == 65, "Unknown index must fall back to 50/65"
+    assert p.min_atr_pts == INDEX_POINTS["NIFTY"]["min_atr_pts"]
+
+
+def test_for_index_overrides_win():
+    """Explicit overrides win over per-index + mode defaults."""
+    p = ScalperParams.for_index("BANKNIFTY", step=999, min_atr_pts=1.0, max_rungs=4)
+    assert p.step == 999
+    assert p.min_atr_pts == 1.0
+    assert p.max_rungs == 4
+
+
+def test_banknifty_strike_uses_own_step():
+    """A BANKNIFTY scalper rounds strikes to the 100-grid, not NIFTY's 50-grid."""
+    p = ScalperParams.for_index("BANKNIFTY")
+    scalper = OptionsScalper("BANKNIFTY", p)
+    _inject_session(scalper)
+    scalper._signal_override = "LONG"
+
+    underlying = 55040.0  # nearest 100-grid = 55000; nearest 50-grid would be 55050
+    r = scalper.on_tick(_t(0), underlying, high=underlying + 20, low=underlying - 20)
+    assert r is not None and r.action == "ENTER"
+    assert r.option_type == "CE"
+    assert r.strike % 100 == 0, f"BANKNIFTY strike must be on 100-grid, got {r.strike}"
+    assert r.strike == 55000, f"Expected ATM 55000, got {r.strike}"
+
+
+def test_banknifty_pnl_uses_own_lot():
+    """Realized P&L on a BANKNIFTY round-trip uses lot=30, not NIFTY's 65."""
+    p = ScalperParams.for_index("BANKNIFTY")
+    scalper = OptionsScalper("BANKNIFTY", p)
+    _inject_session(scalper)
+    scalper._ladder_direction = "LONG"
+    scalper._ladder_option_type = "CE"
+    scalper._ladder_strike = 55000
+    scalper._rungs_requested = 1
+
+    scalper.notify_fill("BUY", 1, 200.0, now=_t(0))
+    scalper.notify_fill("SELL", 1, 210.0, now=_t(1))
+    # (210-200) * 1 lot * 30 = +300
+    assert abs(scalper._daily_realized_pnl - 300.0) < 1e-6, (
+        f"BANKNIFTY P&L must use lot=30 (=300), got {scalper._daily_realized_pnl}"
+    )
+
+
+# ===========================================================================
+# SIMPLE MODE — 1 lot, +20% TP, 15% stop, 5-min time-stop, trail OFF
+# ===========================================================================
+
+
+def test_simple_mode_defaults():
+    """Bare ScalperParams() defaults are simple: max_rungs=1, +20% TP, 15% stop,
+    5-min time-stop, convexity trail OFF."""
+    p = ScalperParams()
+    assert p.max_rungs == 1, f"simple default max_rungs must be 1, got {p.max_rungs}"
+    assert p.tp_ladder_pct == [0.20], f"simple TP must be [0.20], got {p.tp_ladder_pct}"
+    assert p.stop_pct == 0.15, f"simple stop must be 0.15, got {p.stop_pct}"
+    assert p.time_stop_min == 5, f"simple time-stop must be 5, got {p.time_stop_min}"
+    assert p.trail_enabled is False, "trail must be OFF in simple mode (max_rungs=1)"
+
+
+def test_for_index_simple_vs_ladder():
+    """simple=True (default) → simple knobs; simple=False → ladder superset."""
+    s = ScalperParams.for_index("NIFTY", simple=True)
+    assert s.max_rungs == 1 and s.tp_ladder_pct == [0.20]
+    assert s.stop_pct == 0.15 and s.time_stop_min == 5
+    assert s.trail_enabled is False
+
+    lad = ScalperParams.for_index("NIFTY", simple=False)
+    assert lad.max_rungs == 3 and lad.tp_ladder_pct == [0.10, 0.20, 0.35]
+    assert lad.stop_pct == 0.20 and lad.time_stop_min == 12
+    assert lad.trail_enabled is True
+
+
+def _make_simple_scalper(index: str = "NIFTY", **overrides) -> OptionsScalper:
+    """Simple-mode scalper with test-friendly windows (keeps simple knobs)."""
+    base = dict(
+        warmup_minutes=0,
+        atr_window=3,
+        mom_k=3,
+        ema_slow=5,
+        ema_fast=3,
+        no_trade_open_min=0,
+        no_trade_close_min=0,
+    )
+    base.update(overrides)
+    p = ScalperParams.for_index(index, simple=True, **base)
+    return OptionsScalper(index, p)
+
+
+def test_simple_mode_single_lot_entry():
+    """Simple mode opens exactly ONE tranche and cannot pyramid (max_rungs=1)."""
+    scalper = _make_simple_scalper("NIFTY")
+    _inject_session(scalper)
+    scalper._signal_override = "LONG"
+
+    r1 = scalper.on_tick(_t(0), 22030.0, high=22035.0, low=22025.0)
+    assert r1 is not None and r1.action == "ENTER" and r1.side == "BUY"
+    assert r1.lots == 1, f"simple entry must be 1 lot, got {r1.lots}"
+    scalper.notify_fill("BUY", 1, 120.0, now=_t(0))
+    assert scalper._position_lots() == 1
+
+    # Even after a large favorable move, no second rung (max_rungs=1).
+    scalper._last_rung_underlying = 22030.0
+    r2 = scalper.on_tick(_t(0.5), 22200.0, option_premium=125.0,
+                         high=22205.0, low=22195.0)
+    assert r2 is None or r2.action != "ENTER", (
+        f"simple mode must never add a 2nd rung, got {r2}"
+    )
+    assert scalper._position_lots() == 1
+
+
+def test_simple_mode_tp_20pct_fires_and_flattens():
+    """Simple mode: single +20% TP exits the whole (1-lot) position."""
+    scalper = _make_simple_scalper("NIFTY")
+    _inject_session(scalper)
+    scalper._ladder_direction = "LONG"
+    scalper._ladder_option_type = "CE"
+    scalper._ladder_strike = 22050
+    scalper._rungs_requested = 1
+    scalper._signal_override = "LONG"
+    scalper._tranches = [
+        _Tranche(lots=1, entry_premium=120.0, entry_underlying=22030.0,
+                 fill_time=_now() - timedelta(minutes=1), hi_water_premium=120.0)
+    ]
+
+    # +20% target = 144.0.  At 143 → no TP.
+    r_below = scalper.on_tick(_t(0.1), 22060.0, option_premium=143.0,
+                              high=22065.0, low=22055.0)
+    assert r_below is None or r_below.action != "EXIT", (
+        f"143 < +20% target 144 — should not exit, got {r_below}"
+    )
+
+    # At 144 → TP[0] +20% EXIT of the full lot.
+    r_tp = scalper.on_tick(_t(0.2), 22065.0, option_premium=144.0,
+                           high=22070.0, low=22060.0)
+    assert r_tp is not None and r_tp.action == "EXIT"
+    assert "TP[0]" in r_tp.reason and "20%" in r_tp.reason
+    assert r_tp.lots == 1
+    scalper.notify_fill("SELL", 1, 144.0, now=_t(0.2))
+    assert scalper._position_lots() == 0, "simple TP must flatten the position"
+
+
+def test_simple_mode_15pct_stop_fires():
+    """Simple mode hard stop is 15% (not 20%): exits at entry*0.85."""
+    scalper = _make_simple_scalper("NIFTY")
+    _inject_session(scalper)
+    scalper._ladder_direction = "LONG"
+    scalper._ladder_option_type = "CE"
+    scalper._ladder_strike = 22050
+    scalper._rungs_requested = 1
+    scalper._signal_override = "LONG"
+    scalper._tranches = [
+        _Tranche(lots=1, entry_premium=120.0, entry_underlying=22030.0,
+                 fill_time=_now() - timedelta(minutes=1), hi_water_premium=120.0)
+    ]
+
+    # 15% stop = 120 * 0.85 = 102.0.  At 103 → no stop (would have tripped a 20% rule? no).
+    r_above = scalper.on_tick(_t(0.1), 22000.0, option_premium=103.0,
+                              high=22005.0, low=21995.0)
+    assert r_above is None or r_above.action != "EXIT", (
+        f"103 > 15%-stop 102 — should not exit, got {r_above}"
+    )
+
+    # At 102 → 15% stop fires.
+    r_stop = scalper.on_tick(_t(0.2), 21990.0, option_premium=102.0,
+                             high=21995.0, low=21985.0)
+    assert r_stop is not None and r_stop.action == "EXIT"
+    assert "stop" in r_stop.reason.lower()
+    assert r_stop.lots == 1
+
+
+def test_simple_mode_5min_time_stop_fires():
+    """Simple mode time-stop is 5 min: exits at fill+5, not fill+12."""
+    scalper = _make_simple_scalper("NIFTY")
+    _inject_session(scalper)
+    scalper._ladder_direction = "LONG"
+    scalper._ladder_option_type = "CE"
+    scalper._ladder_strike = 22050
+    scalper._rungs_requested = 1
+    scalper._signal_override = "LONG"
+
+    fill_time = _now() - timedelta(minutes=6)
+    scalper._tranches = [
+        _Tranche(lots=1, entry_premium=120.0, entry_underlying=22030.0,
+                 fill_time=fill_time, tp_index=0, hi_water_premium=121.0)
+    ]
+
+    # fill+4 → no time-stop (4 < 5).
+    r_before = scalper.on_tick(fill_time + timedelta(minutes=4), 22035.0,
+                               option_premium=121.0, high=22040.0, low=22030.0)
+    is_ts_before = (
+        r_before is not None and r_before.action == "EXIT"
+        and "time" in r_before.reason.lower()
+    )
+    assert not is_ts_before, f"should NOT time-stop at 4 min (simple=5), got {r_before}"
+
+    # fill+5 → time-stop fires.
+    r_stop = scalper.on_tick(fill_time + timedelta(minutes=5), 22035.0,
+                             option_premium=121.0, high=22040.0, low=22030.0)
+    assert r_stop is not None and r_stop.action == "EXIT"
+    assert "time" in r_stop.reason.lower()
+
+
+def test_simple_mode_trail_off_no_runner_after_tp():
+    """Simple mode (max_rungs=1): after the single TP there is NO runner tranche
+    and the convexity trail never engages."""
+    scalper = _make_simple_scalper("NIFTY")
+    _inject_session(scalper)
+    scalper._ladder_direction = "LONG"
+    scalper._ladder_option_type = "CE"
+    scalper._ladder_strike = 22050
+    scalper._rungs_requested = 1
+    scalper._signal_override = "LONG"
+    scalper._tranches = [
+        _Tranche(lots=1, entry_premium=120.0, entry_underlying=22030.0,
+                 fill_time=_now() - timedelta(minutes=1), hi_water_premium=120.0)
+    ]
+
+    # Hit +20% TP → full exit; no second tranche to pre-mark as trailing.
+    r_tp = scalper.on_tick(_t(0.1), 22065.0, option_premium=144.0,
+                           high=22070.0, low=22060.0)
+    assert r_tp is not None and "TP[0]" in r_tp.reason
+    scalper.notify_fill("SELL", 1, 144.0, now=_t(0.1))
+    assert scalper._position_lots() == 0
+    # No tranche left → nothing trailing.
+    assert not any(t.trailing for t in scalper._tranches)
+    assert scalper.p.trail_enabled is False
+
+
+def test_ladder_superset_still_trails_when_max_rungs_gt_1():
+    """The convexity trail remains available when max_rungs>1 (superset path).
+
+    Use a 3-tranche book with a 2-level TP ladder so a genuine RUNNER tranche
+    remains after the last TP fires — that runner must be flagged trailing.
+    """
+    scalper = _make_scalper(
+        max_rungs=3, tp_ladder_pct=[0.10, 0.20], trail_pct=0.12,
+    )
+    assert scalper.p.trail_enabled is True
+    _inject_open_long_tranches(scalper, n=3, entry_premium=120.0)
+
+    # TP[0] +10% = 132 → exit 1 lot (2 tranches remain).
+    r_a = scalper.on_tick(_t(0.1), 22055.0, option_premium=132.0,
+                          high=22060.0, low=22050.0)
+    assert r_a is not None and "TP[0]" in r_a.reason
+    scalper.notify_fill("SELL", 1, 132.0, now=_t(0.1))
+
+    # TP[1] +20% = 144 → last level → exit 1 lot; the 3rd tranche is the runner
+    # and gets pre-marked trailing (1 tranche remains in book at pre-mark time).
+    r_b = scalper.on_tick(_t(0.2), 22060.0, option_premium=144.0,
+                          high=22065.0, low=22055.0)
+    assert r_b is not None and "TP[1]" in r_b.reason
+    assert scalper._tranches and scalper._tranches[1].trailing, (
+        "ladder superset must engage the trail on the runner after the last TP"
+    )
