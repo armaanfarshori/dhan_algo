@@ -50,8 +50,11 @@ def test_next_bar_fill_no_lookahead():
     # Decision on the 9:31 bar (close 103) — fill at 9:32 OPEN 103.5, not 103
     assert t.entry_price == 103.5
     assert t.entry_ts.minute == 32
-    # Exit decision on 9:40 bar — fill at 9:41 open 106.5
-    assert t.exit_price == 106.5
+    # Target is captured from the ENTER Decision: signal-bar close (103) + 1.5×2 = 106.
+    # The intrabar wick check fires when bar 9:40 high (107) >= target (106) — the
+    # exit fills intrabar at 106, NOT at 9:41's open.  Strategy-agnostic refactor:
+    # the engine uses decision.stop/target, not ORB-internal entry_price-based calc.
+    assert t.exit_price == 106.0
     assert t.side == "LONG"
 
 
@@ -59,7 +62,8 @@ def test_costs_reduce_pnl():
     t = run(session())[0]
     assert t.costs > 0
     assert t.net_pnl == round(t.gross_pnl - t.costs, 2)
-    assert t.gross_pnl == round((106.5 - 103.5) * t.qty, 2)
+    # Entry fill 103.5; target from ENTER Decision = 103 + 1.5×2 = 106.
+    assert t.gross_pnl == round((106.0 - 103.5) * t.qty, 2)
 
 
 def test_stop_loss_path():

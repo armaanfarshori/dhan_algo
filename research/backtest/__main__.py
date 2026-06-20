@@ -55,6 +55,7 @@ async def run(args) -> int:
     from db import init_db
     from research.backtest.engine import trading_days
     from research.backtest.portfolio_engine import PortfolioParams, replay_portfolio
+    from research.backtest.registry import STRATEGIES
     from research.backtest.report import Report, m3_panel
     from research.backtest.provenance import provenance, clean_db_build_dates
     from research.backtest.universe import point_in_time_universe
@@ -65,6 +66,12 @@ async def run(args) -> int:
     # bars/universe query in the backtester goes through this engine.
     init_db(cfg.backtest_db_url)
     logger.info("Backtest DB = %s (clean replica)", cfg.backtest_db_name)
+    logger.info("Strategy = %s  gate = %s", args.strategy, args.gate)
+
+    if args.strategy not in STRATEGIES:
+        logger.error("Unknown strategy %r; registered: %s", args.strategy,
+                     ", ".join(STRATEGIES))
+        return 1
 
     # OOS contamination guard for Run 3 (fine-tuned Kronos).
     # The fine-tune was trained and early-stopped on pre-2026 bars, so any OOS
@@ -101,6 +108,7 @@ async def run(args) -> int:
         min_stop_distance_pct=cfg.min_stop_distance_pct,
         adv_participation_pct=cfg.adv_participation_pct,
         orb=ORBParams(orb_minutes=cfg.orb_range_minutes),
+        strategy_name=args.strategy,
     )
 
     gate_fn = None
@@ -198,7 +206,7 @@ async def run(args) -> int:
             _gate_label = "+ Kronos zero-shot"
     else:
         _gate_label = "standalone"
-    label = f"ORB {_gate_label}  {args.from_date} → {args.to_date}  (portfolio)"
+    label = f"{args.strategy.upper()} {_gate_label}  {args.from_date} → {args.to_date}  (portfolio)"
     Report(trades, starting_equity=args.equity).print_report(label)
     ks_days = sum(1 for d in daily if d["kill_switch"])
     if args.split_date:
@@ -295,11 +303,18 @@ async def run(args) -> int:
 
 
 def main():
-    p = argparse.ArgumentParser(description="ORB backtest on real 1m bars")
+    # Delay the import so the CLI stays importable even before the registry is
+    # populated (e.g. in CI where strategies beyond ORB are not yet installed).
+    from research.backtest.registry import STRATEGIES as _STRATEGIES
+
+    p = argparse.ArgumentParser(description="Intraday strategy backtest on real 1m bars")
     p.add_argument("--from", dest="from_date", required=True,
                    type=lambda s: datetime.strptime(s, "%Y-%m-%d").date())
     p.add_argument("--to", dest="to_date", required=True,
                    type=lambda s: datetime.strptime(s, "%Y-%m-%d").date())
+    p.add_argument("--strategy", choices=list(_STRATEGIES), default="orb",
+                   help=("Strategy to backtest (default: orb). "
+                         f"Registered: {', '.join(_STRATEGIES)}"))
     p.add_argument("--ids", help="Comma-separated security IDs (skips the screener)")
     p.add_argument("--n", type=int, default=5, help="Universe size per day (default 5)")
     p.add_argument("--gate", choices=["none", "kronos"], default="none")

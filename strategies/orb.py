@@ -79,8 +79,11 @@ class ORB:
     # ── Core logic ────────────────────────────────────────────────────────────
 
     def on_tick(self, now: datetime, price: float,
-                high: Optional[float] = None, low: Optional[float] = None) -> Optional[Decision]:
-        """now must be IST. high/low are the current intrabar extremes if known."""
+                high: Optional[float] = None, low: Optional[float] = None,
+                volume: Optional[float] = None) -> Optional[Decision]:
+        """now must be IST. high/low are the current intrabar extremes if known.
+        volume is accepted for interface parity with volume-based strategies and
+        deliberately ignored by ORB."""
         if price <= 0:
             return None
 
