@@ -117,7 +117,6 @@ systemctl enable --now dhan-trader dhan-api
 # EOD summary: 11:30 UTC = 17:00 IST weekdays (existing)
 (crontab -l -u ubuntu 2>/dev/null || true; cat <<'CRON_EOF'
 */5 * * * * cd /opt/dhan-trading && .venv/bin/python scripts/health_alert.py >> /var/log/dhan/health_alert.log 2>&1
-*/15 * * * 1-5 cd /opt/dhan-trading && bash hermes_skills/dhan/backfill_watchdog/scripts/watchdog.sh >> /var/log/dhan/backfill_watchdog.log 2>&1
 15 11 * * 1-5 cd /opt/dhan-trading && .venv/bin/python -m ml.calibration fill >> /var/log/dhan/calibration.log 2>&1 && .venv/bin/python -m ml.calibration report >> /var/log/dhan/calibration.log 2>&1
 30 11 * * 1-5 cd /opt/dhan-trading && .venv/bin/python scripts/eod_summary.py >> /var/log/dhan/eod_summary.log 2>&1
 CRON_EOF

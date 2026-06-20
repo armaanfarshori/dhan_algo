@@ -57,3 +57,8 @@ pgdata/
 # Local editor / cross-session working docs (may contain infra IDs — never commit)
 .obsidian/
 docs/fno-sync-*.md
+
+# Agent worktrees + local backtest result artifacts (never commit)
+.claude/worktrees/
+research/m3_results/
+research/backtest/results/*.json

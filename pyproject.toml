@@ -6,7 +6,6 @@ exclude = [
     "kronos",       # vendored Kronos model (MIT)
     "dashboard",    # React/Node — not Python
     "alembic",      # generated migrations
-    "hermes_skills",# retired LLM gateway scripts
     "scripts",      # one-off utility scripts
 ]
 

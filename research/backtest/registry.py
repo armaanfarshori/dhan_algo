@@ -38,29 +38,15 @@ See ``research/backtest/strategy_specs/_CONTRACT.md`` for the full contract
 """
 
 from strategies.orb import ORB, ORBParams
-from strategies.ema_crossover import EmaCrossover, EmaCrossoverParams
-from strategies.rsi2_meanrev import Rsi2MeanRev, Rsi2MeanRevParams
-from strategies.macd_crossover import MacdCrossover, MacdCrossoverParams
-from strategies.supertrend import Supertrend, SupertrendParams
-from strategies.donchian_breakout import DonchianBreakout, DonchianBreakoutParams
-from strategies.vwap_meanrev import VwapMeanReversion, VwapMeanRevParams
-from strategies.vwap_trend import VwapTrend, VwapTrendParams
-from strategies.bollinger_meanrev import BollingerMeanReversion, BollingerMeanReversionParams
-from strategies.opening_gap import OpeningGap, OpeningGapParams
-from strategies.cpr_pivot import CprPivot, CprPivotParams
 
 # Maps CLI name → (StrategyClass, ParamsClass).
 # Adding a strategy: append one entry; no other file needs to change.
+#
+# The 10 lost equity strategies (ema_crossover, rsi2_meanrev, macd_crossover,
+# supertrend, donchian_breakout, vwap_meanrev, vwap_trend, bollinger_meanrev,
+# opening_gap, cpr_pivot) were stripped after the 2026-06-20 sweep ruled out any
+# equity intraday edge (none beat ORB). ORB is kept — it is the live strategy and
+# the equity backtest harness still iterates on it.
 STRATEGIES: dict[str, tuple[type, type]] = {
     "orb": (ORB, ORBParams),
-    "ema_crossover": (EmaCrossover, EmaCrossoverParams),
-    "rsi2_meanrev": (Rsi2MeanRev, Rsi2MeanRevParams),
-    "macd_crossover": (MacdCrossover, MacdCrossoverParams),
-    "supertrend": (Supertrend, SupertrendParams),
-    "donchian_breakout": (DonchianBreakout, DonchianBreakoutParams),
-    "vwap_meanrev": (VwapMeanReversion, VwapMeanRevParams),
-    "vwap_trend": (VwapTrend, VwapTrendParams),
-    "bollinger_meanrev": (BollingerMeanReversion, BollingerMeanReversionParams),
-    "opening_gap": (OpeningGap, OpeningGapParams),
-    "cpr_pivot": (CprPivot, CprPivotParams),
 }
