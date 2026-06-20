@@ -279,6 +279,40 @@ IV_SOURCE_VIX_PROXY = "vix_proxy"  # India VIX / 100 (historical fallback)
 REAL_IV_MAX = 2.0    # 200 % annualised straddle IV — above this = implausible
 REAL_IV_MIN = 0.005  # 0.5 % — below this = degenerate / missing
 
+# ---------------------------------------------------------------------------
+# Real-IV entry-roll tolerance (real-IV JOIN coverage fix)
+# ---------------------------------------------------------------------------
+# Default trading-day tolerance for matching a cycle's real ATM IV when no
+# observation exists strictly on/before the entry date. The condor ENTERS on the
+# PRIOR weekly's expiry day (entry = E-7 for expiry E), but the rolling-expiry
+# option_atm_iv rows for expiry E are mostly timestamped E-6…E-1: the new weekly
+# only becomes "front" the trading day AFTER the prior one expires. A strict
+# ``obs_date <= entry_date`` JOIN therefore misses most cycles (live diagnostic:
+# only 41/232 matched; cycle-expiry↔option_atm_iv expiry OVERLAP was 207/232 —
+# the data is there, just shifted ~1 trading day past the strict cutoff).
+#
+# We widen the match to also accept the EARLIEST observation in the small window
+# (entry_date, entry_date + N trading days]. A ≤2-trading-day tolerance on a
+# weekly ATM IV is economically negligible (the IV is essentially the value the
+# trader would see entering that weekly), and is the documented compromise for
+# the rolling-index/expiry-day roll. ``N`` is configurable so it is tunable +
+# testable; ``N=0`` reproduces the old strict ``<= entry`` behaviour exactly.
+DEFAULT_REAL_IV_TOLERANCE_DAYS = 2
+
+# Calendar slack added to the trading-day tolerance so a normal weekend/holiday
+# between entry and the next trading-day observation does not over-reject, while
+# a genuine multi-week data gap still does. N trading days span at most ~N+4
+# calendar days across one weekend (Fri→next Fri-ish); 4 covers a long weekend.
+_ROLL_WEEKEND_BUFFER_DAYS = 4
+
+# Absolute calendar ceiling on the entry-roll match window. The effective cap is
+# min(tolerance_days + buffer, this), so an arbitrarily large ``tolerance_days``
+# can NEVER admit an observation weeks past entry — a genuine multi-week data gap
+# is always rejected, honouring the docstring's guarantee. At the default
+# tolerance (2 → cap 6) this ceiling is not binding; it only clamps pathological
+# tolerance values (>= 10 trading days).
+_ROLL_CALENDAR_HARD_CAP_DAYS = 14
+
 
 def is_plausible_real_iv(iv: float | None) -> bool:
     """True when a real ATM straddle IV is within sane annualised bounds.
@@ -1575,6 +1609,7 @@ def cycles_from_db(
     mode: str = "weekly",
     entry_dte: int | None = None,
     use_real_iv: bool = False,
+    real_iv_tolerance_days: int = DEFAULT_REAL_IV_TOLERANCE_DAYS,
 ) -> list[dict]:
     """Assemble weekly iron-condor cycles from the DB tables created in migrations 009/010.
 
@@ -1610,6 +1645,18 @@ def cycles_from_db(
                 falling back to VIX where no plausible real IV exists. Default
                 **False** — OPT-IN, so existing callers keep their VIX-proxy
                 behaviour unchanged; the real-IV A/B (``_ab_main``) flips it on.
+    real_iv_tolerance_days:
+                Entry-roll tolerance (trading days) for the real-IV match when
+                ``use_real_iv=True``. The condor enters on the PRIOR weekly's
+                expiry day (entry = E-7), but the rolling-expiry ``option_atm_iv``
+                rows for expiry E are mostly timestamped E-6…E-1 (the new weekly
+                becomes "front" the trading day AFTER the prior expires), so a
+                strict ``obs_date <= entry`` JOIN misses most cycles. When no
+                strict-PIT row exists, the match widens to the earliest
+                observation within ``real_iv_tolerance_days`` trading days AFTER
+                entry. Default **2** (a ≤2-day tolerance on a weekly ATM IV is
+                economically negligible). ``0`` reproduces the old strict
+                behaviour. See :func:`_resolve_atm_iv_pit`.
     mode:       Cycle-boundary strategy:
 
                 ``"weekly"`` *(default — historical backtest path)*
@@ -1694,11 +1741,13 @@ def cycles_from_db(
         return _cycles_from_db_weekly(
             eff_index_id, eff_vix_id, tf, get_session, text, index,
             entry_dte=entry_dte, iv_symbol=iv_symbol,
+            real_iv_tolerance_days=real_iv_tolerance_days,
         )
     else:
         return _cycles_from_db_expiry_calendar(
             eff_symbol, eff_index_id, eff_vix_id, tf, get_session, text,
             iv_symbol=iv_symbol,
+            real_iv_tolerance_days=real_iv_tolerance_days,
         )
 
 
@@ -1797,12 +1846,25 @@ def _resolve_atm_iv_pit(
     iv_map: dict[date, list[tuple[date, float]]],
     expiry_date: date,
     entry_date: date,
+    tolerance_days: int = DEFAULT_REAL_IV_TOLERANCE_DAYS,
 ) -> float | None:
-    """PIT-resolve the real ATM straddle IV for one cycle (no look-ahead).
+    """PIT-resolve the real ATM straddle IV for one cycle (entry-roll tolerant).
 
-    Picks the latest ``straddle_iv`` observed on or before ``entry_date`` for the
-    cycle's ``expiry_date``. Returns ``None`` when no qualifying observation
-    exists (caller then leaves the cycle on the VIX proxy).
+    Preference order for the cycle's ``expiry_date``:
+
+    1. The LATEST ``straddle_iv`` observed on or before ``entry_date`` — strict
+       point-in-time, no look-ahead (always preferred when present).
+    2. When none exists and ``tolerance_days > 0``: the EARLIEST observation in
+       the window ``(entry_date, entry_date + tolerance_days trading days]``.
+       "Trading days" are counted on the IV series' OWN observation dates (each
+       stored row is a trading day on which the ATM straddle was sampled), so the
+       Nth post-entry observation = the Nth trading day past entry with data — no
+       external calendar needed, fully deterministic, TZ-safe (date arithmetic
+       only). This recovers the rolling-expiry "front becomes front the day after
+       the prior expires" roll (see :data:`DEFAULT_REAL_IV_TOLERANCE_DAYS`).
+
+    Returns ``None`` when no qualifying observation exists (caller then leaves the
+    cycle on the VIX proxy). ``tolerance_days=0`` → strict ``<= entry`` behaviour.
     """
     series = iv_map.get(expiry_date)
     if not series:
@@ -1814,7 +1876,32 @@ def _resolve_atm_iv_pit(
             chosen = siv
         else:
             break
-    return chosen
+    if chosen is not None:
+        return chosen
+
+    # No strict PIT row → widen to the post-entry tolerance window. Accept the
+    # EARLIEST observation after entry (series is ascending → the first obs >
+    # entry is the closest), but only if it sits within the calendar guard that
+    # rejects genuine multi-week DATA GAPS (a row whose obs date is far past
+    # entry is NOT the expiry-day roll and must not match). The guard allows
+    # ``tolerance_days`` trading days plus a weekend/holiday buffer, capped by an
+    # ABSOLUTE multi-week ceiling so an arbitrarily large ``tolerance_days`` can
+    # never admit a far-future observation. Because only the earliest post-entry
+    # obs is ever considered (we return on the first one), a trading-day RANK
+    # check would always be rank 1 → the calendar guard is the binding filter.
+    if tolerance_days <= 0:
+        return None
+    calendar_cap = min(
+        tolerance_days + _ROLL_WEEKEND_BUFFER_DAYS, _ROLL_CALENDAR_HARD_CAP_DAYS
+    )
+    for obs_date, siv in series:
+        if obs_date > entry_date:
+            if (obs_date - entry_date).days <= calendar_cap:
+                return siv
+            # series is ascending: the earliest post-entry obs already exceeded
+            # the window → every later obs is further out, so none can match.
+            return None
+    return None
 
 
 def _build_cycles_from_pairs(
@@ -1823,6 +1910,7 @@ def _build_cycles_from_pairs(
     vix_map: dict,
     mode: str,
     atm_iv_map: dict[date, list[tuple[date, float]]] | None = None,
+    real_iv_tolerance_days: int = DEFAULT_REAL_IV_TOLERANCE_DAYS,
 ) -> list[dict]:
     """Convert (entry, expiry) date pairs into cycle dicts, skipping incomplete ones.
 
@@ -1831,6 +1919,10 @@ def _build_cycles_from_pairs(
     prefers the real per-expiry IV over the VIX/100 proxy. Cycles with no
     qualifying real observation keep only the VIX proxy. Per-run real-vs-proxy
     counts are logged.
+
+    ``real_iv_tolerance_days`` is forwarded to :func:`_resolve_atm_iv_pit` to
+    widen the entry-roll match window (see that function); ``0`` = strict ``<=
+    entry`` PIT.
     """
     cycles: list[dict] = []
     n_real = 0
@@ -1876,7 +1968,9 @@ def _build_cycles_from_pairs(
         # real value; VIX/100 stays as the fallback. Plausibility-filtered rows
         # were already dropped in _build_atm_iv_map → those cycles use VIX.
         if atm_iv_map is not None:
-            real_iv = _resolve_atm_iv_pit(atm_iv_map, e_next, e_i)
+            real_iv = _resolve_atm_iv_pit(
+                atm_iv_map, e_next, e_i, tolerance_days=real_iv_tolerance_days
+            )
             if real_iv is not None:
                 cycle["atm_straddle_iv"] = real_iv
                 n_real += 1
@@ -1889,9 +1983,10 @@ def _build_cycles_from_pairs(
 
     if atm_iv_map is not None:
         logger.info(
-            "cycles_from_db[%s]: built %d cycles — %d on REAL ATM IV (option_atm_iv), "
-            "%d on VIX/100 proxy (no PIT real-IV row).",
-            mode, len(cycles), n_real, n_proxy,
+            "cycles_from_db[%s]: built %d cycles — %d on REAL ATM IV (option_atm_iv, "
+            "±%d-trading-day entry-roll tolerance), %d on VIX/100 proxy "
+            "(no real-IV row in window).",
+            mode, len(cycles), n_real, real_iv_tolerance_days, n_proxy,
         )
     return cycles
 
@@ -1906,6 +2001,7 @@ def _cycles_from_db_weekly(
     *,
     entry_dte: int | None = None,
     iv_symbol: str | None = None,
+    real_iv_tolerance_days: int = DEFAULT_REAL_IV_TOLERANCE_DAYS,
 ) -> list[dict]:
     """Historical-backtest path: synthetic ISO-week boundaries from index_bars.
 
@@ -1969,7 +2065,10 @@ def _cycles_from_db_weekly(
             entry_day = pick_entry_day_for_dte(all_days, expiry, entry_dte)
             if entry_day is not None and entry_day < expiry:
                 pairs.append((entry_day, expiry))
-    cycles = _build_cycles_from_pairs(pairs, index_map, vix_map, "weekly", atm_iv_map)
+    cycles = _build_cycles_from_pairs(
+        pairs, index_map, vix_map, "weekly", atm_iv_map,
+        real_iv_tolerance_days=real_iv_tolerance_days,
+    )
 
     if len(cycles) == 0:
         logger.warning(
@@ -1990,6 +2089,7 @@ def _cycles_from_db_expiry_calendar(
     get_session: Any,
     text: Any,
     iv_symbol: str | None = None,
+    real_iv_tolerance_days: int = DEFAULT_REAL_IV_TOLERANCE_DAYS,
 ) -> list[dict]:
     """Forward/live path: cycle boundaries from expiry_calendar.
 
@@ -2039,7 +2139,8 @@ def _cycles_from_db_expiry_calendar(
 
     pairs = list(zip(expiry_dates[:-1], expiry_dates[1:]))
     cycles = _build_cycles_from_pairs(
-        pairs, index_map, vix_map, "expiry_calendar", atm_iv_map
+        pairs, index_map, vix_map, "expiry_calendar", atm_iv_map,
+        real_iv_tolerance_days=real_iv_tolerance_days,
     )
 
     if len(cycles) == 0 and len(expiry_dates) >= 2:

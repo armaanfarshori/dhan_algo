@@ -2375,14 +2375,16 @@ class TestRealIvSanityFilter:
 
 @needs_condor
 class TestResolveAtmIvPit:
-    """_resolve_atm_iv_pit picks the latest observation on/before entry (no look-ahead)."""
+    """_resolve_atm_iv_pit: strict-PIT preferred, with a ±N-trading-day entry-roll
+    tolerance fallback when no strict ``<= entry`` row exists (no look-ahead beyond
+    the documented small roll window)."""
 
     def test_picks_latest_on_or_before_entry(self):
         from research.backtest.fno_condor import _resolve_atm_iv_pit
         exp = date(2026, 1, 22)
         iv_map = {exp: [
             (date(2026, 1, 16), 0.10),
-            (date(2026, 1, 19), 0.12),  # latest <= entry 01-20
+            (date(2026, 1, 19), 0.12),  # latest <= entry 01-20 → strict PIT wins
             (date(2026, 1, 21), 0.99),  # AFTER entry → must NOT be seen (look-ahead)
         ]}
         assert _resolve_atm_iv_pit(iv_map, exp, date(2026, 1, 20)) == 0.12
@@ -2393,11 +2395,61 @@ class TestResolveAtmIvPit:
         iv_map = {exp: [(date(2026, 1, 19), 0.12), (date(2026, 1, 20), 0.15)]}
         assert _resolve_atm_iv_pit(iv_map, exp, date(2026, 1, 20)) == 0.15
 
-    def test_no_observation_before_entry_returns_none(self):
+    def test_strict_pit_preferred_over_tolerance_row(self):
+        # Both a strict-PIT row (01-19) and a post-entry tolerance row (01-21)
+        # exist → the strict row MUST win regardless of tolerance.
+        from research.backtest.fno_condor import _resolve_atm_iv_pit
+        exp = date(2026, 1, 22)
+        iv_map = {exp: [(date(2026, 1, 19), 0.12), (date(2026, 1, 21), 0.30)]}
+        assert _resolve_atm_iv_pit(iv_map, exp, date(2026, 1, 20), tolerance_days=2) == 0.12
+
+    def test_tolerance_zero_reproduces_strict_behaviour(self):
+        # tolerance_days=0 → old strict ``<= entry`` behaviour: a post-entry-only
+        # row is NOT matched.
         from research.backtest.fno_condor import _resolve_atm_iv_pit
         exp = date(2026, 1, 22)
         iv_map = {exp: [(date(2026, 1, 21), 0.13)]}
+        assert _resolve_atm_iv_pit(iv_map, exp, date(2026, 1, 20), tolerance_days=0) is None
+
+    def test_entry_roll_row_matched_within_tolerance(self):
+        # The expiry-day roll case: the ONLY row for this expiry is the trading
+        # day AFTER entry (entry+1) → matched within the default ±2-day tolerance.
+        from research.backtest.fno_condor import _resolve_atm_iv_pit
+        exp = date(2026, 1, 22)
+        iv_map = {exp: [(date(2026, 1, 21), 0.13)]}  # entry 01-20, obs 01-21 (+1)
+        assert _resolve_atm_iv_pit(iv_map, exp, date(2026, 1, 20)) == 0.13
+        # Explicit tolerance also matches.
+        assert _resolve_atm_iv_pit(iv_map, exp, date(2026, 1, 20), tolerance_days=2) == 0.13
+
+    def test_earliest_post_entry_row_chosen_within_tolerance(self):
+        # When several post-entry rows exist (no strict-PIT row), the EARLIEST is
+        # chosen (closest to entry).
+        from research.backtest.fno_condor import _resolve_atm_iv_pit
+        exp = date(2026, 1, 30)
+        iv_map = {exp: [(date(2026, 1, 21), 0.13), (date(2026, 1, 22), 0.40)]}
+        assert _resolve_atm_iv_pit(iv_map, exp, date(2026, 1, 20)) == 0.13
+
+    def test_data_gap_beyond_calendar_window_not_matched(self):
+        # A row far past entry (multi-week data gap, NOT the expiry-day roll) must
+        # NOT match even though it is the earliest post-entry obs.
+        from research.backtest.fno_condor import _resolve_atm_iv_pit
+        exp = date(2026, 2, 20)
+        iv_map = {exp: [(date(2026, 2, 5), 0.13)]}  # entry 01-20, obs +16 days
         assert _resolve_atm_iv_pit(iv_map, exp, date(2026, 1, 20)) is None
+
+    def test_huge_tolerance_still_bounded_by_calendar_hard_cap(self):
+        # A pathologically large tolerance_days must NOT let a far-future obs match
+        # — the absolute calendar hard cap (14 days) rejects the multi-week gap.
+        from research.backtest.fno_condor import _resolve_atm_iv_pit
+        exp = date(2026, 6, 20)
+        iv_map = {exp: [(date(2026, 2, 20), 0.13)]}  # entry 01-20, obs ~31 days out
+        assert _resolve_atm_iv_pit(iv_map, exp, date(2026, 1, 20), tolerance_days=1000) is None
+
+    def test_no_observation_before_entry_returns_none_strict(self):
+        from research.backtest.fno_condor import _resolve_atm_iv_pit
+        exp = date(2026, 1, 22)
+        iv_map = {exp: [(date(2026, 1, 21), 0.13)]}
+        assert _resolve_atm_iv_pit(iv_map, exp, date(2026, 1, 20), tolerance_days=0) is None
 
     def test_missing_expiry_returns_none(self):
         from research.backtest.fno_condor import _resolve_atm_iv_pit
@@ -2424,12 +2476,15 @@ class TestCyclesFromDbRealIvJoin:
     _VIX_ROWS = [(d, 14.0) for d, *_ in _NIFTY_ROWS]  # VIX/100 = 0.14 proxy
 
     @staticmethod
-    def _run(atm_rows, use_real_iv=True):
+    def _run(atm_rows, use_real_iv=True, real_iv_tolerance_days=None):
         from research.backtest.fno_condor import cycles_from_db
         fake_gs_factory = TestCyclesFromDbRealIvJoin._make_gs(atm_rows)
+        kwargs = {"mode": "weekly", "use_real_iv": use_real_iv}
+        if real_iv_tolerance_days is not None:
+            kwargs["real_iv_tolerance_days"] = real_iv_tolerance_days
         with patch("research.backtest.fno_condor.get_session", new=fake_gs_factory, create=True), \
              patch("db.get_session", new=fake_gs_factory):
-            return cycles_from_db(mode="weekly", use_real_iv=use_real_iv)
+            return cycles_from_db(**kwargs)
 
     @staticmethod
     def _make_gs(atm_rows):
@@ -2461,12 +2516,57 @@ class TestCyclesFromDbRealIvJoin:
         # VIX proxy still present as the fallback.
         assert cycles[0]["straddle_iv"] == pytest.approx(0.14)
 
-    def test_no_lookahead_observation_after_entry_ignored(self):
-        # Real IV for expiry 01-15 observed only 01-12 (AFTER entry 01-08) → cycle 0
-        # must NOT pick it up (look-ahead) → no atm_straddle_iv → VIX fallback.
+    def test_entry_roll_row_within_tolerance_populates_real_iv(self):
+        # Real-IV JOIN coverage fix: expiry 01-15's only row is observed 01-12
+        # (the rolling-expiry roll — front becomes front the trading day AFTER the
+        # prior expiry; entry is 01-08). Within the default ±2-trading-day
+        # tolerance this NOW populates atm_straddle_iv (was the 41/232-miss bug).
         atm = [(date(2026, 1, 15), date(2026, 1, 12), 0.20)]
         cycles = self._run(atm)
+        assert cycles[0]["expiry_date"] == date(2026, 1, 15)
+        assert cycles[0]["atm_straddle_iv"] == 0.20
+
+    def test_tolerance_zero_reproduces_strict_lookahead_guard(self):
+        # tolerance=0 → strict ``<= entry`` PIT: the post-entry roll row (01-12 >
+        # entry 01-08) is NOT matched → cycle 0 stays on the VIX proxy.
+        atm = [(date(2026, 1, 15), date(2026, 1, 12), 0.20)]
+        cycles = self._run(atm, real_iv_tolerance_days=0)
         assert "atm_straddle_iv" not in cycles[0]
+
+    def test_row_beyond_tolerance_window_stays_on_vix(self):
+        # A row far past entry (a genuine multi-week data gap, NOT the expiry-day
+        # roll) must NOT match → cycle stays on the VIX proxy. expiry 01-15 entry
+        # 01-08; obs 02-10 is ~33 days out, well beyond ±2 trading days.
+        atm = [(date(2026, 1, 15), date(2026, 2, 10), 0.20)]
+        cycles = self._run(atm)
+        assert "atm_straddle_iv" not in cycles[0]
+
+    def test_strict_pit_row_wins_over_post_entry_tolerance_row_end_to_end(self):
+        # End-to-end through cycles_from_db: when BOTH a strict-PIT row
+        # (obs <= entry) and a within-tolerance post-entry row exist for the same
+        # expiry, the strict row MUST win (no look-ahead). Cycle 0 entry=01-08:
+        #   strict-PIT row obs=01-08 iv=0.20  vs  tolerance row obs=01-09 iv=0.30.
+        atm = [
+            (date(2026, 1, 15), date(2026, 1, 8),  0.20),  # strict PIT → must win
+            (date(2026, 1, 15), date(2026, 1, 9),  0.30),  # tolerance-eligible, must lose
+            (date(2026, 1, 22), date(2026, 1, 15), 0.22),  # cycle 1 normal strict row
+        ]
+        cycles = self._run(atm)
+        assert cycles[0]["atm_straddle_iv"] == pytest.approx(0.20)
+        assert cycles[1]["atm_straddle_iv"] == pytest.approx(0.22)
+
+    def test_earliest_post_entry_row_chosen_when_multiple_exist_end_to_end(self):
+        # End-to-end: with NO strict-PIT row and MULTIPLE post-entry rows for one
+        # expiry, the EARLIEST (closest to entry) must be chosen. Cycle 0
+        # entry=01-08: obs 01-09 iv=0.13 (earliest) vs 01-10 iv=0.40 (later).
+        atm = [
+            (date(2026, 1, 15), date(2026, 1, 9),  0.13),  # earliest post-entry → chosen
+            (date(2026, 1, 15), date(2026, 1, 10), 0.40),  # later → must NOT win
+            (date(2026, 1, 22), date(2026, 1, 16), 0.22),  # cycle 1 rank-1 post-entry
+        ]
+        cycles = self._run(atm)
+        assert cycles[0]["atm_straddle_iv"] == pytest.approx(0.13)
+        assert cycles[1]["atm_straddle_iv"] == pytest.approx(0.22)
 
     def test_implausible_iv_filtered_falls_back_to_vix(self):
         # 5.2 (520 %) expiry-day blowup for cycle 0's expiry → filtered → VIX proxy.
