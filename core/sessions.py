@@ -51,13 +51,14 @@ class MarketSession:
                                   (pre/post margin around the tradable window).
     squareoff_before_close_min  — minutes before close to flatten intraday.
     weekdays                    — set of weekday ints (Mon=0 … Sun=6) the session runs.
-    dst_close_time              — alternate close for when New York is on US standard
+    standard_close_time         — alternate close for when New York is on US standard
                                   time (DST off). None means the close never flips.
     poll_close_dst_off          — alternate poll-close for US-standard time.
 
     For a fixed-close session (EQUITY) `close_time` is used unconditionally. For a
     DST-sensitive session (MCX) `close_time` is the US-DST close and
-    `dst_close_time` is the US-standard close; `close_time_for(date)` resolves it.
+    `standard_close_time` is the US-standard (DST-off) close;
+    `close_time_for(date)` resolves it.
     """
 
     name: str
@@ -67,18 +68,18 @@ class MarketSession:
     poll_close: dtime
     squareoff_before_close_min: int
     weekdays: frozenset[int] = frozenset({0, 1, 2, 3, 4})
-    dst_close_time: Optional[dtime] = None
+    standard_close_time: Optional[dtime] = None
     poll_close_dst_off: Optional[dtime] = None
 
     # ── DST-aware resolution ───────────────────────────────────────────────────
 
     def close_time_for(self, on: date) -> dtime:
         """The effective close on a given date (handles the US-DST flip)."""
-        if self.dst_close_time is None:
+        if self.standard_close_time is None:
             return self.close_time
         # When NY is on DST → earlier close (close_time); otherwise the later
-        # US-standard close (dst_close_time).
-        return self.close_time if _ny_is_dst(on) else self.dst_close_time
+        # US-standard close (standard_close_time).
+        return self.close_time if _ny_is_dst(on) else self.standard_close_time
 
     def poll_close_for(self, on: date) -> dtime:
         if self.poll_close_dst_off is None:
@@ -155,13 +156,13 @@ EQUITY = MarketSession(
 
 # MCX commodities evening session. Open 09:00 IST. Close flips with US DST:
 #   NY on DST   → 23:30 IST (close_time)
-#   NY standard → 23:55 IST (dst_close_time)
+#   NY standard → 23:55 IST (standard_close_time)
 # Poll window mirrors the close flip (close + ~10-min post margin).
 MCX = MarketSession(
     name="MCX",
     open_time=dtime(9, 0),
     close_time=dtime(23, 30),
-    dst_close_time=dtime(23, 55),
+    standard_close_time=dtime(23, 55),
     poll_open=dtime(8, 45),
     poll_close=dtime(23, 40),
     poll_close_dst_off=dtime(23, 59),

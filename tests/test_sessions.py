@@ -7,6 +7,7 @@ flips with US DST: 23:30 when New York is on DST, 23:55 on US standard time).
 All datetimes are constructed tz-aware IST and the file must pass under TZ=UTC
 (CI IST-date trap) — none of the assertions depend on the host wall clock.
 """
+import dataclasses
 from datetime import date, datetime, time as dtime
 from zoneinfo import ZoneInfo
 
@@ -44,7 +45,7 @@ def test_equity_constants_match_legacy():
     assert EQUITY.poll_close == dtime(15, 35)
     assert EQUITY.squareoff_before_close_min == 15
     # Equity close never flips with DST.
-    assert EQUITY.dst_close_time is None
+    assert EQUITY.standard_close_time is None
     assert EQUITY.close_time_for(DST_ON) == dtime(15, 30)
     assert EQUITY.close_time_for(DST_OFF) == dtime(15, 30)
 
@@ -116,6 +117,13 @@ def test_mcx_is_open_dst_off():
     assert c.is_open(_ist(DST_OFF, 23, 55)) is False    # close exclusive (DST-off close)
 
 
+def test_mcx_is_open_dst_off_mid_evening():
+    # Pin that the DST-off close branch leaves the session open mid-evening.
+    # A regression that accidentally used the DST-ON close (23:30) on a DST-off day
+    # would make this return False.
+    assert SessionClock(MCX).is_open(_ist(DST_OFF, 23, 30)) is True
+
+
 def test_mcx_squareoff_flips_with_dst():
     c = SessionClock(MCX)
     assert c.squareoff_time(DST_ON) == dtime(23, 15)    # 23:30 − 15
@@ -124,10 +132,14 @@ def test_mcx_squareoff_flips_with_dst():
 
 def test_mcx_poll_window_flips_with_dst():
     c = SessionClock(MCX)
+    # Pin the DST-off poll-close constant so a regression widening the window is caught.
+    assert MCX.poll_close_dst_off == dtime(23, 59)
     # Poll window extends past close by ~10 min and flips with DST.
     assert c.in_poll_window(_ist(DST_ON, 23, 40)) is True
     assert c.in_poll_window(_ist(DST_ON, 23, 41)) is False
     assert c.in_poll_window(_ist(DST_OFF, 23, 59)) is True
+    # One-past-boundary on DST-off side must be False (mirrors DST-on 23:41 check).
+    assert c.in_poll_window(_ist(DST_OFF, 0, 0)) is False
     # 8:45 pre-margin both ends inclusive
     assert c.in_poll_window(_ist(DST_ON, 8, 45)) is True
     assert c.in_poll_window(_ist(DST_ON, 8, 44)) is False
@@ -164,7 +176,7 @@ def test_get_session_lookup():
 
 
 def test_market_session_is_frozen():
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         MCX.open_time = dtime(10, 0)  # type: ignore[misc]
 
 
