@@ -1283,6 +1283,7 @@ def run_strategy_backtest(
     lot: int = NIFTY_LOT,
     step: int = 50,
     slip_pct: float = 0.005,
+    gate: str = "vol",
 ) -> dict[str, Any]:
     """Run ``spec`` over ``cycles``. Returns the SAME metrics dict shape as
     ``fno_condor.run_backtest`` PLUS return-on-margin fields.
@@ -1358,9 +1359,12 @@ def run_strategy_backtest(
             continue
 
         # ── Gate decision ────────────────────────────────────────────────
+        # gate="vol": only take cycles the vol-regime gate favours for this
+        # strategy. gate="none": ungated A/B — take every cycle (direction is
+        # encoded in the strategy structure, not the gate).
         decision = gate_decision(realized_vol_20d, straddle_iv, k=k)
         want = SELL_PREMIUM if spec.sell_premium else BUY_PREMIUM
-        if decision != want:
+        if gate == "vol" and decision != want:
             logger.debug(
                 "Cycle %s skipped: gate=%s want=%s (rv=%.4f iv=%.4f)",
                 cycle.get("entry_date", "<?>"),
@@ -1468,6 +1472,7 @@ def run_strategy_backtest(
 
     metrics: dict[str, Any] = {
         "strategy": spec.name,
+        "gate": gate,
         "trades": trades,
         "n_cycles": n_cycles,
         "n_trades": n_trades,
@@ -1523,6 +1528,12 @@ def main() -> None:  # pragma: no cover
         default="weekly",
         choices=["weekly", "expiry_calendar"],
     )
+    parser.add_argument(
+        "--gate",
+        default="both",
+        choices=["vol", "none", "both"],
+        help="vol = vol-regime gated; none = ungated; both = gated-vs-ungated A/B (default)",
+    )
     parser.add_argument("--k", type=float, default=DEFAULT_K)
     parser.add_argument("--capital", type=float, default=200_000.0)
     parser.add_argument("--span-pct", type=float, default=None)
@@ -1547,24 +1558,30 @@ def main() -> None:  # pragma: no cover
 
     cycs = cycles_from_db(mode=args.mode)
 
+    gate_modes = ["vol", "none"] if args.gate == "both" else [args.gate]
     names = list(FNO_STRATEGIES) if args.strategy == "all" else [args.strategy]
     rows = []
     for name in names:
         spec = FNO_STRATEGIES[name]
-        m = run_strategy_backtest(spec, cycs, extra, k=args.k, capital=args.capital)
-        go, reason = m["go_no_go"]
-        rows.append((name, m["n_trades"], m["net_pnl"], m["return_on_margin"], go, reason))
+        for gm in gate_modes:
+            m = run_strategy_backtest(
+                spec, cycs, extra, k=args.k, capital=args.capital, gate=gm
+            )
+            go, reason = m["go_no_go"]
+            rows.append(
+                (name, gm, m["n_trades"], m["net_pnl"], m["return_on_margin"], go, reason)
+            )
 
-    if args.strategy == "all":
-        hdr = f"{'strategy':<20} {'n':>5} {'net_pnl':>12} {'ROM':>8} {'go?':>5}"
-        print(hdr)
-        print("-" * len(hdr))
-        for name, n, pnl, rom, go, _ in rows:
-            print(f"{name:<20} {n:>5} {pnl:>12,.0f} {rom:>8.2%} {'GO' if go else 'NO-GO':>5}")
-    else:
-        name, n, pnl, rom, go, reason = rows[0]
-        print(f"strategy={name}  n_trades={n}  net_pnl=₹{pnl:,.0f}  ROM={rom:.2%}")
-        print(f"go_no_go: {reason}")
+    hdr = f"{'strategy':<20} {'gate':>5} {'n':>5} {'net_pnl':>12} {'ROM':>8} {'go?':>5}"
+    print(hdr)
+    print("-" * len(hdr))
+    for name, gm, n, pnl, rom, go, _ in rows:
+        print(
+            f"{name:<20} {gm:>5} {n:>5} {pnl:>12,.0f} {rom:>8.2%} {'GO' if go else 'NO-GO':>5}"
+        )
+    if args.strategy != "all":
+        for name, gm, n, pnl, rom, go, reason in rows:
+            print(f"\n[{name} · gate={gm}] go_no_go: {reason}")
 
 
 if __name__ == "__main__":
