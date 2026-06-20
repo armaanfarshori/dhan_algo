@@ -1568,6 +1568,141 @@ class TestExpiryWeekday:
 
 
 @needs_condor
+class TestIndexConfigAgnostic:
+    """Fix #1 (index-agnostic) — a NON-NIFTY underlying config drives its own
+    expiry rule; the NIFTY default is unchanged.
+
+    F&O code must not be NIFTY-hardcoded. ``expiry_weekday_for`` /
+    ``snap_to_expiry_weekday`` take an ``IndexConfig``; here we define a
+    monthly-only index whose expiry weekday is WEDNESDAY (2) with no cutover, and
+    prove it snaps to Wednesday — while NIFTY still snaps to Thu/Tue.
+    """
+
+    @staticmethod
+    def _monthly_only_index():
+        from research.backtest.fno_condor import IndexConfig
+        # A fictitious monthly-only underlying: no weeklies, fixed Wednesday
+        # expiry, no Thursday→Tuesday cutover. Values are illustrative (the task
+        # explicitly says non-NIFTY indices need no real data — just no hardcode).
+        return IndexConfig(
+            symbol="TESTIDX",
+            security_id="999",
+            vix_security_id=None,
+            lot_size=15,
+            strike_step=100,
+            has_weeklies=False,
+            expiry_weekday=2,        # Wednesday
+            pre_cutover_weekday=None,
+            cutover_date=None,
+        )
+
+    def test_nifty_default_config_values(self):
+        from research.backtest.fno_condor import NIFTY, NIFTY_TUESDAY_EXPIRY_CUTOVER
+        assert NIFTY.symbol == "NIFTY"
+        assert NIFTY.security_id == "13"
+        assert NIFTY.vix_security_id == "21"
+        assert NIFTY.lot_size == 65
+        assert NIFTY.strike_step == 50
+        assert NIFTY.has_weeklies is True
+        assert NIFTY.expiry_weekday == 1            # Tuesday (post-cutover)
+        assert NIFTY.pre_cutover_weekday == 3       # Thursday (pre-cutover)
+        assert NIFTY.cutover_date == NIFTY_TUESDAY_EXPIRY_CUTOVER
+
+    def test_non_nifty_expiry_weekday_is_its_own(self):
+        """A monthly-only index returns its OWN expiry weekday on every date —
+        no NIFTY Thursday/Tuesday rule leaks in."""
+        from research.backtest.fno_condor import expiry_weekday_for
+        idx = self._monthly_only_index()
+        # Both before and after NIFTY's cutover, the custom index stays Wednesday.
+        assert expiry_weekday_for(date(2026, 1, 15), index=idx) == 2
+        assert expiry_weekday_for(date(2026, 12, 15), index=idx) == 2
+
+    def test_non_nifty_snap_picks_its_own_weekday(self):
+        """snap_to_expiry_weekday on a non-NIFTY index snaps to its weekday."""
+        from research.backtest.fno_condor import snap_to_expiry_weekday
+        idx = self._monthly_only_index()
+        # Mon..Fri week → Wednesday should be chosen (2026-01-14 is a Wednesday).
+        week = [date(2026, 1, 12), date(2026, 1, 13), date(2026, 1, 14),
+                date(2026, 1, 15), date(2026, 1, 16)]
+        assert snap_to_expiry_weekday(week, index=idx) == date(2026, 1, 14)
+
+    def test_nifty_behaviour_unchanged_via_config(self):
+        """Passing the NIFTY config explicitly reproduces the default behaviour."""
+        from research.backtest.fno_condor import (
+            NIFTY,
+            expiry_weekday_for,
+            snap_to_expiry_weekday,
+        )
+        # Pre-cutover → Thursday; on/after → Tuesday (unchanged from the default).
+        assert expiry_weekday_for(date(2026, 1, 15), index=NIFTY) == 3
+        assert expiry_weekday_for(date(2026, 9, 1), index=NIFTY) == 1
+        # Default arg (no index passed) must match passing NIFTY explicitly.
+        assert expiry_weekday_for(date(2026, 1, 15)) == expiry_weekday_for(
+            date(2026, 1, 15), index=NIFTY
+        )
+        pre_week = [date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7),
+                    date(2026, 1, 8), date(2026, 1, 9)]
+        assert snap_to_expiry_weekday(pre_week, index=NIFTY) == date(2026, 1, 8)
+
+    def test_non_nifty_index_drives_weekly_cycles_from_db(self):
+        """End-to-end: a non-NIFTY IndexConfig drives cycles_from_db weekly
+        boundaries via its own security_id and Wednesday expiry rule."""
+        from research.backtest.fno_condor import IndexConfig, cycles_from_db
+
+        idx = IndexConfig(
+            symbol="TESTIDX",
+            security_id="999",
+            vix_security_id="888",
+            lot_size=15,
+            strike_step=100,
+            has_weeklies=False,
+            expiry_weekday=2,   # Wednesday
+        )
+        # Two ISO weeks, each with a Wednesday → boundaries are the Wednesdays.
+        #   2026-01-14 (Wed), 2026-01-21 (Wed) → 1 pair → 1 cycle
+        index_rows = [
+            (date(2026, 1, 12), 50000.0, 0.10),
+            (date(2026, 1, 14), 50000.0, 0.10),   # Wed boundary week 1
+            (date(2026, 1, 16), 50000.0, 0.10),
+            (date(2026, 1, 19), 50000.0, 0.10),
+            (date(2026, 1, 21), 50000.0, 0.10),   # Wed boundary week 2
+        ]
+        vix_rows = [(d, 15.0) for d, *_ in index_rows]
+
+        def _make_result(rows):
+            result = MagicMock()
+            result.fetchall.return_value = rows
+            return result
+
+        session = MagicMock()
+        # Assert the query used the custom index security_id (999), not NIFTY (13).
+        captured = {}
+
+        def _execute(stmt, params):
+            captured.setdefault("ids", []).append(params.get("nid") or params.get("vid"))
+            # First call → index rows, second → vix rows
+            if params.get("nid") == "999":
+                return _make_result(index_rows)
+            return _make_result(vix_rows)
+
+        session.execute.side_effect = _execute
+
+        @contextmanager
+        def fake_get_session():
+            yield session
+
+        with patch("research.backtest.fno_condor.get_session", new=fake_get_session, create=True), \
+             patch("db.get_session", new=fake_get_session):
+            cycles = cycles_from_db(index=idx, mode="weekly")
+
+        assert "999" in captured["ids"], "custom index security_id must drive the query"
+        assert "888" in captured["ids"], "custom vix security_id must drive the query"
+        assert len(cycles) == 1
+        assert cycles[0]["entry_date"] == date(2026, 1, 14)   # Wednesday
+        assert cycles[0]["expiry_date"] == date(2026, 1, 21)  # Wednesday
+
+
+@needs_condor
 class TestDayCountConvention:
     """Fix #2 — realized vol (√252) rebased to calendar (√365) for the gate."""
 

@@ -108,54 +108,135 @@ def realized_vol_to_calendar_basis(
 
 
 # ---------------------------------------------------------------------------
-# Weekly-expiry weekday convention (Phase-0a fidelity fix #1)
+# Index / underlying configuration (Phase-0a fidelity fix #1, index-agnostic)
 # ---------------------------------------------------------------------------
-# NIFTY weekly expiry weekday changed over the years. NSE moved the NIFTY
-# weekly expiry from THURSDAY to TUESDAY effective the cutover below. Before the
-# cutover, weekly expiry is Thursday; on/after it, Tuesday. (Project date
-# convention: real-life 2025-09-01 is represented here as 2026-09-01 — the repo
-# runs one year ahead of the real-world calendar; today is 2026-06-20.)
+# F&O code must NOT be NIFTY-hardcoded — the platform is moving multi-index.
+# Each tradable underlying carries its own contract spec: security ids, lot
+# size, strike grid, and (critically) its weekly-expiry weekday rule, which
+# differs per index and changes over time (NSE moved NIFTY weeklies Thursday→
+# Tuesday on a cutover date; BANKNIFTY/FINNIFTY weeklies were discontinued →
+# monthly-only). All expiry-weekday logic below takes an ``IndexConfig`` so a
+# non-NIFTY underlying drives its own rule; ``NIFTY`` is the default.
 #
 # Python weekday(): Monday=0 ... Sunday=6 → Tuesday=1, Thursday=3.
-_THURSDAY = 3
 _TUESDAY = 1
+_THURSDAY = 3
+
+# NIFTY weekly-expiry Thursday→Tuesday cutover. (Project date convention:
+# real-life 2025-09-01 is represented here as 2026-09-01 — the repo runs one
+# year ahead of the real-world calendar; today is 2026-06-20.) Kept as a
+# module-level constant for the NIFTY default + backward-compatible imports.
 NIFTY_TUESDAY_EXPIRY_CUTOVER = date(2026, 9, 1)
 
 
-def expiry_weekday_for(cycle_date: date, cutover: date = NIFTY_TUESDAY_EXPIRY_CUTOVER) -> int:
-    """Return the NIFTY weekly-expiry weekday (Python weekday int) effective on
-    ``cycle_date``: Thursday (3) before ``cutover``, Tuesday (1) on/after it.
+@dataclass(frozen=True)
+class IndexConfig:
+    """Contract spec for one F&O underlying (index-agnostic).
 
-    Date-aware so a multi-year backtest uses the correct expiry day for each
-    cycle instead of a single hardcoded weekday (fidelity fix #1).
+    Carries everything the backtest needs that is index-specific so no NIFTY
+    constant leaks into the pricing / cycle-building code.
+
+    Attributes
+    ----------
+    symbol:
+        Ticker key (e.g. ``"NIFTY"``) used against ``expiry_calendar``.
+    security_id:
+        ``security_id`` of the index row in ``index_bars`` (string — Dhan ids
+        are strings; NIFTY = ``"13"``).
+    vix_security_id:
+        ``security_id`` of the volatility index used as the IV proxy (India VIX
+        = ``"21"`` for NIFTY). ``None`` for indices without a dedicated vol index.
+    lot_size:
+        Contract lot size (units per lot). NIFTY = 65.
+    strike_step:
+        Strike-grid spacing in index points. NIFTY = 50.
+    has_weeklies:
+        Whether the index has weekly expiries. ``False`` → monthly-only
+        (e.g. BANKNIFTY/FINNIFTY after weeklies were discontinued); the weekly
+        backtest path then snaps to the monthly-expiry weekday only.
+    expiry_weekday:
+        Python weekday int (Mon=0..Sun=6) of the (current) weekly/monthly
+        expiry. For NIFTY this is the POST-cutover weekday (Tuesday=1).
+    pre_cutover_weekday:
+        Expiry weekday BEFORE ``cutover_date`` (NIFTY = Thursday=3). ``None``
+        when the index never changed its expiry weekday.
+    cutover_date:
+        Date on/after which ``expiry_weekday`` applies and before which
+        ``pre_cutover_weekday`` applies. ``None`` when there is no cutover.
     """
-    return _TUESDAY if cycle_date >= cutover else _THURSDAY
+
+    symbol: str
+    security_id: str
+    vix_security_id: str | None
+    lot_size: int
+    strike_step: int
+    has_weeklies: bool
+    expiry_weekday: int
+    pre_cutover_weekday: int | None = None
+    cutover_date: date | None = None
+
+
+# Default underlying — NIFTY. Weeklies exist; expiry weekday is Thursday before
+# the 2026-09-01 cutover and Tuesday on/after it. security_id=13, vix=21,
+# lot=65, strike grid 50.
+NIFTY = IndexConfig(
+    symbol="NIFTY",
+    security_id="13",
+    vix_security_id="21",
+    lot_size=65,
+    strike_step=50,
+    has_weeklies=True,
+    expiry_weekday=_TUESDAY,
+    pre_cutover_weekday=_THURSDAY,
+    cutover_date=NIFTY_TUESDAY_EXPIRY_CUTOVER,
+)
+
+
+def expiry_weekday_for(cycle_date: date, index: IndexConfig = NIFTY) -> int:
+    """Return ``index``'s weekly/monthly-expiry weekday (Python weekday int)
+    effective on ``cycle_date``.
+
+    Date-aware: when the index defines a ``cutover_date`` + ``pre_cutover_weekday``
+    (e.g. NIFTY's Thursday→Tuesday move) the pre-cutover weekday applies before
+    the cutover and ``expiry_weekday`` on/after it. Indices with no cutover use
+    ``expiry_weekday`` unconditionally. Multi-year backtests therefore use the
+    correct expiry day for each cycle instead of a single hardcoded weekday
+    (fidelity fix #1) — and a non-NIFTY underlying drives its own rule.
+    """
+    if (
+        index.cutover_date is not None
+        and index.pre_cutover_weekday is not None
+        and cycle_date < index.cutover_date
+    ):
+        return index.pre_cutover_weekday
+    return index.expiry_weekday
 
 
 def snap_to_expiry_weekday(
     trading_days_in_week: list[date],
-    cutover: date = NIFTY_TUESDAY_EXPIRY_CUTOVER,
+    index: IndexConfig = NIFTY,
 ) -> date | None:
     """Pick the expiry-day boundary from an ISO week's available trading days.
 
     Given the sorted trading days that fall in one ISO week, return the trading
-    day that best represents the weekly expiry for that week:
+    day that best represents the expiry for that week, using ``index``'s rule:
 
     * Target weekday = ``expiry_weekday_for`` of the week's last trading day
-      (Thursday before the cutover, Tuesday on/after).
+      (e.g. NIFTY Thursday before the cutover, Tuesday on/after).
     * If a trading day on the target weekday exists, use it (holiday-free week).
     * Otherwise the expiry-day was a holiday → fall back to the last trading day
       on or before the target weekday (NSE rolls a holiday expiry to the prior
       trading day); if none precede it, use the week's last trading day.
 
-    Returns ``None`` for an empty week. This keeps the synthetic-weekly cycle
-    boundaries aligned to the real expiry weekday + holiday rule, replacing the
-    old "last trading day of the ISO week" heuristic.
+    Returns ``None`` for an empty week. Index-agnostic: a non-NIFTY underlying
+    (different weekday / monthly-only) snaps to its own expiry weekday. This
+    keeps synthetic cycle boundaries aligned to the real expiry weekday +
+    holiday rule, replacing the old "last trading day of the ISO week" heuristic.
     """
     if not trading_days_in_week:
         return None
     days = sorted(trading_days_in_week)
-    target_wd = expiry_weekday_for(days[-1], cutover=cutover)
+    target_wd = expiry_weekday_for(days[-1], index=index)
 
     exact = [d for d in days if d.weekday() == target_wd]
     if exact:
@@ -923,21 +1004,34 @@ def go_no_go(metrics: dict[str, Any], capital: float = 200_000.0) -> tuple[bool,
 
 
 def cycles_from_db(
-    symbol: str = "NIFTY",
+    symbol: str | None = None,
     *,
-    nifty_id: str = "13",
-    vix_id: str = "21",
+    index: IndexConfig = NIFTY,
+    index_id: str | None = None,
+    nifty_id: str | None = None,
+    vix_id: str | None = None,
     timeframe: str = "1d",
     mode: str = "weekly",
 ) -> list[dict]:
     """Assemble weekly iron-condor cycles from the DB tables created in migrations 009/010.
 
+    Index-agnostic: pass an ``IndexConfig`` (default ``NIFTY``) to drive the
+    underlying's security ids, symbol, and expiry-weekday rule. The legacy
+    ``index_id`` / ``vix_id`` / ``symbol`` keyword args still override the config
+    fields for callers that pass them explicitly.
+
     Parameters
     ----------
-    symbol:     Ticker key in expiry_calendar (default ``"NIFTY"``).
+    index:      Underlying contract spec (default ``NIFTY``). Supplies ``symbol``,
+                ``security_id``, ``vix_security_id`` and the expiry-weekday rule.
+    symbol:     Ticker key in expiry_calendar. Defaults to ``index.symbol``.
                 Only used in ``mode="expiry_calendar"``.
-    nifty_id:   ``security_id`` of the NIFTY index row in index_bars.
-    vix_id:     ``security_id`` of the India VIX row in index_bars.
+    index_id:   ``security_id`` of the index row in index_bars. Defaults to
+                ``index.security_id``.
+    nifty_id:   Deprecated alias for ``index_id`` (back-compat for existing
+                callers); ``index_id`` takes precedence when both are given.
+    vix_id:     ``security_id`` of the volatility index row in index_bars.
+                Defaults to ``index.vix_security_id``.
     timeframe:  Bar timeframe stored in index_bars (default ``"1d"``).
     mode:       Cycle-boundary strategy:
 
@@ -1001,6 +1095,13 @@ def cycles_from_db(
             "expected 'weekly' (historical) or 'expiry_calendar' (forward/live)."
         )
 
+    # Resolve effective ids/symbol: explicit kwargs override the index config.
+    # `index_id` wins over the deprecated `nifty_id` alias, which wins over config.
+    eff_symbol = symbol if symbol is not None else index.symbol
+    _id = index_id if index_id is not None else nifty_id
+    eff_index_id = _id if _id is not None else index.security_id
+    eff_vix_id = vix_id if vix_id is not None else index.vix_security_id
+
     # Lazy imports — keep pure pricing functions free of DB dependencies.
     from sqlalchemy import text  # noqa: PLC0415
 
@@ -1009,33 +1110,35 @@ def cycles_from_db(
     tf = timeframe
 
     if mode == "weekly":
-        return _cycles_from_db_weekly(nifty_id, vix_id, tf, get_session, text)
+        return _cycles_from_db_weekly(eff_index_id, eff_vix_id, tf, get_session, text, index)
     else:
-        return _cycles_from_db_expiry_calendar(symbol, nifty_id, vix_id, tf, get_session, text)
+        return _cycles_from_db_expiry_calendar(
+            eff_symbol, eff_index_id, eff_vix_id, tf, get_session, text
+        )
 
 
 def _build_bar_maps(
     session: Any,
     text: Any,
-    nifty_id: str,
-    vix_id: str,
+    index_id: str,
+    vix_id: str | None,
     tf: str,
 ) -> tuple[dict, dict]:
-    """Query index_bars and return (nifty_map, vix_map)."""
-    nifty_rows = session.execute(
+    """Query index_bars and return (index_map, vix_map)."""
+    index_rows = session.execute(
         text(
             "SELECT (time AT TIME ZONE 'UTC')::date AS d, close, realized_vol_20d "
             "FROM index_bars "
             "WHERE security_id = :nid AND timeframe = :tf "
             "ORDER BY 1"
         ),
-        {"nid": nifty_id, "tf": tf},
+        {"nid": index_id, "tf": tf},
     ).fetchall()
 
-    nifty_map: dict[date, tuple[float, float | None]] = {}
-    for r in nifty_rows:
+    index_map: dict[date, tuple[float, float | None]] = {}
+    for r in index_rows:
         d, close, rvol = r[0], r[1], r[2]
-        nifty_map[d] = (float(close), float(rvol) if rvol is not None else None)
+        index_map[d] = (float(close), float(rvol) if rvol is not None else None)
 
     vix_rows = session.execute(
         text(
@@ -1047,22 +1150,22 @@ def _build_bar_maps(
     ).fetchall()
 
     vix_map: dict[date, float] = {r[0]: float(r[1]) for r in vix_rows}
-    return nifty_map, vix_map
+    return index_map, vix_map
 
 
 def _build_cycles_from_pairs(
     boundary_pairs: list[tuple[date, date]],
-    nifty_map: dict,
+    index_map: dict,
     vix_map: dict,
     mode: str,
 ) -> list[dict]:
     """Convert (entry, expiry) date pairs into cycle dicts, skipping incomplete ones."""
     cycles: list[dict] = []
     for e_i, e_next in boundary_pairs:
-        na = nifty_map.get(e_i)
+        na = index_map.get(e_i)
         if na is None or na[1] is None:
             logger.debug(
-                "cycles_from_db[%s]: skipping pair (%s, %s) — missing NIFTY close/rvol at %s",
+                "cycles_from_db[%s]: skipping pair (%s, %s) — missing index close/rvol at %s",
                 mode, e_i, e_next, e_i,
             )
             continue
@@ -1075,10 +1178,10 @@ def _build_cycles_from_pairs(
             )
             continue
 
-        nb = nifty_map.get(e_next)
+        nb = index_map.get(e_next)
         if nb is None:
             logger.debug(
-                "cycles_from_db[%s]: skipping pair (%s, %s) — missing NIFTY close at %s",
+                "cycles_from_db[%s]: skipping pair (%s, %s) — missing index close at %s",
                 mode, e_i, e_next, e_next,
             )
             continue
@@ -1099,44 +1202,46 @@ def _build_cycles_from_pairs(
 
 
 def _cycles_from_db_weekly(
-    nifty_id: str,
-    vix_id: str,
+    index_id: str,
+    vix_id: str | None,
     tf: str,
     get_session: Any,
     text: Any,
+    index: IndexConfig = NIFTY,
 ) -> list[dict]:
     """Historical-backtest path: synthetic ISO-week boundaries from index_bars.
 
-    Derives the last trading day of each ISO week from the NIFTY bar calendar,
-    then treats consecutive weekly-boundary pairs as (entry, expiry) windows.
-    This avoids the forward-only limitation of ``expiry_calendar``.
-    Validated live: produces 233 weekly cycles / 164 trades over the full bar history.
+    Derives each ISO week's expiry boundary from the underlying bar calendar
+    (using ``index``'s expiry-weekday rule), then treats consecutive boundary
+    pairs as (entry, expiry) windows. This avoids the forward-only limitation of
+    ``expiry_calendar``. Validated live on NIFTY: 233 weekly cycles / 164 trades
+    over the full bar history.
     """
     with get_session() as session:
-        nifty_map, vix_map = _build_bar_maps(session, text, nifty_id, vix_id, tf)
+        index_map, vix_map = _build_bar_maps(session, text, index_id, vix_id, tf)
 
-    if len(nifty_map) < 2:
+    if len(index_map) < 2:
         logger.warning(
-            "cycles_from_db[weekly]: fewer than 2 NIFTY bar dates found — "
+            "cycles_from_db[weekly]: fewer than 2 %s bar dates found — "
             "returning empty cycle list (check that index_bars has been populated "
             "for security_id=%s, timeframe=%s).",
-            nifty_id, tf,
+            index.symbol, index_id, tf,
         )
         return []
 
     # Build ISO-week → list of trading days, then snap each week to its real
-    # weekly-expiry weekday (Thu pre-cutover / Tue on/after, holiday-rolled) via
+    # expiry weekday (per ``index``'s rule, holiday-rolled) via
     # snap_to_expiry_weekday — fidelity fix #1. This replaces the old "last
     # trading day of the ISO week" heuristic (which floats to Fri on a full week
-    # and ignored the Thursday→Tuesday cutover).
+    # and ignored the index's expiry-weekday cutover).
     wk_days: dict[tuple[int, int], list[date]] = {}
-    for d in sorted(nifty_map):
+    for d in sorted(index_map):
         iso_year, iso_week, _ = d.isocalendar()
         wk_days.setdefault((iso_year, iso_week), []).append(d)
 
     bounds: list[date] = []
     for kk in sorted(wk_days):
-        b = snap_to_expiry_weekday(wk_days[kk])
+        b = snap_to_expiry_weekday(wk_days[kk], index=index)
         if b is not None:
             bounds.append(b)
 
@@ -1148,14 +1253,14 @@ def _cycles_from_db_weekly(
         return []
 
     pairs = list(zip(bounds[:-1], bounds[1:]))
-    cycles = _build_cycles_from_pairs(pairs, nifty_map, vix_map, "weekly")
+    cycles = _build_cycles_from_pairs(pairs, index_map, vix_map, "weekly")
 
     if len(cycles) == 0:
         logger.warning(
             "cycles_from_db[weekly]: 0 cycles built from %d weekly boundaries — "
-            "no complete NIFTY + VIX data for any boundary pair "
-            "(nifty_map size=%d, vix_map size=%d).",
-            len(bounds), len(nifty_map), len(vix_map),
+            "no complete %s + VIX data for any boundary pair "
+            "(index_map size=%d, vix_map size=%d).",
+            len(bounds), index.symbol, len(index_map), len(vix_map),
         )
 
     return cycles
@@ -1163,8 +1268,8 @@ def _cycles_from_db_weekly(
 
 def _cycles_from_db_expiry_calendar(
     symbol: str,
-    nifty_id: str,
-    vix_id: str,
+    index_id: str,
+    vix_id: str | None,
     tf: str,
     get_session: Any,
     text: Any,
@@ -1207,26 +1312,26 @@ def _cycles_from_db_expiry_calendar(
             )
             return []
 
-        nifty_map, vix_map = _build_bar_maps(session, text, nifty_id, vix_id, tf)
+        index_map, vix_map = _build_bar_maps(session, text, index_id, vix_id, tf)
 
     pairs = list(zip(expiry_dates[:-1], expiry_dates[1:]))
-    cycles = _build_cycles_from_pairs(pairs, nifty_map, vix_map, "expiry_calendar")
+    cycles = _build_cycles_from_pairs(pairs, index_map, vix_map, "expiry_calendar")
 
     if len(cycles) == 0 and len(expiry_dates) >= 2:
-        if not nifty_map and not vix_map:
+        if not index_map and not vix_map:
             logger.warning(
                 "cycles_from_db[expiry_calendar]: 0 cycles built from %d expiry dates "
-                "for symbol=%s — no overlapping NIFTY or VIX bar data found in index_bars "
+                "for symbol=%s — no overlapping index or VIX bar data found in index_bars "
                 "(check that Phase-0 ingestion has run for security_id=%s / %s, timeframe=%s).",
-                len(expiry_dates), symbol, nifty_id, vix_id, tf,
+                len(expiry_dates), symbol, index_id, vix_id, tf,
             )
         else:
             logger.warning(
                 "cycles_from_db[expiry_calendar]: 0 cycles built from %d expiry dates "
                 "for symbol=%s — index_bars rows exist but none matched the expiry dates "
-                "(nifty_map size=%d, vix_map size=%d); "
+                "(index_map size=%d, vix_map size=%d); "
                 "check date alignment between expiry_calendar and index_bars.",
-                len(expiry_dates), symbol, len(nifty_map), len(vix_map),
+                len(expiry_dates), symbol, len(index_map), len(vix_map),
             )
 
     return cycles
