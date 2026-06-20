@@ -192,8 +192,23 @@ class Underlying:
 # inherits NIFTY's Thursday→Tuesday cutover rule. That is fine for NIFTY today, but
 # each new index MUST be added here with its OWN expiry weekday/cutover (or pass
 # --expiry-weekday) so it does not borrow NIFTY's expiry calendar by accident.
+#
+# BANKNIFTY (security_id=25, IDX_I — verified against core/instruments.INDEX_CONFIGS
+# ("BANKNIFTY" → underlying_id "25", strike_step 100, lot 30) and the index-config
+# notes in research/backtest/fno_condor.py). Its expiry weekday is its OWN rule, NOT
+# NIFTY's: BANKNIFTY weeklies were discontinued (monthly-only) and it never adopted
+# NIFTY's Thursday→Tuesday 2026-09-01 weekly cutover. It is pinned with
+# expiry_weekday=THURSDAY, pre_cutover_weekday=None, cutover_date=None so the
+# derivation uses a SINGLE fixed weekly/monthly weekday and never borrows NIFTY's
+# calendar (the OFF-cutover off-registry footgun the registry doc warns about). The
+# index ATM fan-out cap stays 10; strike step 100. (Refine the exact current NSE
+# BANKNIFTY monthly-expiry weekday before any live go/no-go — research-only, flagged.)
 UNDERLYINGS: dict[str, Underlying] = {
     "NIFTY": Underlying("NIFTY", 13, "OPTIDX", 50, 10, "NSE_FNO", "IDX_I"),
+    "BANKNIFTY": Underlying(
+        "BANKNIFTY", 25, "OPTIDX", 100, 10, "NSE_FNO", "IDX_I",
+        expiry_weekday=THURSDAY, pre_cutover_weekday=None, cutover_date=None,
+    ),
 }
 
 
