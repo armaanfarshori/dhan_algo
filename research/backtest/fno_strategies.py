@@ -30,6 +30,13 @@ Honesty ledger (§11 of the engine spec)
    proxy used for ~5–10-DTE weekly options → term-structure bias (weekly IV
    typically trades above the 30-day VIX due to short-end vol-of-vol premium).
 
+   Day-count (Phase-0a fix #2): the vol-gate previously compared a √252-annualised
+   ``realized_vol_20d`` against the √365-annualised ``straddle_iv`` — a cross-basis
+   mix (~20% ratio bias). ``run_strategy_backtest`` now rebases realized vol onto
+   the calendar (365) basis (``fno_condor.realized_vol_to_calendar_basis``) before
+   the gate, matching ``fno_condor.run_backtest``. ``k`` must be calibrated on
+   calendar-basis ratios.
+
 4. ``span_pct`` for naked-short positions is a flat ~12 % approximation of the
    NIFTY SPAN+exposure margin. True SPAN scales with VIX — so in high-vol
    regimes the denominator is understated → return_on_margin is slightly
@@ -69,6 +76,7 @@ from research.backtest.fno_condor import (
     build_condor,
     cycles_from_db,  # re-exported unchanged
     go_no_go,
+    realized_vol_to_calendar_basis,
 )
 from research.backtest.fno_costs import (
     NIFTY_LOT,
@@ -1390,7 +1398,10 @@ def run_strategy_backtest(
         # gate="vol": only take cycles the vol-regime gate favours for this
         # strategy. gate="none": ungated A/B — take every cycle (direction is
         # encoded in the strategy structure, not the gate).
-        decision = gate_decision(realized_vol_20d, straddle_iv, k=k)
+        # Day-count fix #2: rebase √252 realized vol onto the calendar (365)
+        # basis so it is comparable to the √365 implied vol (mirrors fno_condor).
+        realized_vol_cal = realized_vol_to_calendar_basis(realized_vol_20d)
+        decision = gate_decision(realized_vol_cal, straddle_iv, k=k)
         want = SELL_PREMIUM if spec.sell_premium else BUY_PREMIUM
         if gate == "vol" and decision != want:
             logger.debug(
