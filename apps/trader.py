@@ -63,10 +63,13 @@ async def seed_opening_ranges(runners, dhan, segment: str, orb_minutes: int):
     they aren't taken hours late. Failures are non-fatal — the EOD
     square-off no longer depends on a locked OR.
     """
+    from core.sessions import EQUITY
     from engine.runner import IST
-    from strategies.orb import MARKET_OPEN
+    # Equity OR window is derived from the EQUITY session profile (single source
+    # of truth in core/sessions.py); value (09:15 open) is unchanged.
+    market_open = EQUITY.open_time
     now = datetime.now(IST)
-    or_end = (datetime.combine(now.date(), MARKET_OPEN, tzinfo=IST)
+    or_end = (datetime.combine(now.date(), market_open, tzinfo=IST)
               + timedelta(minutes=orb_minutes))
     if now.weekday() >= 5 or now <= or_end:
         return
@@ -99,7 +102,7 @@ async def seed_opening_ranges(runners, dhan, segment: str, orb_minutes: int):
                 bar = datetime.fromtimestamp(ts, IST)
                 if bar.date() != now.date():
                     continue
-                if MARKET_OPEN <= bar.time() and bar < or_end:
+                if market_open <= bar.time() and bar < or_end:
                     or_h, or_l = max(or_h, h), min(or_l, l)
                 elif bar >= or_end:
                     post_h, post_l = max(post_h, h), min(post_l, l)
