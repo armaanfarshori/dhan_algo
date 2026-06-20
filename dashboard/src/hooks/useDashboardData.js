@@ -35,6 +35,11 @@ export function useDashboardData() {
   const fnoChain     = usePoller('/api/fno/chain',       60000)
   const fnoBacktest  = usePoller('/api/fno/backtest',   600000)
 
+  // ── Scalper panel (live heartbeat fast; governor/trades medium) ────────────
+  const scalperLive     = usePoller('/api/scalper/live',     5000)
+  const scalperGovernor = usePoller('/api/scalper/governor', 15000)
+  const scalperTrades   = usePoller('/api/scalper/trades',   30000)
+
   // ── Legacy-shape adapters (older panels expect /api/status & /api/risk) ───
   const first = trader?.strategies?.[0]
   const status = {
@@ -70,5 +75,6 @@ export function useDashboardData() {
     signals, funds, positions, watchlist, market, tradelog, logs, equity,
     dbStats, kronosSignals, kronosLive, screener, backfill, systemHealth, rateLimitsData,
     fnoVrp, fnoVrpSeries, fnoPaper, fnoChain, fnoBacktest,
+    scalperLive, scalperGovernor, scalperTrades,
   }
 }

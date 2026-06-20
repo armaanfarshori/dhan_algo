@@ -8,6 +8,7 @@ import PortfolioTab from '@/components/portfolio/PortfolioTab'
 import SystemTab from '@/components/system/SystemTab'
 import ScreenerTab from '@/components/screener/ScreenerTab'
 import FnoTab from '@/components/fno/FnoTab'
+import ScalperTab from '@/components/scalper/ScalperTab'
 
 // ── Error boundary — never blank-screen on a render error ──────────────────
 class ErrorBoundary extends Component {
@@ -41,6 +42,7 @@ const TAB_ITEMS = [
   { value: 'system',    label: 'System' },
   { value: 'screener',  label: 'Screener' },
   { value: 'fno',       label: 'F&O' },
+  { value: 'scalper',   label: 'Scalper' },
 ]
 const TAB_ORDER = TAB_ITEMS.map(t => t.value)
 
@@ -48,7 +50,7 @@ export default function App() {
   const data = useDashboardData()
   const [tab, setTab] = useState(() => {
     const q = new URLSearchParams(window.location.search).get('tab')
-    return ['signals', 'portfolio', 'system', 'screener', 'fno'].includes(q) ? q : 'signals'
+    return ['signals', 'portfolio', 'system', 'screener', 'fno', 'scalper'].includes(q) ? q : 'signals'
   })
 
   // Jump tabs with the 1 / 2 / 3 keys
@@ -56,7 +58,7 @@ export default function App() {
     const onKey = (e) => {
       if (e.metaKey || e.ctrlKey || e.altKey) return
       if (['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return
-      const map = { 1: 'signals', 2: 'portfolio', 3: 'system', 4: 'screener', 5: 'fno' }
+      const map = { 1: 'signals', 2: 'portfolio', 3: 'system', 4: 'screener', 5: 'fno', 6: 'scalper' }
       if (map[e.key]) setTab(map[e.key])
     }
     window.addEventListener('keydown', onKey)
@@ -103,6 +105,7 @@ export default function App() {
               {tab === 'system'    && <SystemTab    data={data} />}
               {tab === 'screener'  && <ScreenerTab />}
               {tab === 'fno'       && <FnoTab       data={data} />}
+              {tab === 'scalper'   && <ScalperTab   data={data} />}
             </div>
           </ErrorBoundary>
         </div>

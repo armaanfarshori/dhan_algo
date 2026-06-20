@@ -46,6 +46,8 @@ RUN_DIR = ROOT / "run"
 HEARTBEAT_FILE = RUN_DIR / "trader_heartbeat.json"
 KILLSWITCH_FILE = RUN_DIR / "killswitch"
 RESUME_FILE = RUN_DIR / "resume"
+SCALPER_START_FILE = RUN_DIR / "scalper_start"
+SCALPER_STOP_FILE = RUN_DIR / "scalper_stop"
 TRADER_LOG = Path("/var/log/dhan/trader.log")
 DIST_DIR = ROOT / "dashboard" / "dist"
 STATIC_DIR = ROOT / "static"
@@ -254,6 +256,12 @@ from apps.routes.fno import (  # noqa: E402
     fno_chain_handler,
     fno_backtest_handler,
 )
+from apps.routes.scalper import (  # noqa: E402
+    scalper_live_handler,
+    scalper_trades_handler,
+    scalper_governor_handler,
+    scalper_control_handler,
+)
 
 
 # ── Postback webhook (Dhan order-update notifications) ────────────────────────
@@ -367,6 +375,10 @@ def build_app() -> web.Application:
     app.router.add_get("/api/fno/paper", fno_paper_handler)
     app.router.add_get("/api/fno/chain", fno_chain_handler)
     app.router.add_get("/api/fno/backtest", fno_backtest_handler)
+    app.router.add_get("/api/scalper/live", scalper_live_handler)
+    app.router.add_get("/api/scalper/trades", scalper_trades_handler)
+    app.router.add_get("/api/scalper/governor", scalper_governor_handler)
+    app.router.add_post("/api/scalper/control", scalper_control_handler)
     app.router.add_post("/postback", postback_handler)
 
     if (DIST_DIR / "assets").exists():

@@ -53,6 +53,11 @@ HEARTBEAT_INTERVAL = 5.0
 # a delta and double-count API calls in the DB.
 _heartbeat_flusher = None
 
+# Optional live scalper instance. Not wired yet (the intraday options scalper is
+# forward-paper-validated in a later PR); the heartbeat surfaces its state when set,
+# else None. Minimal + additive: nothing constructs this today.
+_scalper = None
+
 
 async def seed_opening_ranges(runners, dhan, segment: str, orb_minutes: int):
     """
@@ -257,6 +262,11 @@ async def write_heartbeat(*, runners, portfolio, risk, feed, bar_builder,
                 },
                 "bars": bar_builder.status(),
                 "kronos_scanner": kronos_scanner.get_state() if kronos_scanner else None,
+                "scalper": (
+                    _scalper.get_state()
+                    if (_scalper is not None and hasattr(_scalper, "get_state"))
+                    else (_scalper.status() if _scalper is not None else None)
+                ),
                 "rate_limits": client.rate_limit_usage() if client else {},
             }
             tmp = HEARTBEAT_FILE.with_suffix(".tmp")
