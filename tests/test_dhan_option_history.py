@@ -1,5 +1,10 @@
 """Tests for core/dhan_option_history.py — the Dhan rollingoption IV ingester.
 
+REDESIGNED to the ROLLING expiryCode model (verified live, 2026-06-20): expiryCode
+is a 1-based rolling index (1=front), NOT a date picker; the strike offset is the
+``ATM±n`` STRING; and each row's expiry is attached from expiry_calendar via the
+rolling-code rule. These tests exercise that model.
+
 NO network, NO database: the Dhan client is a recording fake whose ``_request``
 returns canned rollingoption payloads, and the two DB upsert writers are
 monkeypatched to capture rows. Pure parsers are exercised directly.
@@ -9,6 +14,7 @@ explicit IST-aware value — no ``date.today()`` / naive ``now()`` — so the su
 behaves identically on a UTC-clocked CI runner and the IST dev Mac.
 """
 import asyncio
+import logging
 from datetime import date, datetime, timezone
 
 import pytest
@@ -25,9 +31,17 @@ def _epoch_ist(y, m, d, hh, mm) -> int:
 
 
 def _side_payload(ts, ivs, closes, ois=None, vols=None):
-    side = {"iv": ivs, "close": closes}
-    side["oi"] = ois if ois is not None else [None] * len(ts)
-    side["volume"] = vols if vols is not None else [None] * len(ts)
+    # Shape matches the REAL response: full OHLC set + iv/oi/volume per side.
+    n = len(ts)
+    side = {
+        "open": closes,
+        "high": closes,
+        "low": closes,
+        "close": closes,
+        "iv": ivs,
+    }
+    side["oi"] = ois if ois is not None else [None] * n
+    side["volume"] = vols if vols is not None else [None] * n
     return side
 
 
@@ -38,16 +52,19 @@ def test_resolve_underlying_nifty_default():
     assert u.security_id == 13
     assert u.instrument == "OPTIDX"
     assert u.max_strikes == 10  # index supports ATM±10
+    assert u.exchange_segment == "NSE_FNO"
+    assert u.chain_seg == "IDX_I"  # index → IDX_I, not NSE_FNO
 
 
 def test_resolve_underlying_unknown_requires_security_id():
     with pytest.raises(ValueError, match="Unknown underlying"):
         oh.resolve_underlying("RELIANCE")
-    # With an explicit id it resolves as a stock (OPTSTK, ATM±3 cap).
+    # With an explicit id it resolves as a stock (OPTSTK, ATM±3 cap, NSE_EQ chain seg).
     u = oh.resolve_underlying("RELIANCE", security_id=2885)
     assert u.instrument == "OPTSTK"
     assert u.max_strikes == 3
     assert u.security_id == 2885
+    assert u.chain_seg == "NSE_EQ"  # single stock → NSE_EQ, not FNO
 
 
 def test_resolve_underlying_overrides_win():
@@ -56,13 +73,25 @@ def test_resolve_underlying_overrides_win():
     assert u.strike_step == 100
 
 
+def test_resolve_underlying_bse_exchange_segment():
+    # SENSEX/BANKEX route through BSE_FNO; chain seg stays IDX_I (index).
+    u = oh.resolve_underlying(
+        "SENSEX", security_id=51, instrument="OPTIDX", exchange_segment="BSE_FNO"
+    )
+    assert u.exchange_segment == "BSE_FNO"
+    assert u.chain_seg == "IDX_I"
+
+
+def test_resolve_underlying_rejects_bad_instrument():
+    with pytest.raises(ValueError, match="instrument must be one of"):
+        oh.resolve_underlying("NIFTY", instrument="FUTIDX", security_id=13)
+
+
 # ── 30-day pagination ───────────────────────────────────────────────────────────────
 def test_date_windows_caps_at_30_days_no_gap_no_overlap():
     wins = oh.date_windows(date(2021, 1, 1), date(2021, 3, 31))
-    # Each window ≤30 days inclusive.
     for f, t in wins:
         assert (t - f).days <= 29
-    # Contiguous: next.from == prev.to + 1 day; full coverage of the range.
     assert wins[0][0] == date(2021, 1, 1)
     assert wins[-1][1] == date(2021, 3, 31)
     for (f0, t0), (f1, _t1) in zip(wins, wins[1:]):
@@ -80,23 +109,51 @@ def test_date_windows_rejects_reversed_range():
 
 
 def test_five_year_pull_window_count():
-    # The real 5yr NIFTY pull paginates into many ≤30-day windows.
     wins = oh.date_windows(date(2021, 1, 1), date(2026, 6, 18))
     assert len(wins) >= 60
     assert wins[0][0] == date(2021, 1, 1)
     assert wins[-1][1] == date(2026, 6, 18)
 
 
-# ── ATM±n strike enumeration ────────────────────────────────────────────────────────
-def test_strike_offsets_atm_first_then_outward():
-    assert oh.strike_offsets(2, 10) == [0, -1, 1, -2, 2]
-    assert oh.strike_offsets(0, 10) == [0]
+# ── ATM±n strike STRING enumeration (verified format) ───────────────────────────────
+def test_strike_params_atm_string_format():
+    # MUST be the "ATM±n" string, not bare ints (bare ints silently fetch ATM).
+    assert oh.strike_params(2, 10) == ["ATM", "ATM-1", "ATM+1", "ATM-2", "ATM+2"]
+    assert oh.strike_params(0, 10) == ["ATM"]
 
 
-def test_strike_offsets_clamped_to_cap():
-    # Index cap 10, stock cap 3.
-    assert len(oh.strike_offsets(50, 10)) == 21       # 0 plus ±1..10
-    assert oh.strike_offsets(50, 3) == [0, -1, 1, -2, 2, -3, 3]
+def test_strike_params_clamped_to_cap():
+    assert len(oh.strike_params(50, 10)) == 21       # ATM plus ±1..10
+    assert oh.strike_params(50, 3) == [
+        "ATM", "ATM-1", "ATM+1", "ATM-2", "ATM+2", "ATM-3", "ATM+3"
+    ]
+
+
+def test_strike_offset_of_decodes():
+    assert oh.strike_offset_of("ATM") == 0
+    assert oh.strike_offset_of("ATM-2") == -2
+    assert oh.strike_offset_of("ATM+1") == 1
+
+
+# ── rolling-code expiry attachment (the only use of expiry_calendar) ─────────────────
+def test_expiry_for_day_front_code1():
+    exps = [date(2026, 6, 18), date(2026, 6, 25), date(2026, 7, 2)]
+    # code=1 = next expiry on/after the day.
+    assert oh.expiry_for_day(date(2026, 6, 15), exps, 1) == date(2026, 6, 18)
+    assert oh.expiry_for_day(date(2026, 6, 18), exps, 1) == date(2026, 6, 18)
+    assert oh.expiry_for_day(date(2026, 6, 19), exps, 1) == date(2026, 6, 25)
+
+
+def test_expiry_for_day_term_structure_codes():
+    exps = [date(2026, 6, 18), date(2026, 6, 25), date(2026, 7, 2)]
+    assert oh.expiry_for_day(date(2026, 6, 15), exps, 2) == date(2026, 6, 25)
+    assert oh.expiry_for_day(date(2026, 6, 15), exps, 3) == date(2026, 7, 2)
+
+
+def test_expiry_for_day_calendar_exhausted_returns_none():
+    exps = [date(2026, 6, 18)]
+    assert oh.expiry_for_day(date(2026, 6, 15), exps, 2) is None  # no 2nd expiry
+    assert oh.expiry_for_day(date(2026, 6, 19), exps, 1) is None  # none on/after
 
 
 # ── side parsing → IV arrays ────────────────────────────────────────────────────────
@@ -128,6 +185,24 @@ def test_parse_rolling_side_truncates_mismatched_arrays():
     assert len(rows) == 1
 
 
+def test_parse_rolling_side_short_iv_array_truncates():
+    # iv array shorter than close/ts → truncate to iv length (the iv-in-min() path).
+    ts = [_epoch_ist(2026, 6, 15, 9, 20), _epoch_ist(2026, 6, 15, 9, 25)]
+    raw = {"data": {"ce": {"iv": [12.0], "close": [110.0, 111.0]}, "timestamp": ts}}
+    rows = oh.parse_rolling_side(raw, "ce")
+    assert len(rows) == 1
+    assert rows[0]["iv"] == 12.0
+
+
+def test_parse_rolling_side_string_epochs():
+    # Dhan sometimes returns string epochs — must be coerced, not dropped.
+    ts = [str(_epoch_ist(2026, 6, 15, 9, 20))]
+    raw = {"data": {"ce": {"iv": [12.0], "close": [110.0]}, "timestamp": ts}}
+    rows = oh.parse_rolling_side(raw, "ce")
+    assert len(rows) == 1
+    assert rows[0]["iv"] == 12.0
+
+
 def test_parse_rolling_side_missing_side_or_empty():
     assert oh.parse_rolling_side({"data": {"ce": {}}}, "ce") == []
     assert oh.parse_rolling_side({"data": {}}, "ce") == []
@@ -135,9 +210,8 @@ def test_parse_rolling_side_missing_side_or_empty():
     assert oh.parse_rolling_side(None, "ce") == []
 
 
-# ── ATM IV row collapse (one row/day, last bar wins, IV normalised) ─────────────────
+# ── ATM IV row collapse (one/day, last bar wins, IV normalised, rolling expiry) ──────
 def test_atm_iv_rows_one_per_day_last_bar_wins():
-    # Two days, two bars each. Last bar of each day should win; IV normalised /100.
     ts = [
         _epoch_ist(2026, 6, 15, 9, 20), _epoch_ist(2026, 6, 15, 15, 25),
         _epoch_ist(2026, 6, 16, 9, 20), _epoch_ist(2026, 6, 16, 15, 25),
@@ -146,9 +220,10 @@ def test_atm_iv_rows_one_per_day_last_bar_wins():
                                        [100, 90, 80, 70]), "timestamp": ts}}
     pe = {"data": {"pe": _side_payload(ts, [16.0, 18.0, 15.0, 17.0],
                                        [100, 90, 80, 70]), "timestamp": ts}}
+    exps = [date(2026, 6, 18), date(2026, 6, 25)]
     rows = oh.atm_iv_rows_from_legs(
-        ce, pe, symbol="NIFTY", expiry_date=date(2026, 6, 18),
-        expiry_type="weekly", strike_step=50,
+        ce, pe, symbol="NIFTY", expiries=exps, expiry_code=1,
+        all_expiries=exps, strike_step=50,
     )
     assert len(rows) == 2
     r0 = rows[0]
@@ -156,19 +231,59 @@ def test_atm_iv_rows_one_per_day_last_bar_wins():
     assert r0["put_iv"] == pytest.approx(0.18)     # last PE bar of 6/15 = 18.0 → 0.18
     assert r0["straddle_iv"] == pytest.approx(0.16)
     assert r0["symbol"] == "NIFTY"
-    assert r0["expiry_type"] == "weekly"
+    assert r0["expiry_date"] == date(2026, 6, 18)  # rolling code-1 attached
     assert r0["dte"] == 3                            # 6/18 - 6/15
     assert rows[1]["dte"] == 2                       # 6/18 - 6/16
+    # No spot supplied → atm_strike/spot_ref left NULL for fno_derived.
+    assert r0["atm_strike"] is None
+    assert r0["spot_ref"] is None
+
+
+def test_atm_iv_rows_attaches_per_day_spot():
+    ts = [_epoch_ist(2026, 6, 15, 15, 25)]
+    ce = {"data": {"ce": _side_payload(ts, [12.0], [100]), "timestamp": ts}}
+    pe = {"data": {"pe": _side_payload(ts, [16.0], [100]), "timestamp": ts}}
+    exps = [date(2026, 6, 18)]
+    rows = oh.atm_iv_rows_from_legs(
+        ce, pe, symbol="NIFTY", expiries=exps, expiry_code=1, all_expiries=exps,
+        strike_step=50, spot_by_day={date(2026, 6, 15): 23427.0},
+    )
+    assert rows[0]["spot_ref"] == 23427.0
+    assert rows[0]["atm_strike"] == 23450  # round-half-up to nearest 50
+
+
+def test_atm_iv_rows_term_structure_code_attaches_2nd_expiry():
+    ts = [_epoch_ist(2026, 6, 15, 15, 25)]
+    ce = {"data": {"ce": _side_payload(ts, [12.0], [100]), "timestamp": ts}}
+    pe = {"data": {"pe": _side_payload(ts, [16.0], [100]), "timestamp": ts}}
+    exps = [date(2026, 6, 18), date(2026, 6, 25)]
+    rows = oh.atm_iv_rows_from_legs(
+        ce, pe, symbol="NIFTY", expiries=exps, expiry_code=2, all_expiries=exps,
+        strike_step=50,
+    )
+    assert rows[0]["expiry_date"] == date(2026, 6, 25)  # 2nd-nearest
+
+
+def test_atm_iv_rows_skipped_when_no_attachable_expiry():
+    ts = [_epoch_ist(2026, 6, 20, 15, 25)]  # after the only expiry
+    ce = {"data": {"ce": _side_payload(ts, [12.0], [100]), "timestamp": ts}}
+    pe = {"data": {"pe": _side_payload(ts, [16.0], [100]), "timestamp": ts}}
+    exps = [date(2026, 6, 18)]
+    rows = oh.atm_iv_rows_from_legs(
+        ce, pe, symbol="NIFTY", expiries=exps, expiry_code=1, all_expiries=exps,
+        strike_step=50,
+    )
+    assert rows == []
 
 
 def test_atm_iv_rows_single_side_falls_back():
     ts = [_epoch_ist(2026, 6, 15, 15, 25)]
-    ce = {"data": {"ce": _side_payload(ts, [12.0], [100])}, }
-    ce["data"]["timestamp"] = ts
+    ce = {"data": {"ce": _side_payload(ts, [12.0], [100]), "timestamp": ts}}
     pe = {}  # PE leg failed → tolerated; straddle_iv falls back to the present side
+    exps = [date(2026, 6, 18)]
     rows = oh.atm_iv_rows_from_legs(
-        ce, pe, symbol="NIFTY", expiry_date=date(2026, 6, 18),
-        expiry_type="weekly", strike_step=50,
+        ce, pe, symbol="NIFTY", expiries=exps, expiry_code=1, all_expiries=exps,
+        strike_step=50,
     )
     assert len(rows) == 1
     assert rows[0]["call_iv"] == pytest.approx(0.12)
@@ -180,59 +295,179 @@ def test_atm_iv_rows_skips_days_with_no_iv():
     ts = [_epoch_ist(2026, 6, 15, 15, 25)]
     ce = {"data": {"ce": _side_payload(ts, [None], [100]), "timestamp": ts}}
     pe = {"data": {"pe": _side_payload(ts, [None], [100]), "timestamp": ts}}
+    exps = [date(2026, 6, 18)]
     rows = oh.atm_iv_rows_from_legs(
-        ce, pe, symbol="NIFTY", expiry_date=date(2026, 6, 18),
-        expiry_type="weekly", strike_step=50,
+        ce, pe, symbol="NIFTY", expiries=exps, expiry_code=1, all_expiries=exps,
+        strike_step=50,
     )
     assert rows == []
 
 
-# ── chain snapshot projection ───────────────────────────────────────────────────────
-def test_chain_snapshot_rows_from_side():
+def test_atm_iv_rows_logs_ce_pe_time_mismatch(caplog):
+    ts_ce = [_epoch_ist(2026, 6, 15, 15, 25)]
+    ts_pe = [_epoch_ist(2026, 6, 15, 15, 20)]  # different last-bar time same day
+    ce = {"data": {"ce": _side_payload(ts_ce, [12.0], [100]), "timestamp": ts_ce}}
+    pe = {"data": {"pe": _side_payload(ts_pe, [16.0], [100]), "timestamp": ts_pe}}
+    exps = [date(2026, 6, 18)]
+    with caplog.at_level(logging.DEBUG, logger="dhan.option_history"):
+        oh.atm_iv_rows_from_legs(
+            ce, pe, symbol="NIFTY", expiries=exps, expiry_code=1, all_expiries=exps,
+            strike_step=50,
+        )
+    assert any("last-bar time mismatch" in r.message for r in caplog.records)
+
+
+# ── chain snapshot projection (per-instrument seg, rolling expiry) ──────────────────
+def test_chain_snapshot_rows_index_seg_idx_i():
     ts = [_epoch_ist(2026, 6, 15, 9, 20)]
     raw = {"data": {"ce": _side_payload(ts, [12.0], [110.0], [100], [5]), "timestamp": ts}}
     rows = oh.chain_snapshot_rows_from_side(
-        raw, "ce", underlying_scrip=13, expiry_date=date(2026, 6, 18), strike=0.0
+        raw, "ce", underlying_scrip=13, underlying_seg="IDX_I",
+        expiries=[date(2026, 6, 18)], expiry_code=1, strike=0.0,
     )
     assert len(rows) == 1
     r = rows[0]
     assert r["option_type"] == "CE"
     assert r["underlying_scrip"] == 13
-    assert r["underlying_seg"] == "NSE_FNO"
+    assert r["underlying_seg"] == "IDX_I"   # index → IDX_I (was hardcoded NSE_FNO)
+    assert r["expiry_date"] == date(2026, 6, 18)
     assert r["iv"] == 12.0            # raw percent (snapshot convention)
     assert r["ltp"] == 110.0
     assert r["raw"]["source"] == "rollingoption"
 
 
-# ── expiry enumeration (offline fallback) ───────────────────────────────────────────
-def test_enumerate_expiry_codes_weekly_thursdays():
-    pairs = oh.enumerate_expiry_codes(date(2021, 1, 1), date(2021, 1, 31), "WEEK")
-    dates = [d for _, d in pairs]
-    # Jan 2021 Thursdays: 7, 14, 21, 28
-    assert dates == [date(2021, 1, 7), date(2021, 1, 14),
-                     date(2021, 1, 21), date(2021, 1, 28)]
-    assert [c for c, _ in pairs] == [0, 1, 2, 3]   # 0-based codes
+def test_chain_snapshot_rows_stock_seg_nse_eq():
+    ts = [_epoch_ist(2026, 6, 15, 9, 20)]
+    raw = {"data": {"pe": _side_payload(ts, [20.0], [55.0]), "timestamp": ts}}
+    rows = oh.chain_snapshot_rows_from_side(
+        raw, "pe", underlying_scrip=2885, underlying_seg="NSE_EQ",
+        expiries=[date(2026, 6, 18)], expiry_code=1, strike=-1.0,
+    )
+    assert rows[0]["underlying_seg"] == "NSE_EQ"
+    assert rows[0]["option_type"] == "PE"
 
 
-def test_enumerate_expiry_codes_monthly_last_thursday():
-    pairs = oh.enumerate_expiry_codes(date(2021, 1, 1), date(2021, 1, 31), "MONTH")
-    dates = [d for _, d in pairs]
-    assert dates == [date(2021, 1, 28)]            # last Thursday of Jan
+def test_chain_snapshot_drops_bars_with_no_expiry():
+    ts = [_epoch_ist(2026, 6, 20, 9, 20)]  # after the only expiry
+    raw = {"data": {"ce": _side_payload(ts, [12.0], [110.0]), "timestamp": ts}}
+    rows = oh.chain_snapshot_rows_from_side(
+        raw, "ce", underlying_scrip=13, underlying_seg="IDX_I",
+        expiries=[date(2026, 6, 18)], expiry_code=1, strike=0.0,
+    )
+    assert rows == []
 
 
 # ── build_request shape (matches the verified body) ─────────────────────────────────
 def test_build_request_matches_verified_body():
     u = oh.resolve_underlying("NIFTY")
     body = oh.build_request(
-        u, expiry_flag="WEEK", expiry_code=0, strike="ATM",
+        u, expiry_flag="WEEK", expiry_code=1, strike="ATM-1",
         drv_option_type="CALL", from_date="2021-01-01", to_date="2021-01-30",
     )
     assert body["exchangeSegment"] == "NSE_FNO"
     assert body["securityId"] == 13
     assert body["instrument"] == "OPTIDX"
-    assert body["strike"] == "ATM"
+    assert body["expiryCode"] == 1                  # 1-based rolling index
+    assert body["strike"] == "ATM-1"                # ATM±n string
     assert body["drvOptionType"] == "CALL"
+    # Full OHLC set or DH-905.
     assert body["requiredData"] == ["open", "high", "low", "close", "iv", "oi", "volume"]
+
+
+def test_build_request_bse_segment():
+    u = oh.resolve_underlying(
+        "SENSEX", security_id=51, instrument="OPTIDX", exchange_segment="BSE_FNO"
+    )
+    body = oh.build_request(
+        u, expiry_flag="WEEK", expiry_code=1, strike="ATM",
+        drv_option_type="PUT", from_date="2021-01-01", to_date="2021-01-30",
+    )
+    assert body["exchangeSegment"] == "BSE_FNO"
+
+
+# ── rate-limit backoff + daily-budget guard ─────────────────────────────────────────
+def test_is_rate_limit_error_classification():
+    class _Err(Exception):
+        def __init__(self, code):
+            self.error_code = code
+            super().__init__(code)
+
+    assert oh._is_rate_limit_error(_Err("DH-904"))
+    assert oh._is_rate_limit_error(RuntimeError("HTTP 429 too many requests"))
+    assert oh._is_rate_limit_error(RuntimeError("simulated DH-904 burst"))
+    assert not oh._is_rate_limit_error(RuntimeError("DH-905 missing requiredData"))
+
+
+def test_budget_hard_stops_before_cap():
+    b = oh._Budget(cap=10, headroom=2)  # usable = 8
+    b.charge(8)
+    assert b.remaining == 0
+    with pytest.raises(oh.BudgetExhausted, match="budget exhausted"):
+        b.charge(1)
+
+
+def test_fetch_side_backoff_retries_then_succeeds():
+    sleeps = []
+
+    async def _fake_sleep(s):
+        sleeps.append(s)
+
+    class _FlakyClient:
+        def __init__(self):
+            self.n = 0
+
+        async def _request(self, *a, **k):
+            self.n += 1
+            if self.n < 3:
+                raise RuntimeError("simulated DH-904 burst")
+            ts = [_epoch_ist(2026, 6, 15, 15, 25)]
+            return {"data": {"ce": _side_payload(ts, [12.0], [100.0]), "timestamp": ts}}
+
+    u = oh.resolve_underlying("NIFTY")
+    client = _FlakyClient()
+    out = asyncio.run(oh._fetch_side_with_backoff(
+        client, u, expiry_flag="WEEK", expiry_code=1, strike="ATM",
+        drv_option_type="CALL", from_date="2026-06-15", to_date="2026-06-18",
+        interval="5", sleep_fn=_fake_sleep,
+    ))
+    assert client.n == 3            # failed twice, succeeded on the third
+    assert len(sleeps) == 2         # backed off twice
+    assert all(s > 0 for s in sleeps)
+    assert oh.parse_rolling_side(out, "ce")[0]["iv"] == 12.0
+
+
+def test_fetch_side_backoff_gives_up_after_max_retries():
+    async def _fake_sleep(s):
+        pass
+
+    class _AlwaysRL:
+        async def _request(self, *a, **k):
+            raise RuntimeError("DH-904 burst")
+
+    u = oh.resolve_underlying("NIFTY")
+    with pytest.raises(RuntimeError, match="DH-904"):
+        asyncio.run(oh._fetch_side_with_backoff(
+            _AlwaysRL(), u, expiry_flag="WEEK", expiry_code=1, strike="ATM",
+            drv_option_type="CALL", from_date="2026-06-15", to_date="2026-06-18",
+            interval="5", max_retries=2, sleep_fn=_fake_sleep,
+        ))
+
+
+def test_fetch_side_non_rate_limit_failure_returns_empty():
+    async def _fake_sleep(s):
+        pass
+
+    class _Boom:
+        async def _request(self, *a, **k):
+            raise RuntimeError("DH-905 missing requiredData")
+
+    u = oh.resolve_underlying("NIFTY")
+    out = asyncio.run(oh._fetch_side_with_backoff(
+        _Boom(), u, expiry_flag="WEEK", expiry_code=1, strike="ATM",
+        drv_option_type="CALL", from_date="2026-06-15", to_date="2026-06-18",
+        interval="5", sleep_fn=_fake_sleep,
+    ))
+    assert out == {}  # non-RL per-window failure tolerated → {}
 
 
 # ── orchestration: recording fake client + monkeypatched writers ────────────────────
@@ -247,7 +482,7 @@ class _FakeClient:
     async def _request(self, method, endpoint, rate_category, payload):
         self.calls.append(payload)
         if self.fail_predicate and self.fail_predicate(payload):
-            raise RuntimeError("simulated DH-904 burst")
+            raise RuntimeError("non-RL simulated failure")
         ts = [_epoch_ist(2026, 6, 15, 15, 25)]
         side = "ce" if payload["drvOptionType"] == "CALL" else "pe"
         iv = 12.0 if side == "ce" else 16.0
@@ -265,7 +500,7 @@ def _capture_upserts(monkeypatch):
 
 
 def _off_hours():
-    # Mon 2026-06-15 18:00 IST — after the 15:30 close, safe for live fetches.
+    # Mon 2026-06-15 18:00 IST — after the 15:30 close, the preferred window.
     return datetime(2026, 6, 15, 18, 0, tzinfo=_IST)
 
 
@@ -277,15 +512,38 @@ def test_ingest_underlying_happy_path(_capture_upserts):
         strikes=1, expiry_dates=[date(2026, 6, 18)],
         req_spacing_sec=0, now=_off_hours(),
     ))
-    # strikes=1 → offsets [0,-1,1] → 3 strikes × 2 legs = 6 calls, one window, one expiry.
+    # strikes=1 → ["ATM","ATM-1","ATM+1"] → 3 strikes × 2 legs = 6 calls, one window,
+    # one rolling code (default [1]).
     assert result["legs"] == 6
     assert all(p["instrument"] == "OPTIDX" for p in client.calls)
+    assert all(p["expiryCode"] == 1 for p in client.calls)
+    # ATM±n string format is what hits the wire.
+    assert {p["strike"] for p in client.calls} == {"ATM", "ATM-1", "ATM+1"}
     assert {p["drvOptionType"] for p in client.calls} == {"CALL", "PUT"}
-    # ATM (off==0) produced one straddle row; both call+put present → mean.
+    # ATM strike produced one straddle row; both call+put present → mean.
     assert len(_capture_upserts["atm"]) == 1
     assert _capture_upserts["atm"][0]["straddle_iv"] == pytest.approx(0.14)  # (0.12+0.16)/2
-    # chain rows captured for every leg (1 bar each).
+    assert _capture_upserts["atm"][0]["expiry_date"] == date(2026, 6, 18)
+    # chain rows captured for every leg (1 bar each), IDX_I seg.
     assert len(_capture_upserts["chain"]) == 6
+    assert all(r["underlying_seg"] == "IDX_I" for r in _capture_upserts["chain"])
+
+
+def test_ingest_underlying_term_structure_codes(_capture_upserts):
+    u = oh.resolve_underlying("NIFTY")
+    client = _FakeClient()
+    result = asyncio.run(oh.ingest_underlying(
+        client, u, date(2026, 6, 12), date(2026, 6, 18),
+        strikes=0, expiry_codes=[1, 2], capture_chain=False,
+        expiry_dates=[date(2026, 6, 18), date(2026, 6, 25)],
+        req_spacing_sec=0, now=_off_hours(),
+    ))
+    # 2 codes × 1 window × ATM-only × 2 legs = 4 calls.
+    assert result["legs"] == 4
+    assert {p["expiryCode"] for p in client.calls} == {1, 2}
+    # code-1 attaches 6/18, code-2 attaches 6/25.
+    attached = {r["expiry_date"] for r in _capture_upserts["atm"]}
+    assert attached == {date(2026, 6, 18), date(2026, 6, 25)}
 
 
 def test_ingest_underlying_per_window_failure_tolerated(_capture_upserts):
@@ -298,10 +556,26 @@ def test_ingest_underlying_per_window_failure_tolerated(_capture_upserts):
         req_spacing_sec=0, now=_off_hours(),
     ))
     assert result["legs"] == 2  # one ATM strike × CALL+PUT (PUT raised but tolerated)
-    # ATM row still written from the surviving CALL leg.
     assert len(_capture_upserts["atm"]) == 1
     assert _capture_upserts["atm"][0]["call_iv"] == pytest.approx(0.12)
     assert _capture_upserts["atm"][0]["put_iv"] is None
+
+
+def test_ingest_underlying_bse_index_segments(_capture_upserts):
+    # End-to-end for a BSE index (SENSEX): request carries BSE_FNO, chain rows
+    # still carry IDX_I (index → IDX_I regardless of exchange segment).
+    u = oh.resolve_underlying(
+        "SENSEX", security_id=51, instrument="OPTIDX", exchange_segment="BSE_FNO"
+    )
+    client = _FakeClient()
+    asyncio.run(oh.ingest_underlying(
+        client, u, date(2026, 6, 12), date(2026, 6, 18),
+        strikes=0, expiry_dates=[date(2026, 6, 18)],
+        req_spacing_sec=0, now=_off_hours(),
+    ))
+    assert all(p["exchangeSegment"] == "BSE_FNO" for p in client.calls)
+    assert all(r["underlying_seg"] == "IDX_I" for r in _capture_upserts["chain"])
+    assert _capture_upserts["atm"][0]["symbol"] == "SENSEX"
 
 
 def test_ingest_underlying_no_chain_flag(_capture_upserts):
@@ -316,25 +590,73 @@ def test_ingest_underlying_no_chain_flag(_capture_upserts):
     assert len(_capture_upserts["atm"]) == 1
 
 
-def test_ingest_underlying_refuses_market_hours(_capture_upserts):
+def test_ingest_underlying_warns_market_hours_but_runs(_capture_upserts, caplog):
+    # Off-hours guard is now a WARNING, not a hard raise — the read-only chart
+    # endpoint works any time.
     u = oh.resolve_underlying("NIFTY")
     client = _FakeClient()
     in_hours = datetime(2026, 6, 15, 11, 0, tzinfo=_IST)  # Mon 11:00 IST → open
-    with pytest.raises(RuntimeError, match="market hours"):
+    with caplog.at_level(logging.WARNING, logger="dhan.option_history"):
+        result = asyncio.run(oh.ingest_underlying(
+            client, u, date(2026, 6, 12), date(2026, 6, 18),
+            strikes=0, expiry_dates=[date(2026, 6, 18)],
+            req_spacing_sec=0, now=in_hours,
+        ))
+    assert result["legs"] == 2          # it RAN (did not refuse)
+    assert any("market hours" in r.message for r in caplog.records)
+
+
+def test_ingest_underlying_budget_hard_stop(_capture_upserts):
+    u = oh.resolve_underlying("NIFTY")
+    client = _FakeClient()
+    tiny = oh._Budget(cap=4, headroom=0)  # usable=4 → 2 strikes (4 legs)
+    with pytest.raises(oh.BudgetExhausted):
         asyncio.run(oh.ingest_underlying(
             client, u, date(2026, 6, 12), date(2026, 6, 18),
-            expiry_dates=[date(2026, 6, 18)], req_spacing_sec=0, now=in_hours,
+            strikes=2,  # ATM, ATM-1, ATM+1 → 3 strikes × 2 = 6 legs > budget
+            expiry_dates=[date(2026, 6, 18)],
+            req_spacing_sec=0, now=_off_hours(), budget=tiny,
         ))
-    assert client.calls == []  # refused before any fetch
+    # It charged 2 strikes (4 legs) then HARD-STOPPED before the 3rd strike.
+    assert len(client.calls) == 4
+
+
+def test_ingest_underlying_warns_without_expiry_calendar(_capture_upserts, caplog):
+    u = oh.resolve_underlying("NIFTY")
+    client = _FakeClient()
+    with caplog.at_level(logging.WARNING, logger="dhan.option_history"):
+        asyncio.run(oh.ingest_underlying(
+            client, u, date(2026, 6, 12), date(2026, 6, 18),
+            strikes=0, expiry_dates=None,
+            req_spacing_sec=0, now=_off_hours(),
+        ))
+    # No calendar → ATM rows cannot be keyed → none captured, warning emitted.
+    assert len(_capture_upserts["atm"]) == 0
+    assert any("no expiry_calendar" in r.message for r in caplog.records)
+
+
+# ── CLI parsing ─────────────────────────────────────────────────────────────────────
+def test_cli_parse_expiry_codes():
+    assert oh._parse_codes("1") == [1]
+    assert oh._parse_codes("1,2,3") == [1, 2, 3]
+    with pytest.raises(Exception, match="1-based"):
+        oh._parse_codes("0,1")
+
+
+def test_cli_defaults_front_code_only():
+    args = oh._build_arg_parser().parse_args(
+        ["--from", "2021-01-01", "--to", "2026-06-18"]
+    )
+    assert args.expiry_codes == [1]
+    assert args.underlying == "NIFTY"
+    assert args.expiry_flag == "WEEK"
 
 
 # ── token path (reuses fno_backfill.resolve_access_token) ───────────────────────────
 def test_token_path_uses_cached_token(monkeypatch):
     import core.fno_backfill as fb
 
-    # Cached token present → returned without touching the PIN/TOTP manager.
     monkeypatch.setattr("core.token_manager.read_current_token", lambda: "CACHED")
     tok = asyncio.run(oh.resolve_access_token())
     assert tok == "CACHED"
-    # resolve_access_token is the SAME object imported from fno_backfill.
     assert oh.resolve_access_token is fb.resolve_access_token
