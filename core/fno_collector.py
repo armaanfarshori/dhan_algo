@@ -180,7 +180,6 @@ def main() -> None:
 
     from config import get_config
     from core.client import DhanClient
-    from core.token_manager import read_current_token
     from db import init_db
 
     cfg = get_config()
@@ -192,14 +191,10 @@ def main() -> None:
         result = fno_instruments.sync_fno_instruments()
         logger.info("FNO instruments sync: %s", result)
 
-    token = read_current_token()
-    if token is None:
-        raise SystemExit(
-            "No valid cached token in dhan_token.json — start dhan-trader first "
-            "or generate a token manually."
-        )
-
     async def _run() -> dict[str, Any]:
+        # Token via the manager (live cache → PIN/TOTP fallback), NOT the static
+        # .env access token, which expires and triggers DH-901. Never logged.
+        token = await fb.resolve_access_token()
         async with DhanClient(cfg.dhan_client_id, token) as client:
             return await run_eod_collection(
                 client,

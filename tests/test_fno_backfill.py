@@ -689,3 +689,86 @@ def test_parse_index_history_skips_bar_with_none_close():
     closes = [r["close"] for r in rows]
     assert 23150.0 in closes
     assert 23250.0 in closes
+
+
+# ── auth: token via the token manager (NOT the static .env token) ───────────────
+# Regression for a DH-901 caused by _amain building DhanClient from the STATIC
+# cfg.dhan_access_token (which expires). The F&O path must source the token from
+# the token manager: read_current_token() first, MasterTokenManager().load_or_generate()
+# as fallback — mirroring apps/trader.py.
+
+def test_resolve_access_token_prefers_cache():
+    """When the live cache has a valid token, resolve_access_token returns it and
+    NEVER constructs a MasterTokenManager (no PIN/TOTP generation)."""
+    from unittest.mock import MagicMock, patch
+
+    mock_read = MagicMock(return_value="cached-tok")
+    mock_mgr_cls = MagicMock()  # if constructed at all, the test fails below
+    with patch("core.token_manager.read_current_token", mock_read), \
+         patch("core.token_manager.MasterTokenManager", mock_mgr_cls):
+        tok = asyncio.run(fb.resolve_access_token())
+    assert tok == "cached-tok"
+    mock_read.assert_called_once()
+    mock_mgr_cls.assert_not_called()
+
+
+def test_resolve_access_token_falls_back_to_generate():
+    """When the cache is empty/expired, resolve_access_token falls back to
+    MasterTokenManager().load_or_generate() (PIN + TOTP)."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    mock_read = MagicMock(return_value=None)
+    mock_mgr = MagicMock()
+    mock_mgr.load_or_generate = AsyncMock(return_value="fresh-tok")
+    mock_mgr_cls = MagicMock(return_value=mock_mgr)
+    with patch("core.token_manager.read_current_token", mock_read), \
+         patch("core.token_manager.MasterTokenManager", mock_mgr_cls):
+        tok = asyncio.run(fb.resolve_access_token())
+    assert tok == "fresh-tok"
+    mock_read.assert_called_once()
+    mock_mgr_cls.assert_called_once()
+    mock_mgr.load_or_generate.assert_awaited_once()
+
+
+def test_amain_uses_token_manager_not_static_env_token():
+    """_amain must build DhanClient with the token-manager token, NOT
+    cfg.dhan_access_token. Asserts resolve_access_token is awaited and the static
+    env token is never passed to DhanClient."""
+    import argparse
+    import sys
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    args = argparse.Namespace(
+        symbol="NIFTY", futures=False, security_id=None, from_date=None,
+        to_date=None, index=False, expiry_calendar=True, chain=False,
+        atm_iv=False, expiry=None,
+    )
+
+    mock_cfg = MagicMock()
+    mock_cfg.db_url = "postgresql://fake/db"
+    mock_cfg.dhan_client_id = "CLIENT1"
+    mock_cfg.dhan_access_token = "STATIC-ENV-TOKEN-EXPIRED"
+
+    mock_client_cls = MagicMock()
+    mock_client_instance = MagicMock()
+    mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client_instance)
+    mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_resolve = AsyncMock(return_value="MANAGED-TOKEN")
+    mock_build_calendar = AsyncMock(return_value=7)
+
+    with patch.dict(sys.modules, {
+        "config": MagicMock(get_config=MagicMock(return_value=mock_cfg)),
+        "db": MagicMock(init_db=MagicMock()),
+        "core.client": MagicMock(DhanClient=mock_client_cls),
+    }), \
+        patch.object(fb, "resolve_access_token", mock_resolve), \
+        patch.object(fb, "build_expiry_calendar", mock_build_calendar):
+        asyncio.run(fb._amain(args))
+
+    mock_resolve.assert_awaited_once()
+    # DhanClient built with the MANAGED token, never the static env token.
+    pos, kw = mock_client_cls.call_args
+    passed = list(pos) + list(kw.values())
+    assert "MANAGED-TOKEN" in passed
+    assert "STATIC-ENV-TOKEN-EXPIRED" not in passed

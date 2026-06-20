@@ -343,7 +343,11 @@ def _make_main_patches(*, token: Any = "tok123", with_instruments: bool = False)
 
         mock_get_config = MagicMock(return_value=mock_cfg)
         mock_init_db = MagicMock()
+        # main() now resolves the token inside the async _run via
+        # fb.resolve_access_token(); patch that (read_current_token is its first
+        # source). mock_token stands in for the cached read.
         mock_token = MagicMock(return_value=token)
+        mock_resolve = AsyncMock(return_value=token)
         mock_client_cls = MagicMock()
         mock_client_instance = MagicMock()
         mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client_instance)
@@ -389,6 +393,7 @@ def _make_main_patches(*, token: Any = "tok123", with_instruments: bool = False)
                     "get_config": mock_get_config,
                     "init_db": mock_init_db,
                     "read_current_token": mock_token,
+                    "resolve_access_token": mock_resolve,
                     "DhanClient": mock_client_cls,
                     "compute_index_realized_vol": mock_rv_fn,
                     "asyncio_run": mock_asyncio_run,
@@ -426,13 +431,14 @@ def test_main_runs_paper_log():
         mocks["record_paper_entry"].assert_called_once()
 
 
-def test_main_raises_systemexit_when_no_token():
-    """When read_current_token() returns None, main() must raise SystemExit
-    and never construct a DhanClient or call asyncio.run."""
+def test_main_resolves_token_inside_run():
+    """main() no longer hard-fails on an empty cache: token resolution moved into
+    the async _run (via fb.resolve_access_token), which falls back to PIN/TOTP.
+    main() must still drive the collection (asyncio.run is called) regardless of
+    the cache state — the cache→generate fallback is exercised in the
+    fno_backfill resolve_access_token tests."""
     with _make_main_patches(token=None, with_instruments=False) as mocks:
-        import pytest
         import core.fno_collector as _col
-        with pytest.raises(SystemExit):
-            _col.main()
-        mocks["DhanClient"].assert_not_called()
-        mocks["asyncio_run"].assert_not_called()
+        _col.main()
+        # _run is driven via asyncio.run even when the static cache is empty.
+        mocks["asyncio_run"].assert_called_once()

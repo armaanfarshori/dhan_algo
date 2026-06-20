@@ -397,6 +397,27 @@ def parse_option_chain(
     return rows
 
 
+async def resolve_access_token() -> str:
+    """Obtain a Dhan access token for the F&O data path.
+
+    Mirrors apps/trader.py / apps/api.py: prefer the live runtime cache that
+    dhan-trader maintains (``read_current_token()`` → dhan_token.json), and only
+    if that is missing/expired fall back to ``MasterTokenManager().load_or_generate()``
+    (PIN + TOTP). This replaces reading the STATIC ``cfg.dhan_access_token`` from
+    .env, which expires and caused DH-901 on the F&O backfill/collector path.
+
+    The token value is never logged. Raises whatever load_or_generate raises if
+    no cache exists and generation fails (no creds, network down, etc.).
+    """
+    from core.token_manager import MasterTokenManager, read_current_token
+
+    cached = read_current_token()
+    if cached:
+        return cached
+    logger.info("No valid cached token — generating via PIN + TOTP")
+    return await MasterTokenManager().load_or_generate()
+
+
 def classify_expiry(expiry: date, all_expiries: Iterable[date]) -> str:
     """A monthly expiry is the last expiry within its calendar month; anything
     else is weekly. Derived from the actual expiry set (NIFTY's weekly expiry
@@ -731,7 +752,10 @@ async def _amain(args: argparse.Namespace) -> None:
 
     cfg = get_config()
     init_db(cfg.db_url)
-    async with DhanClient(cfg.dhan_client_id, cfg.dhan_access_token) as client:
+    # Token via the manager (live cache → PIN/TOTP fallback), NOT the static
+    # .env access token, which expires and triggers DH-901 on long-running jobs.
+    access_token = await resolve_access_token()
+    async with DhanClient(cfg.dhan_client_id, access_token) as client:
         if args.futures:
             if not args.security_id:
                 raise SystemExit("--futures requires --security-id")
