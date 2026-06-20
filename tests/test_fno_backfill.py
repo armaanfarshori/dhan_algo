@@ -772,3 +772,85 @@ def test_amain_uses_token_manager_not_static_env_token():
     passed = list(pos) + list(kw.values())
     assert "MANAGED-TOKEN" in passed
     assert "STATIC-ENV-TOKEN-EXPIRED" not in passed
+
+
+def test_amain_does_not_fall_back_to_static_token_when_resolve_empty():
+    """If resolve_access_token returns an empty string (cache miss + generation
+    yielding nothing), _amain must NOT silently fall back to cfg.dhan_access_token.
+    Catches a `resolved or cfg.dhan_access_token` regression: DhanClient must be
+    built with the empty resolved value (so the failure is visible/propagates),
+    never with the stale static env token.
+    """
+    import argparse
+    import sys
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    args = argparse.Namespace(
+        symbol="NIFTY", futures=False, security_id=None, from_date=None,
+        to_date=None, index=False, expiry_calendar=True, chain=False,
+        atm_iv=False, expiry=None,
+    )
+
+    mock_cfg = MagicMock()
+    mock_cfg.db_url = "postgresql://fake/db"
+    mock_cfg.dhan_client_id = "CLIENT1"
+    mock_cfg.dhan_access_token = "STATIC-ENV-TOKEN-EXPIRED"
+
+    mock_client_cls = MagicMock()
+    mock_client_instance = MagicMock()
+    mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client_instance)
+    mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_resolve = AsyncMock(return_value="")          # cache miss → empty token
+    mock_build_calendar = AsyncMock(return_value=7)
+
+    with patch.dict(sys.modules, {
+        "config": MagicMock(get_config=MagicMock(return_value=mock_cfg)),
+        "db": MagicMock(init_db=MagicMock()),
+        "core.client": MagicMock(DhanClient=mock_client_cls),
+    }), \
+        patch.object(fb, "resolve_access_token", mock_resolve), \
+        patch.object(fb, "build_expiry_calendar", mock_build_calendar):
+        asyncio.run(fb._amain(args))
+
+    mock_resolve.assert_awaited_once()
+    # The static env token must NEVER be passed to DhanClient — no `or` fallback.
+    pos, kw = mock_client_cls.call_args
+    passed = list(pos) + list(kw.values())
+    assert "STATIC-ENV-TOKEN-EXPIRED" not in passed
+    assert "" in passed   # the (empty) resolved value is what was used
+
+
+def test_amain_propagates_when_resolve_raises():
+    """If resolve_access_token raises (no cache + generation fails), _amain must
+    propagate the error and NEVER fall back to cfg.dhan_access_token (DhanClient
+    must not be constructed at all)."""
+    import argparse
+    import sys
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    args = argparse.Namespace(
+        symbol="NIFTY", futures=False, security_id=None, from_date=None,
+        to_date=None, index=False, expiry_calendar=True, chain=False,
+        atm_iv=False, expiry=None,
+    )
+
+    mock_cfg = MagicMock()
+    mock_cfg.db_url = "postgresql://fake/db"
+    mock_cfg.dhan_client_id = "CLIENT1"
+    mock_cfg.dhan_access_token = "STATIC-ENV-TOKEN-EXPIRED"
+
+    mock_client_cls = MagicMock()
+    mock_resolve = AsyncMock(side_effect=RuntimeError("no creds, generation failed"))
+
+    with patch.dict(sys.modules, {
+        "config": MagicMock(get_config=MagicMock(return_value=mock_cfg)),
+        "db": MagicMock(init_db=MagicMock()),
+        "core.client": MagicMock(DhanClient=mock_client_cls),
+    }), \
+        patch.object(fb, "resolve_access_token", mock_resolve):
+        with pytest.raises(RuntimeError, match="generation failed"):
+            asyncio.run(fb._amain(args))
+
+    mock_resolve.assert_awaited_once()
+    mock_client_cls.assert_not_called()   # never fell back to the static token

@@ -156,7 +156,9 @@ class MasterTokenManager:
         token   = data.get("accessToken") or data.get("access_token")
         exp_str = data.get("expiryTime") or data.get("expiry_time", "")
         if not token:
-            raise RuntimeError(f"No accessToken in response: {data}")
+            raise RuntimeError(
+                "No accessToken in generate_token response (check PIN/TOTP config)"
+            )
 
         self._token  = token
         self._expiry = _parse_expiry(exp_str)
