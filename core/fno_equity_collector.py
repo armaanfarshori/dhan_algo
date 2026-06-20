@@ -152,8 +152,18 @@ async def collect_equity_chains(
             continue
         try:
             scrip_int = int(scrip)
+            # Throttle BEFORE the expiry-list call so it counts as a request slot.
+            # This ensures no two Dhan optionchain requests fire within throttle_s.
+            if not first_call and throttle_s > 0:
+                await sleep(throttle_s)
+            first_call = False
             # Resolve the nearest future expiries for THIS stock (NSE_FNO segment).
-            raw_expiries = await client.get_fno_expiry_list(scrip_int, "NSE_FNO")
+            try:
+                raw_expiries = await client.get_fno_expiry_list(scrip_int, "NSE_FNO")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("equity expiry-list failed for %s: %s — continuing", sym, exc)
+                errors.append(f"{sym}: expiry-list: {exc}")
+                continue
             data = (
                 raw_expiries.get("data", raw_expiries)
                 if isinstance(raw_expiries, dict)
@@ -164,22 +174,32 @@ async def collect_equity_chains(
             if not future:
                 logger.info("equity chain: no future expiries for %s — skipping", sym)
                 continue
+            stock_ok = True
             for expiry in future:
-                # Honour the optionchain throttle BETWEEN calls.
-                if not first_call and throttle_s > 0:
+                # Honour the optionchain throttle BETWEEN chain calls.
+                if throttle_s > 0:
                     await sleep(throttle_s)
-                first_call = False
-                result = await fb.snapshot_option_chain(
-                    client,
-                    sym,
-                    underlying_scrip=scrip_int,
-                    underlying_seg="NSE_FNO",
-                    expiry_date=expiry,
-                    now=now,
-                )
+                try:
+                    result = await fb.snapshot_option_chain(
+                        client,
+                        sym,
+                        underlying_scrip=scrip_int,
+                        underlying_seg="NSE_FNO",
+                        expiry_date=expiry,
+                        now=now,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "equity chain-fetch failed for %s expiry=%s: %s — continuing",
+                        sym, expiry, exc,
+                    )
+                    errors.append(f"{sym}: chain: {exc}")
+                    stock_ok = False
+                    continue
                 total_chain_rows += result.get("chain_rows", 0)
                 total_atm += result.get("atm", 0)
-            ok += 1
+            if stock_ok:
+                ok += 1
         except Exception as exc:  # noqa: BLE001
             logger.warning("equity chain failed for %s: %s — continuing", sym, exc)
             errors.append(f"{sym}: {exc}")

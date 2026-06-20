@@ -37,6 +37,9 @@ import logging
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
+
+_IST = ZoneInfo("Asia/Kolkata")
 
 logger = logging.getLogger("dhan.fno_equity_universe")
 
@@ -77,20 +80,33 @@ def _parse_expiry(value: Any) -> Optional[date]:
     return None
 
 
-def parse_stock_fno_universe(csv_text: str) -> list[dict[str, Any]]:
+def parse_stock_fno_universe(
+    csv_text: str,
+    *,
+    today: Optional[date] = None,
+) -> list[dict[str, Any]]:
     """Parse the detailed scrip-master CSV → one projected row per distinct stock-F&O
     underlying, sorted by symbol.
 
     Selection: rows with EXCH_ID == "NSE" and INSTRUMENT == "FUTSTK". For each
     underlying we pick the NEAR-MONTH future (the FUTSTK row with the minimum
-    expiry_date) to source ``future_security_id`` / ``near_expiry`` / ``lot_size``.
+    expiry_date that is >= today) to source ``future_security_id`` / ``near_expiry``
+    / ``lot_size``.  Expired contracts (expiry < today) are skipped so that a
+    lingering scrip-master row for a rolled-off contract cannot win.
     The ``underlying_security_id`` is taken from that same row's
     UNDERLYING_SECURITY_ID (the option-chain ``UnderlyingScrip``).
 
-    Pure: no I/O. Malformed / NA-expiry rows are skipped silently.
+    ``today`` defaults to the current IST date (use ``datetime.now(Asia/Kolkata).date()``
+    rather than naive ``date.today()`` to remain correct on UTC CI runners).
+
+    Pure: no I/O. Malformed / NA-expiry / expired rows are skipped silently.
+    Rows with a missing/blank UNDERLYING_SECURITY_ID emit a warning and are skipped.
     """
+    if today is None:
+        today = datetime.now(_IST).date()
+
     reader = csv.DictReader(io.StringIO(csv_text))
-    # underlying_symbol -> best (near-month) future row
+    # underlying_symbol -> best (near-month, non-expired) future row
     best: dict[str, dict[str, Any]] = {}
     for row in reader:
         if (row.get("EXCH_ID") or "").strip() != "NSE":
@@ -103,9 +119,22 @@ def parse_stock_fno_universe(csv_text: str) -> list[dict[str, Any]]:
         expiry = _parse_expiry(row.get("SM_EXPIRY_DATE"))
         if not sym or not sec_id or expiry is None:
             continue
+        # Skip contracts that have already expired — avoids dead future_security_id.
+        if expiry < today:
+            continue
+        # Rows with no underlying_security_id cannot be used as option-chain UnderlyingScrip.
+        if not u_sec_id:
+            logger.warning(
+                "fno_equity_universe: skipping %s (security_id=%s expiry=%s) — "
+                "missing UNDERLYING_SECURITY_ID",
+                sym,
+                sec_id,
+                expiry,
+            )
+            continue
         cand = {
             "underlying_symbol": sym,
-            "underlying_security_id": u_sec_id or None,
+            "underlying_security_id": u_sec_id,
             "future_security_id": sec_id,
             "near_expiry": expiry,
             "lot_size": _to_int(row.get("LOT_SIZE")),

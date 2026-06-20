@@ -109,3 +109,65 @@ def test_refresh_universe_uses_cached_downloader(monkeypatch, tmp_path: Path):
     universe = eu.refresh_universe(path=path)
     assert [u["underlying_symbol"] for u in universe] == ["RELIANCE", "TCS"]
     assert path.exists()
+
+
+# ── new QA-residual tests ─────────────────────────────────────────────────────────
+
+def test_parse_expired_contract_skipped_live_wins():
+    """An expired FUTSTK row must be skipped; a live row for the same symbol wins.
+
+    Fixes the QA residual: without a '>= today' guard, a lingering expired contract
+    could win the min-expiry selection and yield a dead future_security_id.
+    Uses IST-safe 'today' kwarg to avoid the IST/UTC CI trap.
+    """
+    # INFY: one expired (2020-01-30, sec_id 99001) and one live (2026-07-31, sec_id 99002).
+    expired = _row("NSE", "FUTSTK", "99001", "1594", "INFY", "300", "2020-01-30")
+    live = _row("NSE", "FUTSTK", "99002", "1594", "INFY", "300", "2026-07-31")
+    csv_text = "\n".join([_HEADER, expired, live])
+
+    today = date(2026, 6, 20)
+    universe = eu.parse_stock_fno_universe(csv_text, today=today)
+
+    assert len(universe) == 1
+    infy = universe[0]
+    assert infy["underlying_symbol"] == "INFY"
+    # The LIVE contract must win, not the expired one.
+    assert infy["future_security_id"] == "99002"
+    assert infy["near_expiry"] == date(2026, 7, 31)
+
+
+def test_parse_all_expired_yields_empty():
+    """When all FUTSTK rows for a symbol are expired, that symbol is excluded."""
+    expired1 = _row("NSE", "FUTSTK", "99001", "1594", "INFY", "300", "2020-01-30")
+    expired2 = _row("NSE", "FUTSTK", "99002", "1594", "INFY", "300", "2021-02-25")
+    csv_text = "\n".join([_HEADER, expired1, expired2])
+
+    today = date(2026, 6, 20)
+    universe = eu.parse_stock_fno_universe(csv_text, today=today)
+    assert universe == []
+
+
+def test_parse_missing_underlying_security_id_skipped(caplog):
+    """Rows with blank UNDERLYING_SECURITY_ID must be skipped with a warning.
+
+    Fixes the QA residual: previously these rows passed through as underlying_security_id=None,
+    producing a null UnderlyingScrip that would break the option-chain API call.
+    """
+    import logging
+
+    # A FUTSTK row with no u_sec_id — should be warned + skipped.
+    no_u_sec = _row("NSE", "FUTSTK", "88001", "", "WIPRO", "100", "2026-07-31")
+    # A normal valid row.
+    valid = _row("NSE", "FUTSTK", "88002", "3456", "WIPRO2", "200", "2026-07-31")
+    csv_text = "\n".join([_HEADER, no_u_sec, valid])
+
+    today = date(2026, 6, 20)
+    with caplog.at_level(logging.WARNING, logger="dhan.fno_equity_universe"):
+        universe = eu.parse_stock_fno_universe(csv_text, today=today)
+
+    syms = [u["underlying_symbol"] for u in universe]
+    # WIPRO must be excluded (no u_sec_id), WIPRO2 included.
+    assert "WIPRO" not in syms
+    assert "WIPRO2" in syms
+    # A warning must have been emitted for the skipped row.
+    assert any("WIPRO" in r.message and "UNDERLYING_SECURITY_ID" in r.message for r in caplog.records)

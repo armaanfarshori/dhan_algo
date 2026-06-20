@@ -131,8 +131,12 @@ def test_collect_equity_chains_loops_universe_nse_fno():
         assert call.kwargs.get("underlying_seg") == "NSE_FNO"
         assert call.kwargs.get("expiry_date") == date(2026, 6, 26)
 
-    # Throttle applied BETWEEN calls (3 calls → 2 sleeps), each == 3.0s.
-    assert sleeps == [3.0, 3.0]
+    # Throttle pattern: for 3 stocks (n_expiries=1), expiry-list counts as a slot.
+    # Stock 1: no pre-expiry-list sleep (first_call), 1 sleep before chain call.
+    # Stock 2: 1 sleep before expiry-list, 1 sleep before chain call.
+    # Stock 3: 1 sleep before expiry-list, 1 sleep before chain call.
+    # Total: 5 sleeps, all == 3.0s.
+    assert sleeps == [3.0, 3.0, 3.0, 3.0, 3.0]
 
 
 def test_collect_equity_chains_tolerates_per_stock_failure():
@@ -184,6 +188,73 @@ def test_collect_equity_chains_skips_stock_with_no_future_expiry():
     assert mock_snap.call_count == 0
     assert res["chain_rows"] == 0
     assert res["ok"] == 0
+
+
+# ── new QA-residual tests ─────────────────────────────────────────────────────────
+
+def test_collect_equity_chains_expiry_list_throttled():
+    """The expiry-list call must count as a throttle slot.
+
+    Fixes the QA residual: previously, the expiry-list call fired immediately
+    after the previous chain call, with no sleep between, violating the ~1 req/3s limit.
+
+    With the fix, for N stocks (n_expiries=1), the sleep pattern is:
+      Stock 1: 0 pre-expiry-list sleeps (first_call), 1 pre-chain sleep  → 1 sleep
+      Stock k (k>1): 1 pre-expiry-list sleep, 1 pre-chain sleep          → 2 sleeps each
+    Total for 3 stocks: 1 + 2 + 2 = 5 sleeps.
+    """
+    client = _ExpiryClient()
+    mock_snap = AsyncMock(return_value={"chain_rows": 1, "atm": 0})
+    sleeps: list[float] = []
+
+    async def _fake_sleep(s):
+        sleeps.append(s)
+
+    with (
+        patch.object(ec, "load_universe", lambda: list(_UNIVERSE)),
+        patch.object(ec.fb, "snapshot_option_chain", mock_snap),
+    ):
+        _run(ec.collect_equity_chains(
+            client, n_expiries=1, throttle_s=3.0, sleep=_fake_sleep, now=_NOW,
+        ))
+
+    # 5 sleeps total: expiry-list for stocks 2+3 (2) + chain calls for all 3 (3).
+    assert len(sleeps) == 5
+    assert all(s == 3.0 for s in sleeps)
+
+
+def test_collect_equity_chains_expiry_list_error_distinguished():
+    """Expiry-list failure must be logged/reported distinctly from chain failure.
+
+    Fixes the QA residual: previously both errors used the same generic message,
+    making it hard to diagnose whether the expiry lookup or the chain fetch failed.
+    """
+
+    class _FailingExpiry:
+        async def get_fno_expiry_list(self, scrip, seg="IDX_I"):
+            raise ConnectionError("expiry timeout")
+
+    mock_snap = AsyncMock(return_value={"chain_rows": 0, "atm": 0})
+
+    async def _no_sleep(s):
+        return None
+
+    # Use single-stock universe so the test is deterministic.
+    one_stock = [_UNIVERSE[0]]
+    with (
+        patch.object(ec, "load_universe", lambda: list(one_stock)),
+        patch.object(ec.fb, "snapshot_option_chain", mock_snap),
+    ):
+        res = _run(ec.collect_equity_chains(
+            _FailingExpiry(), sleep=_no_sleep, now=_NOW,
+        ))
+
+    assert res["ok"] == 0
+    assert len(res["errors"]) == 1
+    # Error message must mention "expiry-list" to distinguish from chain failure.
+    assert "expiry-list" in res["errors"][0]
+    # snapshot_option_chain must NOT have been called (failed before reaching chain).
+    assert mock_snap.call_count == 0
 
 
 # ── main() token path ─────────────────────────────────────────────────────────────
