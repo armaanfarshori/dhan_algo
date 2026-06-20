@@ -7,7 +7,8 @@ or EOD square-off. A far ±50% "no-target" satisfies the Decision contract; all 
 come from on_tick.
 
 Same interface as strategies/orb.py — synchronous, IO-free: ticks in, Decisions out.
-Reuses Decision, IST, MARKET_OPEN, MARKET_CLOSE, MAX_FUTURE_SKEW from strategies.orb.
+Reuses Decision, IST, MAX_FUTURE_SKEW from strategies.orb; session hours come from a
+MarketSession profile (EQUITY default → byte-identical legacy behaviour).
 """
 import logging
 from collections import deque
@@ -15,11 +16,10 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
 
+from core.sessions import EQUITY, MarketSession
 from strategies.orb import (
     Decision,
     IST,
-    MARKET_CLOSE,
-    MARKET_OPEN,
     MAX_FUTURE_SKEW,
 )
 
@@ -41,9 +41,14 @@ class EmaCrossoverParams:
 
 
 class EmaCrossover:
-    def __init__(self, security_id: str, params: Optional[EmaCrossoverParams] = None):
+    def __init__(self, security_id: str, params: Optional[EmaCrossoverParams] = None,
+                 session: MarketSession = EQUITY):
+        """``session`` binds the entry-start open-anchor + EOD square-off to a
+        MarketSession profile (defaults to EQUITY → byte-identical legacy 09:15/15:30
+        behaviour). Pass session=MCX for the evening commodity session."""
         self.security_id = security_id
         self.p = params or EmaCrossoverParams()
+        self.session = session
 
         # Position view — updated only via notify_fill / notify_flat
         self.position: int = 0
@@ -112,7 +117,7 @@ class EmaCrossover:
 
         # 1. EOD square-off — UNCONDITIONAL, top of method (no indicator-readiness gate)
         squareoff = (
-            datetime.combine(today, MARKET_CLOSE)
+            datetime.combine(today, self.session.close_time_for(today))
             - timedelta(minutes=self.p.squareoff_before_close_min)
         ).time()
         if t >= squareoff:
@@ -163,7 +168,7 @@ class EmaCrossover:
 
         # 6. Entries (flat) — respect the open delay
         entry_start = (
-            datetime.combine(today, MARKET_OPEN)
+            datetime.combine(today, self.session.open_time)
             + timedelta(minutes=self.p.entry_start_min)
         ).time()
         if t < entry_start:
