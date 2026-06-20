@@ -19,7 +19,8 @@ Governor semantics (deterministic over the chronological cycle sequence)
 The engine returns one ``StrategyTrade`` per traded cycle, sorted by ``entry_date``.
 The governor walks that sequence in order and decides which cycles are *deployed*:
 
-* ``capital`` (default ₹500,000):
+* ``capital`` (default ₹500,000 — this sweep module's default; the underlying
+  ``fno_strategies`` engine defaults to ₹200,000):
     Allocated portfolio capital.  Scales ``return_on_capital`` / CAGR and is the base
     for ``go_no_go``'s 15%-of-capital drawdown limit.  Does NOT change which cycles
     deploy (SPAN per cycle is fixed by the engine; we do not size positions to capital).
@@ -369,14 +370,15 @@ def evaluate_combo(
 # 5. The grid + sweep
 # ---------------------------------------------------------------------------
 def default_grid(capital: float = DEFAULT_CAPITAL) -> list[GovernorParams]:
-    """A ~17-combo sweep: max_trades ∈ {None,250,200,150,100,50} × dd ∈ {None,10,20,30},
-    trimmed to sensible pairs, plus the explicit no-governor baseline first.
+    """A 24-combo sweep: max_trades ∈ {None,200,150,100,75,50} × dd ∈ {None,10,20,30},
+    plus the explicit no-governor baseline first.
 
-    The baseline (mt=∞, dd=off) is always element 0.  The remaining combos are the
-    cross-product with the redundant (∞,off) duplicate removed.
+    The baseline (mt=∞, dd=off) is always element 0.  The remaining 23 combos are the
+    cross-product (6×4=24) with the redundant (∞,off) duplicate removed, giving 24 total.
+    250 is excluded because NIFTY yields ~233 cycles — it would be a no-op cap.
     """
     baseline = GovernorParams(capital=capital, max_trades=None, dd_limit_pct=None)
-    max_trades_opts: list[Optional[int]] = [None, 250, 200, 150, 100, 50]
+    max_trades_opts: list[Optional[int]] = [None, 200, 150, 100, 75, 50]
     dd_opts: list[Optional[float]] = [None, 10.0, 20.0, 30.0]
 
     grid: list[GovernorParams] = [baseline]
@@ -536,7 +538,7 @@ def archive_s3(
     if not bucket:
         print("WARNING: --upload-s3 set but S3_BUCKET is empty — skipping upload.")
         return None
-    run_ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%MZ")
+    run_ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     prefix = f"kronos/m3/risk_sweep/{sweep['strategy']}/{run_ts}"
     manifest = {
         "schema_version": 1,
@@ -548,7 +550,10 @@ def archive_s3(
     try:
         import boto3
 
-        s3 = boto3.client("s3")
+        s3 = boto3.client(
+            "s3",
+            region_name=os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "ap-south-1")),
+        )
         s3.put_object(
             Bucket=bucket, Key=f"{prefix}/results.json",
             Body=json.dumps(_sweep_to_json(sweep), indent=2, default=str).encode(),
@@ -621,7 +626,7 @@ def main() -> None:  # pragma: no cover — needs the dhan_trading DB
     print(summary_text)
 
     if args.upload_s3:
-        archive_s3(sweep, args=vars(args), summary_text=summary_text or "(see stdout)")
+        archive_s3(sweep, args=vars(args), summary_text=summary_text)
 
 
 if __name__ == "__main__":  # pragma: no cover
