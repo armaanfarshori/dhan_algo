@@ -736,6 +736,8 @@ def yang_zhang_realized_vol(
             )
 
         def _var(xs: list[float]) -> float:
+            if len(xs) < 2:  # defensive: sample variance needs ≥2 points (n<2 guard above already ensures this)
+                return 0.0
             m = sum(xs) / len(xs)
             return sum((x - m) ** 2 for x in xs) / (len(xs) - 1)
 
