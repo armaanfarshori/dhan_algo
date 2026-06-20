@@ -45,7 +45,7 @@ import argparse
 import asyncio
 import json
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -71,11 +71,25 @@ __all__ = [
     "MCX_EXCHANGE_SEGMENT",
     "MCX_INSTRUMENT",
     "CHECKPOINT_DIR",
+    "_intraday_windows",
+    "_MAX_INTRADAY_CHUNK",
 ]
 
 # Dhan segment / instrument codes for MCX commodity futures.
 MCX_EXCHANGE_SEGMENT = "MCX_COMM"
 MCX_INSTRUMENT = "FUTCOM"
+
+# Dhan's charts/intraday endpoint refuses ranges longer than 90 days
+# (DH-905 "Data for Intraday Charts can be fetched for 90 days at a time"),
+# so an intraday backfill MUST be split into consecutive ≤90-day windows.
+# Mirrors backfill.py's _MAX_INTRADAY_CHUNK. The daily endpoint has no such
+# limit, so the daily path is a single call.
+_MAX_INTRADAY_CHUNK = 90  # Dhan hard limit per /v2/charts/intraday call
+
+# The charts API tolerates ~1 req/s — space windowed calls out and retry on
+# DH-904 ("Too many requests"). Mirrors backfill.py's chunk pacing/backoff.
+_INTER_CALL_SLEEP_S = 0.25
+_DH904_RETRY_WAIT = [5, 15, 30]
 
 # Checkpoint location — mirrors backfill.py's checkpointed-CLI convention so a
 # multi-day/interrupted run can be re-driven idempotently (upserts are ON CONFLICT).
@@ -100,6 +114,29 @@ def parse_mcx_history(
     for r in base:
         r["security_id"] = security_id
     return base
+
+
+def _intraday_windows(from_date: str, to_date: str) -> list[tuple[str, str]]:
+    """Split an inclusive [from_date, to_date] range (YYYY-MM-DD strings) into
+    consecutive, gap-free, non-overlapping windows each spanning ≤90 days, so
+    each fits Dhan's intraday 90-day limit (avoids DH-905).
+
+    Returns a list of (window_from, window_to) YYYY-MM-DD string pairs. A range
+    ≤90 days yields exactly one window. Raises ValueError if from_date > to_date.
+    """
+    start = datetime.strptime(from_date.strip(), "%Y-%m-%d").date()
+    end = datetime.strptime(to_date.strip(), "%Y-%m-%d").date()
+    if start > end:
+        raise ValueError(f"from_date {from_date} is after to_date {to_date}")
+    windows: list[tuple[str, str]] = []
+    cursor = start
+    while cursor <= end:
+        # Inclusive window of at most _MAX_INTRADAY_CHUNK days (cursor..cursor+89
+        # is 90 distinct days), clamped to the requested end.
+        win_end = min(cursor + timedelta(days=_MAX_INTRADAY_CHUNK - 1), end)
+        windows.append((cursor.strftime("%Y-%m-%d"), win_end.strftime("%Y-%m-%d")))
+        cursor = win_end + timedelta(days=1)
+    return windows
 
 
 # ── checkpointing ───────────────────────────────────────────────────────────────
@@ -164,6 +201,42 @@ def _upsert_mcx_bars(rows: list[dict[str, Any]]) -> int:
     return len(tuples)
 
 
+# ── intraday window fetch (DH-904-aware) ─────────────────────────────────────────
+async def _fetch_intraday_window(
+    client: Any,
+    security_id: str,
+    interval: str,
+    from_date: str,
+    to_date: str,
+) -> dict[str, Any]:
+    """Fetch one ≤90-day intraday window, retrying on DH-904 ("Too many
+    requests") with backoff. The charts API tolerates ~1 req/s, so a burst can
+    transiently rate-limit; retry the SAME window rather than dropping it (a
+    dropped window is a permanent hole). Non-DH-904 errors propagate."""
+    for attempt, wait in enumerate([0] + _DH904_RETRY_WAIT):
+        if wait:
+            logger.warning(
+                "mcx_bars: DH-904 on %s %s→%s — backing off %ds (retry %d/%d)",
+                security_id, from_date, to_date, wait, attempt, len(_DH904_RETRY_WAIT),
+            )
+            await asyncio.sleep(wait)
+        try:
+            return await client.get_intraday_historical(
+                security_id=security_id,
+                exchange_segment=MCX_EXCHANGE_SEGMENT,
+                instrument=MCX_INSTRUMENT,
+                interval=interval,
+                from_date=from_date,
+                to_date=to_date,
+            )
+        except Exception as exc:
+            if "DH-904" in str(exc) and attempt < len(_DH904_RETRY_WAIT):
+                continue
+            raise
+    # Unreachable (loop either returns or raises), but keep the type-checker happy.
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
 # ── orchestration (live Dhan fetches — off-hours only) ───────────────────────────
 async def backfill_mcx_bars(
     client: Any,
@@ -191,22 +264,49 @@ async def backfill_mcx_bars(
     """
     _assert_off_hours("backfill_mcx_bars", now)
     if interval is not None:
-        raw = await client.get_intraday_historical(
-            security_id=security_id,
-            exchange_segment=MCX_EXCHANGE_SEGMENT,
-            instrument=MCX_INSTRUMENT,
-            interval=str(interval),
-            from_date=from_date,
-            to_date=to_date,
-        )
-    else:
-        raw = await client.get_daily_historical(
-            security_id=security_id,
-            exchange_segment=MCX_EXCHANGE_SEGMENT,
-            instrument=MCX_INSTRUMENT,
-            from_date=from_date,
-            to_date=to_date,
-        )
+        # Dhan's intraday endpoint caps each call at 90 days (DH-905), so split
+        # the full range into consecutive ≤90-day windows and fetch+upsert each.
+        windows = _intraday_windows(from_date, to_date)
+        total = 0
+        for idx, (win_from, win_to) in enumerate(windows):
+            raw = await _fetch_intraday_window(
+                client, security_id, str(interval), win_from, win_to
+            )
+            rows = parse_mcx_history(raw, symbol, security_id, timeframe, expiry_date)
+            n = _upsert_mcx_bars(rows)
+            total += n
+            logger.info(
+                "mcx_bars: upserted %d rows for %s/%s (window %d/%d %s→%s, tf=%s)",
+                n, symbol, security_id, idx + 1, len(windows), win_from, win_to, timeframe,
+            )
+            # Checkpoint after each successful window so an interrupted run
+            # resumes; the upsert is idempotent (ON CONFLICT) so re-running a
+            # window is safe. Records the furthest window reached + running total.
+            write_checkpoint(
+                security_id, timeframe,
+                {
+                    "symbol": symbol,
+                    "security_id": security_id,
+                    "from_date": from_date,
+                    "to_date": win_to,
+                    "timeframe": timeframe,
+                    "rows": total,
+                    "completed_at": (now or _now_ist()).astimezone(timezone.utc).isoformat(),
+                },
+            )
+            # Pace the charts API (~1 req/s) — skip the wait after the last window.
+            if idx < len(windows) - 1:
+                await asyncio.sleep(_INTER_CALL_SLEEP_S)
+        return total
+
+    # Daily endpoint has no 90-day limit → single call.
+    raw = await client.get_daily_historical(
+        security_id=security_id,
+        exchange_segment=MCX_EXCHANGE_SEGMENT,
+        instrument=MCX_INSTRUMENT,
+        from_date=from_date,
+        to_date=to_date,
+    )
     rows = parse_mcx_history(raw, symbol, security_id, timeframe, expiry_date)
     n = _upsert_mcx_bars(rows)
     logger.info(
