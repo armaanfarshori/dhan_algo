@@ -22,6 +22,13 @@ class OrderIntent:
     stop_price: Optional[float] = None
     target_price: Optional[float] = None
     product_type: str = "INTRADAY"
+    # Per-order PAPER slippage override (bps). None → the executor's default.
+    # The options scalper sets this to a realistic option-leg half-spread; equity/
+    # ORB intents leave it None, so their fill price is byte-identical.
+    slippage_bps: Optional[float] = None
+    # Optional hint to slice a large order into child orders (LIVE only). Default
+    # False; equity/ORB intents never set it, so their live path is unchanged.
+    slice_order: bool = False
 
 
 @dataclass(frozen=True)

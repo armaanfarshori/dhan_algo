@@ -45,13 +45,18 @@ class PaperExecutor(OrderExecutor):
             logger.warning("PaperExecutor: no reference price for %s — rejecting", intent.security_id)
             return None
         # Adverse slippage: pay up on buys, receive less on sells. A market
-        # order never fills at the last printed price.
-        slip = ref_price * self._slippage_bps / 10_000
+        # order never fills at the last printed price. A per-order override
+        # (intent.slippage_bps) lets the options scalper charge a realistic
+        # option-leg half-spread; equity/ORB intents leave it None → the
+        # executor default, so their fill price is byte-identical.
+        slip_bps = (intent.slippage_bps
+                    if intent.slippage_bps is not None else self._slippage_bps)
+        slip = ref_price * slip_bps / 10_000
         fill_price = round(ref_price + slip if intent.side == "BUY" else ref_price - slip, 2)
 
         logger.info("📝 [PAPER] %s %d %s @ ₹%.2f (ref %.2f, slip %.1fbps) — %s",
                     intent.side, intent.qty, intent.security_id, fill_price,
-                    ref_price, self._slippage_bps, intent.reason)
+                    ref_price, slip_bps, intent.reason)
 
         if self._db:
             await self._db.log_order(
@@ -83,6 +88,15 @@ class LiveExecutor(OrderExecutor):
             logger.warning("LiveExecutor: non-positive qty %d for %s — rejecting (no order sent)",
                            intent.qty, intent.security_id)
             return None
+        # Optional slice hint: defined-risk option legs may want to split a large
+        # order into child orders. Slicing is not yet implemented in place_order —
+        # honour the flag by logging it so the intent is auditable; the order is
+        # placed whole. equity/ORB intents never set slice_order, so this path is
+        # never hit for them and their live behaviour is unchanged.
+        if intent.slice_order:
+            logger.warning("LiveExecutor: slice_order requested for %s qty=%d — order "
+                           "slicing not yet implemented; placing whole order",
+                           intent.security_id, intent.qty)
         correlation_id: Optional[str] = None
         try:
             result = await self._client.place_order(

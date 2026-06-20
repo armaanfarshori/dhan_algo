@@ -58,6 +58,40 @@ class Config(BaseSettings):
     # logs a WARNING so a frozen feed is visible.
     risk_ltp_stale_s: float = 60.0
 
+    # ── Options scalper (PAPER, SHIPS DARK — default OFF) ───────────────────
+    # The intraday options scalper sleeve (NIFTY + BANKNIFTY long-option scalps).
+    # It is un-backtestable today (no intraday option-premium history) so it is
+    # forward-paper-validated only.  scalper_enabled=False means the orchestrator
+    # task is NEVER created and the trader behaves byte-identically to ORB-only.
+    scalper_enabled: bool = False
+    # Comma-separated underlyings the sleeve trades (must be keys in
+    # core.instruments.INDEX_CONFIGS).  Parsed via `scalper_underlyings_list`.
+    scalper_underlyings: str = "NIFTY,BANKNIFTY"
+    scalper_poll_interval: float = 5.0    # orchestrator tick cadence (s)
+    # Per-order PAPER slippage for OPTION legs — wider than the equity 2 bps
+    # default because a single option leg crosses ~half-the-spread each way.
+    scalper_slippage_bps: float = 75.0
+    scalper_max_spread_pct: float = 0.02  # screener hard L1 width ceiling (≤2%)
+    # ── governor caps (one scalper sleeve) — see engine/daily_governor.py ────
+    scalper_sleeve_capital: float = 250_000.0
+    scalper_max_trades_per_day: int = 12
+    scalper_max_trades_per_underlying: int = 8
+    scalper_max_concurrent_total: int = 4
+    scalper_max_concurrent_per_underlying: int = 2
+    scalper_max_daily_loss: float = 7_500.0
+    scalper_daily_profit_lock: float = 7_500.0     # 0 / negative disables the lock
+    scalper_consecutive_loss_stop: int = 4
+
+    @property
+    def scalper_underlyings_list(self) -> list[str]:
+        """Parsed, upper-cased, de-duplicated underlying list (order preserved)."""
+        seen: list[str] = []
+        for raw in self.scalper_underlyings.split(","):
+            u = raw.strip().upper()
+            if u and u not in seen:
+                seen.append(u)
+        return seen
+
     # ── ORB strategy ────────────────────────────────────────────────────────
     orb_range_minutes: int = 15
     poll_interval: float = 20.0           # seconds between quote polls
