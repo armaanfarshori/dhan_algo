@@ -268,7 +268,12 @@ def replay_session(
         direction = 1 if pos_side == "LONG" else -1
         units = lot_size  # one lot
         gross = (exit_price - pos_entry_price) * units * direction
-        notional_per_side = pos_entry_price * units
+        # Cost notional: CTT is SELL-side (the exit turnover), so the dominant
+        # statutory leg is computed on the EXIT price — use the exit-side notional
+        # for the round-trip cost (a touch more conservative than entry-side and
+        # the right base for the sell-turnover CTT). Single-sided model: one
+        # notional drives both legs, so exit-side is the honest choice.
+        notional_per_side = exit_price * units
         costs = mcx_futures_roundtrip(notional_per_side, slippage_pct=0).total
         trades.append(McxTrade(
             symbol=symbol, day=day, side=pos_side, qty_lots=pos_qty,
@@ -281,6 +286,10 @@ def replay_session(
         pos_stop, pos_target = 0.0, 0.0
         strategy.notify_flat()
 
+    prev_sec_id: Optional[str] = None
+    prev_close_px: float = 0.0
+    prev_ts: Optional[datetime] = None
+
     for i in range(n):
         bar = bars[i]
         ts = bar["time"]
@@ -289,6 +298,26 @@ def replay_session(
         bar_low = float(bar["low"])
         bar_close = float(bar["close"])
         vol = float(bar["volume"]) if bar.get("volume") is not None else 0.0
+        sec_id = bar.get("security_id")
+
+        # 0. ROLL SEAM — the selected front-month contract flipped between this bar
+        #    and the previous one (a monthly roll). The cross-contract price jump is
+        #    NOT a real intrabar move: force-flat any open position at the PRIOR
+        #    bar's close (so the seam never generates P&L) and drop any pending fill
+        #    (so the jump never seeds an entry/exit across the seam).
+        if prev_sec_id is not None and sec_id is not None and sec_id != prev_sec_id:
+            if pos_qty != 0:
+                exit_side = "SELL" if pos_side == "LONG" else "BUY"
+                fill_px = _slip(prev_close_px, exit_side, params.slippage_bps, params.tick_size)
+                close_position(fill_px, prev_ts, "roll seam")
+            pending = None  # never carry a queued fill across the contract change
+
+        # Record this bar as "previous" for the NEXT iteration's seam check. Set
+        # here (before the `continue` paths below) so the prior-bar snapshot is
+        # always current — prev_close_px/prev_ts are what a seam force-flat uses.
+        prev_sec_id = sec_id if sec_id is not None else prev_sec_id
+        prev_close_px = bar_close
+        prev_ts = ts
 
         # 1. Execute the decision queued on the previous bar at THIS bar's open
         #    (next-bar fill — never the signal bar).
@@ -358,6 +387,12 @@ def load_symbol_bars(symbol: str, timeframe: str = "5min") -> list[dict[str, Any
     monthly rolls), the highest open-interest row per timestamp is kept — the
     front/near-month line (a simple, roll-agnostic front-month proxy; continuous
     back-adjusted stitching is the unsolved TODO(mcx-continuous)).
+
+    Each bar carries the selected ``security_id`` (the physical contract the row
+    came from). When that flips between consecutive bars the front-month line has
+    rolled to a new contract — the replay treats it as a non-tradable SEAM (it
+    force-flats at the prior bar's close and never lets the cross-contract price
+    jump generate P&L or seed a fill).
     """
     from sqlalchemy import text
 
@@ -365,7 +400,7 @@ def load_symbol_bars(symbol: str, timeframe: str = "5min") -> list[dict[str, Any
 
     with get_session() as s:
         rows = s.execute(text("""
-            SELECT time, open, high, low, close, volume, open_interest
+            SELECT time, open, high, low, close, volume, open_interest, security_id
             FROM mcx_bars
             WHERE symbol = :sym AND timeframe = :tf
             ORDER BY time
@@ -373,7 +408,7 @@ def load_symbol_bars(symbol: str, timeframe: str = "5min") -> list[dict[str, Any
 
     # Collapse duplicate timestamps to the front-month (max OI) row.
     by_ts: dict[datetime, dict[str, Any]] = {}
-    for time_, o, h, lo, c, v, oi in rows:
+    for time_, o, h, lo, c, v, oi, sec_id in rows:
         ts = time_
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
@@ -385,6 +420,7 @@ def load_symbol_bars(symbol: str, timeframe: str = "5min") -> list[dict[str, Any
                 "time": ts, "open": float(o), "high": float(h),
                 "low": float(lo), "close": float(c),
                 "volume": float(v) if v is not None else 0.0, "_oi": oi_v,
+                "security_id": str(sec_id) if sec_id is not None else None,
             }
     out = [by_ts[k] for k in sorted(by_ts)]
     for r in out:

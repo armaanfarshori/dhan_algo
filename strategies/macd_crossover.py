@@ -17,7 +17,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, time as dtime, timedelta
 from typing import Optional
 
-from strategies.orb import Decision, IST, MARKET_CLOSE, MAX_FUTURE_SKEW
+from core.sessions import EQUITY, MarketSession
+from strategies.orb import Decision, IST, MAX_FUTURE_SKEW
 
 logger = logging.getLogger("dhan.strategy.macd_crossover")
 
@@ -38,9 +39,14 @@ class MacdCrossoverParams:
 
 
 class MacdCrossover:
-    def __init__(self, security_id: str, params: Optional[MacdCrossoverParams] = None):
+    def __init__(self, security_id: str, params: Optional[MacdCrossoverParams] = None,
+                 session: MarketSession = EQUITY):
+        """``session`` binds the EOD square-off to a MarketSession profile (defaults
+        to EQUITY → byte-identical legacy 15:30 behaviour). Pass session=MCX for the
+        evening commodity session (DST-aware close)."""
         self.security_id = security_id
         self.p = params or MacdCrossoverParams()
+        self.session = session
 
         assert self.p.slow_period > self.p.fast_period, (
             f"slow_period ({self.p.slow_period}) must be > fast_period ({self.p.fast_period})"
@@ -148,7 +154,7 @@ class MacdCrossover:
 
         # 5. EOD square-off (unconditional — indicator-independent)
         squareoff_time = (
-            datetime.combine(today, MARKET_CLOSE)
+            datetime.combine(today, self.session.close_time_for(today))
             - timedelta(minutes=self.p.squareoff_before_close_min)
         ).time()
         if t >= squareoff_time:

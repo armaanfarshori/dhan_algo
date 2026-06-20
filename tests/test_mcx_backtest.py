@@ -29,10 +29,14 @@ import pytest
 from core.sessions import EQUITY, MCX
 from research.backtest import mcx_backtest as mb
 from research.backtest.mcx_costs import mcx_futures_roundtrip
+from strategies.bollinger_meanrev import BollingerMeanReversion
 from strategies.donchian_breakout import DonchianBreakout
 from strategies.ema_crossover import EmaCrossover
+from strategies.macd_crossover import MacdCrossover
 from strategies.orb import ORB
 from strategies.supertrend import Supertrend
+from strategies.vwap_meanrev import VwapMeanReversion
+from strategies.vwap_trend import VwapTrend
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -204,13 +208,14 @@ def test_replay_no_lookahead_fills_at_next_bar_open():
 
 
 def test_replay_applies_mcx_costs():
-    """The closed round trip's costs equal mcx_futures_roundtrip(entry_notional)."""
+    """The closed round trip's costs equal mcx_futures_roundtrip(EXIT-notional) —
+    CTT is sell-side, so the cost notional is the exit price × lot units."""
     bars = _evening_breakout_session()
     strat = mb._build_strategy("orb_evening", "CRUDEOIL", MCX)
     params = mb.McxBacktestParams(slippage_bps=2.0, min_session_bars=1)
     trades = mb.replay_session("CRUDEOIL", DAY, bars, strat, lot_size=100, params=params)
     t = trades[0]
-    expected_costs = mcx_futures_roundtrip(t.entry_price * 100, slippage_pct=0).total
+    expected_costs = mcx_futures_roundtrip(t.exit_price * 100, slippage_pct=0).total
     assert t.costs == pytest.approx(expected_costs)
     assert t.costs > 0
     # net = gross − costs (consistency).
@@ -323,3 +328,136 @@ def test_short_breakout_session_fills_short():
     assert len(trades) == 1 and trades[0].side == "SHORT"
     # SELL fill at next-bar open (97.0) minus slippage → below the signal close (98.0).
     assert trades[0].entry_price < 98.0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PART 2b — roll seam: a front-month contract flip must not generate phantom P&L
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _bar_sid(hh, mm, o, h, lo, c, sid, v=1000.0, d=DAY):
+    """Like _bar but carries a contract security_id (for roll-seam tests)."""
+    return {"time": _ist(hh, mm, d).replace(tzinfo=IST),
+            "open": o, "high": h, "low": lo, "close": c, "volume": v,
+            "security_id": sid}
+
+
+def test_roll_seam_no_phantom_pnl_across_contract_flip():
+    """An open long on contract A must NOT eat the cross-contract price jump when
+    the front-month line rolls to contract B mid-series. The seam force-flats at
+    A's prior close (reason "roll seam"); B's much-higher prices never seed P&L."""
+    bars = []
+    # OR window 18:00–18:15 on contract A — wide range (low 90, high 110) so the
+    # target sits FAR away (~125) and the position stays open until the seam.
+    for mm in (0, 5, 10):
+        bars.append(_bar_sid(18, mm, 100.0, 110.0, 90.0, 100.0, "A"))
+    # 18:20 — breakout above OR high (110) on A → ENTER signal. Decision target
+    # ≈ 111 + 1.5 × OR-range(20) = ~141, comfortably unreached below.
+    bars.append(_bar_sid(18, 20, 110.5, 111.0, 109.0, 111.0, "A"))
+    # 18:25 — fill bar (next-open 112.0); gentle drift, target (~141) NOT hit and
+    # stop (OR low 90) not breached.
+    bars.append(_bar_sid(18, 25, 112.0, 113.0, 111.5, 112.5, "A"))
+    # 18:30 — last A bar, close 113.0 (the seam force-flat reference price).
+    bars.append(_bar_sid(18, 30, 112.5, 113.5, 112.0, 113.0, "A"))
+    # 18:35 — front month ROLLS to contract B, which trades ~6x higher (600). The
+    # 104 → 600 jump is a contract change, NOT a real move.
+    bars.append(_bar_sid(18, 35, 600.0, 610.0, 595.0, 605.0, "B"))
+    bars.append(_bar_sid(18, 40, 605.0, 615.0, 600.0, 612.0, "B"))
+
+    strat = mb._build_strategy("orb_evening", "CRUDEOIL", MCX)
+    params = mb.McxBacktestParams(slippage_bps=2.0, min_session_bars=1)
+    trades = mb.replay_session("CRUDEOIL", DAY, bars, strat, lot_size=100, params=params)
+
+    # The A position closed at the seam (reason "roll seam").
+    seam_trades = [t for t in trades if t.exit_reason == "roll seam"]
+    assert len(seam_trades) == 1
+    t = seam_trades[0]
+    assert t.side == "LONG"
+    # Exit at A's prior (18:30) close 113.0 minus SELL slippage — NOT B's 600+.
+    expected_exit = mb._slip(113.0, "SELL", 2.0, 0.0)
+    assert t.exit_price == pytest.approx(expected_exit)
+    assert t.exit_price < 200.0  # the B jump never leaked in
+    # Gross P&L = (exit − entry) × units; entry was ~103 (A), exit ~111 (A) → small,
+    # nowhere near the (600 − 103) phantom move.
+    assert t.gross_pnl < 5000.0   # phantom would be ~(600−103)*100 ≈ 49,700
+    # No trade anywhere carries the cross-contract phantom jump as P&L.
+    assert all(abs(tr.gross_pnl) < 5000.0 for tr in trades)
+
+
+def test_roll_seam_drops_pending_fill_across_flip():
+    """A fill queued on the last bar of contract A must NOT execute on contract B's
+    open. We assert no entry is ever seeded at the seam bar (18:25, contract B)."""
+    bars = []
+    # OR window on A.
+    for mm in (0, 5, 10):
+        bars.append(_bar_sid(18, mm, 100.5, 101.0, 100.0, 100.5, "A"))
+    # 18:20 — breakout signal on A's LAST bar; the fill would queue for 18:25.
+    bars.append(_bar_sid(18, 20, 100.6, 102.0, 100.5, 102.0, "A"))
+    # 18:25 — front month already rolled to B; B trades back inside the (now
+    # meaningless) A opening range so B itself raises no fresh breakout. The only
+    # way a position could appear here is the dropped A-queued fill — which must NOT
+    # execute on B's open.
+    bars.append(_bar_sid(18, 25, 100.6, 100.9, 100.2, 100.5, "B"))
+    bars.append(_bar_sid(18, 30, 100.5, 100.8, 100.1, 100.4, "B"))
+
+    strat = mb._build_strategy("orb_evening", "CRUDEOIL", MCX)
+    params = mb.McxBacktestParams(slippage_bps=2.0, min_session_bars=1)
+    trades = mb.replay_session("CRUDEOIL", DAY, bars, strat, lot_size=100, params=params)
+    # No entry was seeded at the seam bar (18:25, contract B).
+    seam_ts = _ist(18, 25).replace(tzinfo=IST)
+    assert all(t.entry_ts != seam_ts for t in trades)
+
+
+def test_no_seam_when_security_id_absent():
+    """Single-contract data (security_id None on every bar) behaves exactly as
+    before — no seam is ever triggered."""
+    bars = _evening_breakout_session()  # no security_id key
+    strat = mb._build_strategy("orb_evening", "CRUDEOIL", MCX)
+    params = mb.McxBacktestParams(slippage_bps=2.0, min_session_bars=1)
+    trades = mb.replay_session("CRUDEOIL", DAY, bars, strat, lot_size=100, params=params)
+    assert len(trades) == 1
+    assert trades[0].exit_reason != "roll seam"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PART 1b — session wiring for the four newly-bound strategies
+# ──────────────────────────────────────────────────────────────────────────────
+
+_SESSION_WIRED = [
+    VwapMeanReversion, MacdCrossover, BollingerMeanReversion, VwapTrend,
+]
+
+
+@pytest.mark.parametrize("cls", _SESSION_WIRED)
+def test_extra_strategies_default_session_is_equity(cls):
+    """Each newly-wired strategy defaults to the EQUITY session (15:30 close)."""
+    s = cls("X")
+    assert s.session is EQUITY
+    assert s.session.close_time_for(DAY) == dtime(15, 30)
+
+
+@pytest.mark.parametrize("cls", _SESSION_WIRED)
+def test_extra_strategies_equity_squareoff_at_1515(cls):
+    """Default (EQUITY) square-off stays 15:15 (15:30 − 15) — byte-identical."""
+    s = cls("X")
+    s.notify_fill("BUY", 1, 100)
+    d = s.on_tick(_ist(15, 15), 100, high=100, low=100, volume=1000.0)
+    assert d is not None and d.action == "EXIT" and "square-off" in d.reason
+
+
+@pytest.mark.parametrize("cls", _SESSION_WIRED)
+def test_extra_strategies_mcx_no_squareoff_at_1515(cls):
+    """Under session=MCX, 15:15 is mid-session — no square-off there."""
+    s = cls("X", session=MCX)
+    s.notify_fill("BUY", 1, 100)
+    d = s.on_tick(_ist(15, 15), 101, high=101, low=101, volume=1000.0)
+    assert d is None or "square-off" not in d.reason
+
+
+@pytest.mark.parametrize("cls", _SESSION_WIRED)
+def test_extra_strategies_mcx_squareoff_at_evening_close(cls):
+    """Under session=MCX, the square-off keys off the evening close (23:40 on a
+    DST-off date), not 15:15."""
+    s = cls("X", session=MCX)
+    s.notify_fill("BUY", 1, 100)
+    d = s.on_tick(_ist(23, 40), 102, high=102, low=102, volume=1000.0)
+    assert d is not None and d.action == "EXIT" and "square-off" in d.reason
