@@ -66,6 +66,196 @@ _SQRT2PI = math.sqrt(2.0 * math.pi)
 
 logger = logging.getLogger("dhan.backtest.fno_condor")
 
+# ---------------------------------------------------------------------------
+# Day-count convention (Phase-0a fidelity fix #2)
+# ---------------------------------------------------------------------------
+# India VIX (and any ATM-straddle IV) is a CALENDAR-day annualised implied vol:
+# its √-time scaling uses 365 calendar days, and `implied_move` /
+# `price_condor` correctly use T = dte / 365 (dte is calendar days). Black-76
+# pricing is therefore internally consistent (calendar IV × calendar T).
+#
+# The ONLY day-count inconsistency in the pipeline is the vol-regime GATE
+# comparison: `realized_vol_20d` is annualised with √252 (TRADING_DAYS, per
+# core.fno_derived.realized_vol_series) while `straddle_iv` (VIX/100) is
+# annualised with √365. Comparing them directly mixes the two bases and biases
+# the realized/implied ratio by √(365/252) ≈ 1.204 (~20%) — exactly the
+# brief's "~20% error". We convert the realized vol onto the calendar (365)
+# basis before the gate compares it to the calendar-annualised implied vol so
+# both sides share ONE convention: CALENDAR (365) days.
+CALENDAR_DAYS = 365
+TRADING_DAYS = 252
+# realized(√252) → realized(√365): a vol annualised over N_a periods/yr maps to
+# basis N_b by multiplying by √(N_a / N_b). 252 trading → 365 calendar.
+REALIZED_TO_CALENDAR_FACTOR = math.sqrt(TRADING_DAYS / CALENDAR_DAYS)  # ≈ 0.8307
+
+
+def realized_vol_to_calendar_basis(
+    realized_vol_trading: float | None,
+    trading_days: int = TRADING_DAYS,
+    calendar_days: int = CALENDAR_DAYS,
+) -> float | None:
+    """Convert a √(trading-day)-annualised realized vol onto the calendar (365)
+    basis so it is directly comparable to a calendar-annualised implied vol
+    (India VIX / ATM straddle IV).
+
+    realized_vol_20d (core.fno_derived) annualises daily vol with √252; VIX
+    annualises with √365. Multiply by √(252/365) to rebase. ``None`` passes
+    through. See the module-level day-count note (fidelity fix #2).
+    """
+    if realized_vol_trading is None:
+        return None
+    return float(realized_vol_trading) * math.sqrt(trading_days / calendar_days)
+
+
+# ---------------------------------------------------------------------------
+# Weekly-expiry weekday convention (Phase-0a fidelity fix #1)
+# ---------------------------------------------------------------------------
+# NIFTY weekly expiry weekday changed over the years. NSE moved the NIFTY
+# weekly expiry from THURSDAY to TUESDAY effective the cutover below. Before the
+# cutover, weekly expiry is Thursday; on/after it, Tuesday. (Project date
+# convention: real-life 2025-09-01 is represented here as 2026-09-01 — the repo
+# runs one year ahead of the real-world calendar; today is 2026-06-20.)
+#
+# Python weekday(): Monday=0 ... Sunday=6 → Tuesday=1, Thursday=3.
+_THURSDAY = 3
+_TUESDAY = 1
+NIFTY_TUESDAY_EXPIRY_CUTOVER = date(2026, 9, 1)
+
+
+def expiry_weekday_for(cycle_date: date, cutover: date = NIFTY_TUESDAY_EXPIRY_CUTOVER) -> int:
+    """Return the NIFTY weekly-expiry weekday (Python weekday int) effective on
+    ``cycle_date``: Thursday (3) before ``cutover``, Tuesday (1) on/after it.
+
+    Date-aware so a multi-year backtest uses the correct expiry day for each
+    cycle instead of a single hardcoded weekday (fidelity fix #1).
+    """
+    return _TUESDAY if cycle_date >= cutover else _THURSDAY
+
+
+def snap_to_expiry_weekday(
+    trading_days_in_week: list[date],
+    cutover: date = NIFTY_TUESDAY_EXPIRY_CUTOVER,
+) -> date | None:
+    """Pick the expiry-day boundary from an ISO week's available trading days.
+
+    Given the sorted trading days that fall in one ISO week, return the trading
+    day that best represents the weekly expiry for that week:
+
+    * Target weekday = ``expiry_weekday_for`` of the week's last trading day
+      (Thursday before the cutover, Tuesday on/after).
+    * If a trading day on the target weekday exists, use it (holiday-free week).
+    * Otherwise the expiry-day was a holiday → fall back to the last trading day
+      on or before the target weekday (NSE rolls a holiday expiry to the prior
+      trading day); if none precede it, use the week's last trading day.
+
+    Returns ``None`` for an empty week. This keeps the synthetic-weekly cycle
+    boundaries aligned to the real expiry weekday + holiday rule, replacing the
+    old "last trading day of the ISO week" heuristic.
+    """
+    if not trading_days_in_week:
+        return None
+    days = sorted(trading_days_in_week)
+    target_wd = expiry_weekday_for(days[-1], cutover=cutover)
+
+    exact = [d for d in days if d.weekday() == target_wd]
+    if exact:
+        return exact[-1]
+
+    # Holiday on the expiry weekday → roll back to the last trading day on/before it.
+    on_or_before = [d for d in days if d.weekday() <= target_wd]
+    if on_or_before:
+        return on_or_before[-1]
+    return days[-1]
+
+
+# ---------------------------------------------------------------------------
+# IV source resolution (Phase-0a fidelity fix #3)
+# ---------------------------------------------------------------------------
+# Prefer forward-collected REAL ATM straddle IV (option_atm_iv.straddle_iv,
+# projected from option_chain_snapshot) over the India-VIX-as-IV proxy whenever
+# it exists for a cycle. Real IV is the per-expiry (~4-7 DTE) ATM IV; the VIX
+# proxy is a 30-day IV that the 2026-06-19 live snapshot showed sits ~0.75×
+# above the true short-tenor IV in calm regimes — i.e. the proxy is OPTIMISTIC
+# in calm/contango. Using real IV where available removes that bias for those
+# cycles. The source is returned + logged + stored per cycle.
+
+IV_SOURCE_REAL = "real_atm"      # option_atm_iv.straddle_iv (forward-collected)
+IV_SOURCE_VIX_PROXY = "vix_proxy"  # India VIX / 100 (historical fallback)
+
+
+def resolve_iv_source(cycle: dict[str, Any]) -> tuple[float | None, str]:
+    """Pick the IV to price a cycle, preferring real ATM IV over the VIX proxy.
+
+    Looks for a real per-expiry ATM straddle IV on the cycle under
+    ``atm_straddle_iv`` (annualised fraction, e.g. 0.10). When present and
+    positive it is used (source = ``real_atm``). Otherwise falls back to the
+    cycle's ``straddle_iv`` (the VIX/100 proxy assembled by ``cycles_from_db``),
+    source = ``vix_proxy``.
+
+    Returns ``(iv, source_label)``. ``iv`` may be ``None`` if neither is a usable
+    positive value (the caller then skips the cycle).
+    """
+    real = cycle.get("atm_straddle_iv")
+    if real is not None:
+        try:
+            real_f = float(real)
+            if real_f > 0:
+                return real_f, IV_SOURCE_REAL
+        except (TypeError, ValueError):
+            pass
+
+    proxy = cycle.get("straddle_iv")
+    if proxy is not None:
+        try:
+            proxy_f = float(proxy)
+            if proxy_f > 0:
+                return proxy_f, IV_SOURCE_VIX_PROXY
+        except (TypeError, ValueError):
+            pass
+
+    return None, IV_SOURCE_VIX_PROXY
+
+
+# ---------------------------------------------------------------------------
+# Settlement-price resolution (Phase-0a fidelity fix #4)
+# ---------------------------------------------------------------------------
+# NSE's official Final Settlement Price (FSP) for index options is the weighted
+# average of the underlying over the last half hour (15:00–15:30 IST) on expiry
+# day, NOT the last-tick close. Prefer real FSP when collected; else the best
+# available proxy (last-half-hour VWAP); else the bar close. The residual
+# limitation is flagged in go_no_go when no real FSP was used.
+
+FSP_SOURCE_OFFICIAL = "fsp_official"      # cycle["fsp"] — NSE final settlement
+FSP_SOURCE_HALFHOUR_VWAP = "halfhour_vwap"  # last-30-min VWAP proxy
+FSP_SOURCE_CLOSE_PROXY = "close_proxy"      # bar close fallback (least faithful)
+
+
+def resolve_settlement_price(cycle: dict[str, Any]) -> tuple[float | None, str]:
+    """Pick the expiry settlement price, preferring NSE FSP over proxies.
+
+    Preference order:
+      1. ``fsp``                         → official NSE Final Settlement Price.
+      2. ``expiry_halfhour_vwap``        → 15:00–15:30 VWAP proxy (best proxy).
+      3. ``expiry_spot``                 → bar close (least faithful fallback).
+
+    Returns ``(settlement_price, source_label)``; ``settlement_price`` is
+    ``None`` only when every candidate is missing/invalid (caller skips).
+    """
+    for key, label in (
+        ("fsp", FSP_SOURCE_OFFICIAL),
+        ("expiry_halfhour_vwap", FSP_SOURCE_HALFHOUR_VWAP),
+        ("expiry_spot", FSP_SOURCE_CLOSE_PROXY),
+    ):
+        val = cycle.get(key)
+        if val is not None:
+            try:
+                val_f = float(val)
+                if val_f > 0:
+                    return val_f, label
+            except (TypeError, ValueError):
+                continue
+    return None, FSP_SOURCE_CLOSE_PROXY
+
 
 # ---------------------------------------------------------------------------
 # Black-76 option pricing (undiscounted)
@@ -184,6 +374,9 @@ class CondorTrade:
     realized_vol_20d: float = 0.0
     expiry_spot: float = 0.0
     leg_premiums: dict[str, float] = field(default_factory=dict)
+    # Phase-0a fidelity provenance
+    iv_source: str = ""            # real_atm | vix_proxy (fix #3)
+    settlement_source: str = ""    # fsp_official | halfhour_vwap | close_proxy (fix #4)
 
 
 # ---------------------------------------------------------------------------
@@ -315,19 +508,32 @@ def run_backtest(
         .. code-block:: python
 
             {
-                "entry_date":       date,   # entry (Monday / first day of cycle)
-                "expiry_date":      date,   # expiry (Thursday for most NIFTY weeklies)
+                "entry_date":       date,   # entry (first day of cycle)
+                "expiry_date":      date,   # expiry day (Thu pre-cutover / Tue on/after)
                 "spot":             float,  # index level at entry
-                "straddle_iv":      float,  # annualised ATM straddle IV (e.g. 0.14)
+                "straddle_iv":      float,  # VIX/100 proxy IV (annualised fraction)
                 "dte":              int,    # calendar days to expiry from entry
-                "realized_vol_20d": float,  # 20-day annualised realized vol of NIFTY futures
-                "expiry_spot":      float,  # NSE final settlement value at expiry
+                "realized_vol_20d": float,  # 20-day √252-annualised realized vol (NIFTY spot)
+                "expiry_spot":      float,  # index daily CLOSE at expiry (settlement proxy)
+
+                # ── Optional Phase-0a fidelity inputs (preferred when present) ──
+                "atm_straddle_iv":  float,  # REAL per-expiry ATM IV → preferred over VIX (#3)
+                "fsp":              float,  # NSE official Final Settlement Price (#4)
+                "expiry_halfhour_vwap": float,  # 15:00-15:30 VWAP FSP proxy (#4)
             }
 
     k:
-        Vol-gate threshold passed through to ``gate_decision``.  ``realized_vol
-        < k * implied_vol (straddle_iv)`` → SELL_PREMIUM.  Default 0.9; handoff §6 targets
+        Vol-gate threshold passed through to ``gate_decision``.  SELL_PREMIUM
+        when ``realized_vol < k * implied_vol``.  Default 0.9; handoff §6 targets
         ~70 % pass rate.
+
+        Day-count (fidelity fix #2): ``realized_vol_20d`` is √252-annualised
+        while the implied vol (VIX/100 or real ATM IV) is √365-annualised. The
+        gate rebases the realized vol onto the calendar (365) basis via
+        ``realized_vol_to_calendar_basis`` BEFORE comparing, so both sides share
+        ONE convention (calendar 365). This removes the ~√(365/252)≈1.204 (~20%)
+        cross-basis bias in the realized/implied ratio. ``k`` should therefore be
+        (re)calibrated against calendar-basis ratios.
 
     move_mult:
         Multiplier on implied move when placing short strikes.  Default 1.5 per
@@ -358,12 +564,20 @@ def run_backtest(
         # Guard: skip malformed cycles (missing required keys or None-valued fields).
         # This allows non-cycles_from_db callers to pass partially-built dicts without
         # crashing.  Well-formed cycles are unaffected.
+        # An IV is acceptable from either the real ATM field or the VIX proxy;
+        # a settlement price from FSP / half-hour VWAP / close (fixes #3, #4).
+        _has_iv = cycle.get("atm_straddle_iv") is not None or cycle.get("straddle_iv") is not None
+        _has_settlement = (
+            cycle.get("fsp") is not None
+            or cycle.get("expiry_halfhour_vwap") is not None
+            or cycle.get("expiry_spot") is not None
+        )
         _missing_or_none = (
             cycle.get("spot") is None
-            or cycle.get("straddle_iv") is None
+            or not _has_iv
             or cycle.get("realized_vol_20d") is None
             or cycle.get("dte") is None
-            or cycle.get("expiry_spot") is None
+            or not _has_settlement
         )
         if _missing_or_none:
             logger.debug(
@@ -375,13 +589,40 @@ def run_backtest(
         entry_date: date = cycle.get("entry_date", date.today())
         expiry_date: date = cycle.get("expiry_date", date.today())
         spot: float = float(cycle["spot"])
-        straddle_iv: float = float(cycle["straddle_iv"])
         dte: int = int(cycle["dte"])
         realized_vol_20d: float = float(cycle["realized_vol_20d"])
-        expiry_spot: float = float(cycle["expiry_spot"])
 
-        # Gate decision — only trade on SELL_PREMIUM
-        decision = gate_decision(realized_vol_20d, straddle_iv, k=k)
+        # IV source — prefer REAL per-expiry ATM IV over the VIX proxy (fix #3).
+        straddle_iv_opt, iv_source = resolve_iv_source(cycle)
+        if straddle_iv_opt is None or straddle_iv_opt <= 0:
+            logger.debug(
+                "Cycle %s skipped: no usable IV (atm/vix both missing/<=0).",
+                cycle.get("cycle_id", entry_date),
+            )
+            continue
+        straddle_iv: float = straddle_iv_opt
+
+        # Settlement price — prefer NSE FSP, then half-hour VWAP, then close (fix #4).
+        settlement_opt, settlement_source = resolve_settlement_price(cycle)
+        if settlement_opt is None or settlement_opt <= 0:
+            logger.debug(
+                "Cycle %s skipped: no usable settlement price.",
+                cycle.get("cycle_id", entry_date),
+            )
+            continue
+        expiry_spot: float = settlement_opt
+
+        # Gate decision — only trade on SELL_PREMIUM.
+        # Day-count fix #2: rebase √252 realized vol onto the calendar (365)
+        # basis so it is comparable to the calendar-annualised implied vol.
+        realized_vol_cal = realized_vol_to_calendar_basis(realized_vol_20d)
+        decision = gate_decision(realized_vol_cal, straddle_iv, k=k)
+        logger.debug(
+            "Cycle %s: iv_source=%s iv=%.4f settle_source=%s realized(252)=%.4f "
+            "realized(365)=%.4f gate=%s",
+            cycle.get("cycle_id", entry_date), iv_source, straddle_iv,
+            settlement_source, realized_vol_20d, realized_vol_cal or 0.0, decision,
+        )
         if decision != SELL_PREMIUM:
             logger.debug(
                 "Cycle %s skipped: gate=%s (realized_vol=%.4f, straddle_iv=%.4f)",
@@ -474,6 +715,8 @@ def run_backtest(
                 realized_vol_20d=realized_vol_20d,
                 expiry_spot=expiry_spot,
                 leg_premiums=leg_premiums,
+                iv_source=iv_source,
+                settlement_source=settlement_source,
             )
         )
 
@@ -532,6 +775,12 @@ def run_backtest(
     net_pnl = sum(pnls)
     return_on_capital = net_pnl / capital
 
+    # Provenance counts for the honesty disclaimers (fixes #3 + #4): how many
+    # traded cycles used REAL ATM IV vs the VIX proxy, and OFFICIAL FSP vs a
+    # close/VWAP proxy. Surfaced in go_no_go so a GO can flag residual bias.
+    n_real_iv = sum(1 for t in trades if t.iv_source == IV_SOURCE_REAL)
+    n_official_fsp = sum(1 for t in trades if t.settlement_source == FSP_SOURCE_OFFICIAL)
+
     metrics = {
         "trades": trades,
         "n_cycles": n_cycles,
@@ -542,6 +791,10 @@ def run_backtest(
         "max_drawdown": max_drawdown,
         "net_pnl": net_pnl,
         "return_on_capital": return_on_capital,
+        "n_real_iv": n_real_iv,
+        "n_vix_proxy_iv": n_trades - n_real_iv,
+        "n_official_fsp": n_official_fsp,
+        "n_proxy_settlement": n_trades - n_official_fsp,
     }
     metrics["go_no_go"] = go_no_go(metrics, capital=capital)
     return metrics
@@ -625,13 +878,40 @@ def go_no_go(metrics: dict[str, Any], capital: float = 200_000.0) -> tuple[bool,
         f"sharpe={sharpe:.2f}, return_on_capital={metrics.get('return_on_capital', 0):.1%}"
     )
 
+    # ── Fidelity provenance disclaimer (fixes #3 + #4) ──────────────────────
+    # Does NOT change the GO/NO-GO verdict — it flags the residual proxy bias so
+    # a GO is read honestly. Direction: VIX-proxy IV is OPTIMISTIC in calm
+    # regimes; close-proxy settlement (vs NSE FSP) is AMBIGUOUS near-the-money.
+    n_real_iv = metrics.get("n_real_iv")
+    n_official_fsp = metrics.get("n_official_fsp")
+    fidelity_notes: list[str] = []
+    if n_real_iv is not None and n_trades > 0:
+        n_proxy_iv = metrics.get("n_vix_proxy_iv", n_trades - n_real_iv)
+        if n_proxy_iv > 0:
+            fidelity_notes.append(
+                f"IV: {n_real_iv}/{n_trades} real ATM, {n_proxy_iv} on VIX proxy "
+                "(proxy OPTIMISTIC in calm/contango — edge may be lower)"
+            )
+        else:
+            fidelity_notes.append(f"IV: all {n_trades} on REAL ATM IV")
+    if n_official_fsp is not None and n_trades > 0:
+        n_proxy_settle = metrics.get("n_proxy_settlement", n_trades - n_official_fsp)
+        if n_proxy_settle > 0:
+            fidelity_notes.append(
+                f"settle: {n_official_fsp}/{n_trades} NSE FSP, {n_proxy_settle} on "
+                "close/VWAP proxy (not FSP — near-the-money weeks may flip win/loss)"
+            )
+        else:
+            fidelity_notes.append(f"settle: all {n_trades} on NSE FSP")
+    fidelity = (" FIDELITY: " + "; ".join(fidelity_notes) + ".") if fidelity_notes else ""
+
     go = len(failures) == 0
     if go:
-        reason = f"GO — all criteria pass. {'; '.join(passes)}. {info}"
+        reason = f"GO — all criteria pass. {'; '.join(passes)}. {info}{fidelity}"
     else:
         reason = (
             f"NO-GO — {len(failures)} criterion/criteria failed: "
-            f"{'; '.join(failures)}. Passed: {'; '.join(passes) or 'none'}. {info}"
+            f"{'; '.join(failures)}. Passed: {'; '.join(passes) or 'none'}. {info}{fidelity}"
         )
 
     return go, reason
@@ -844,15 +1124,21 @@ def _cycles_from_db_weekly(
         )
         return []
 
-    # Build ISO-week → last trading day map.
-    # Iterate sorted dates; each date overwrites the previous in its ISO week,
-    # so the last assignment per week is the last trading day of that week.
-    wk: dict[tuple[int, int], date] = {}
+    # Build ISO-week → list of trading days, then snap each week to its real
+    # weekly-expiry weekday (Thu pre-cutover / Tue on/after, holiday-rolled) via
+    # snap_to_expiry_weekday — fidelity fix #1. This replaces the old "last
+    # trading day of the ISO week" heuristic (which floats to Fri on a full week
+    # and ignored the Thursday→Tuesday cutover).
+    wk_days: dict[tuple[int, int], list[date]] = {}
     for d in sorted(nifty_map):
         iso_year, iso_week, _ = d.isocalendar()
-        wk[(iso_year, iso_week)] = d
+        wk_days.setdefault((iso_year, iso_week), []).append(d)
 
-    bounds: list[date] = [wk[k] for k in sorted(wk)]
+    bounds: list[date] = []
+    for kk in sorted(wk_days):
+        b = snap_to_expiry_weekday(wk_days[kk])
+        if b is not None:
+            bounds.append(b)
 
     if len(bounds) < 2:
         logger.warning(

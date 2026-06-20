@@ -521,10 +521,14 @@ class TestSpanMarginNakedShort:
 class TestRunStrategyBacktest:
     """Uses 3 synthetic cycles with controlled gate outcomes.
 
-    rv=0.10, iv=0.15   → realized < 0.9 * 0.15 → SELL_PREMIUM
-    rv=0.20, iv=0.15   → realized > 0.15        → BUY_PREMIUM
-    rv=0.14, iv=0.15   → 0.14 > 0.135 and 0.14 < 0.15 → STAND_ASIDE
-                         (0.9*0.15=0.135; rv=0.14 > 0.135 → NOT SELL; rv<iv → NOT BUY → STAND)
+    Day-count fix #2: the gate rebases the √252 realized vol onto the calendar
+    (365) basis (× √(252/365) ≈ 0.8307) BEFORE comparing to the √365 implied
+    vol. All gate boundaries below are stated on the REBASED realized vol.
+    iv=0.15 → SELL when rebased_rv < 0.135, BUY when rebased_rv > 0.15.
+
+    rv=0.10 → rebased 0.0831 < 0.135               → SELL_PREMIUM
+    rv=0.20 → rebased 0.1661 > 0.15                → BUY_PREMIUM
+    rv=0.17 → rebased 0.1412 ∈ [0.135, 0.15]       → STAND_ASIDE
     """
 
     @staticmethod
@@ -544,7 +548,7 @@ class TestRunStrategyBacktest:
         return [
             self._make_cycle(rv=0.10, iv=0.15),   # SELL_PREMIUM
             self._make_cycle(rv=0.20, iv=0.15),   # BUY_PREMIUM
-            self._make_cycle(rv=0.14, iv=0.15),   # STAND_ASIDE
+            self._make_cycle(rv=0.17, iv=0.15),   # STAND_ASIDE
         ]
 
     def test_iron_condor_n_trades_one(self):
@@ -617,7 +621,7 @@ class TestRunStrategyBacktest:
         """Zero-trades result still carries the 'gate' key (JSON-archive safe)."""
         spec = FNO_STRATEGIES["iron_condor"]  # sell_premium
         cycles = [self._make_cycle(rv=0.20, iv=0.15),   # BUY_PREMIUM → skipped
-                  self._make_cycle(rv=0.14, iv=0.15)]   # STAND_ASIDE → skipped
+                  self._make_cycle(rv=0.17, iv=0.15)]   # STAND_ASIDE → skipped
         m = run_strategy_backtest(spec, cycles, k=0.9, gate="vol")
         assert m["n_trades"] == 0
         assert m["gate"] == "vol"
@@ -649,7 +653,7 @@ class TestRunStrategyBacktest:
         """All cycles gated out → n_trades=0 → return_on_margin=0."""
         spec = FNO_STRATEGIES["iron_condor"]
         # All cycles will be STAND_ASIDE
-        cycles = [self._make_cycle(rv=0.135, iv=0.15)]  # border: rv=0.135, k*iv=0.135 → not < → STAND
+        cycles = [self._make_cycle(rv=0.17, iv=0.15)]  # rebased 0.1412 ∈ [0.135,0.15] → STAND_ASIDE
         metrics = run_strategy_backtest(spec, cycles, k=0.9)
         assert metrics["return_on_margin"] == 0.0
 
