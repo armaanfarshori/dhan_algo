@@ -1,13 +1,28 @@
 # DhanAIBot — Trading Platform (agent instructions)
 **Repo:** `github.com/armaanfarshori/dhan_algo` (PRIVATE — never commit IPs, account IDs, tokens, chat IDs)
-**Last updated:** 2026-06-19
-**Current phase:** ENGINE LIVE (paper) · BACKFILL DONE · M2.5 CLEAN-DB BUILD RUNNING · S3 PIPELINE WIRED · GATE IN SHADOW
+**Last updated:** 2026-06-20
+**Current phase:** PIVOTED → **F&O-FOCUSED.** Equity/Kronos research CONCLUDED (no edge). Building the
+F&O **strategy-orchestration engine** + hardened scalper on the validated options edge. PAPER throughout.
 
-> **F&O research track (Phase 0, 2026-06-19):** separate effort on branch `feat/fno-data-foundation`
-> building a NIFTY index-options data foundation (futures/VIX/ATM-IV in TimescaleDB → vol-regime gate
-> → hedged-options backtest). Research-only, PAPER, no live order paths. See `docs/fno-handoff.md`;
-> schema lands in Alembic **009** (`009_fno_foundation.py`). New gate is `ml/fno_vol_gate.py` (NOT the
-> live equity `ml/kronos_gate.py`). Stops at backtest go/no-go before any strategy/live build.
+> **PIVOT (2026-06-20) — read this first.** The project is now **F&O-focused**. The 2026-06-20 backtest
+> sweep settled the equity question: **10 intraday strategies + ORB all LOSE** (OOS Sharpe −3 to −29,
+> none beats ORB; ORB itself loses), and the **Kronos gate does not rescue them** (zero-shot +0.61 OOS
+> is the only marginal positive; fine-tuning *hurt*: v2 −3.22, v1 −4.54). Results in
+> `s3://…/kronos/m3/`. The **validated edge is defined-risk options premium-selling, vol-gated**:
+> iron_condor (3.91% ROM GO), bull_put_spread (7.19% GO), credit_put_spread (2.70%), broken_wing_condor
+> (2.67%) — and the `ml/fno_vol_gate.py` (k≈0.9) gate **ADDS** edge on options (opposite of equity).
+>
+> **NEXT BUILD:** a regime-aware **Strategy Orchestration Engine** (`research/backtest/fno_orchestrator.py`)
+> that picks which GO strategy to deploy per cycle/index, vol-gated, defined-risk only — plus a hardened
+> options scalper. Full spec set on `main`: `research/backtest/orchestrator_specs/` (10) +
+> `strategies/scalper_specs/` (10). Multi-index (BANKNIFTY/FINNIFTY/MIDCPNIFTY/SENSEX/BANKEX) is
+> **data-blocked** — platform is NIFTY-only; expansion needs per-index Dhan ingestion (likely
+> forward-only). The scalper is **un-backtestable** (no intraday option data) → forward-paper validation.
+>
+> Edge is **PRELIMINARY** (VIX-as-weekly-IV proxy, close-not-FSP, expiry-only/tail-blind) → real-IV
+> forward paper-log is the truth test before any live talk. The dual-session (fno+finetune) split is
+> **RETIRED** — single session, single `main`. The live equity engine stays deployed (PAPER) but is no
+> longer the focus.
 
 ---
 
@@ -87,7 +102,10 @@ trusted-machine step.
 
 ---
 
-## ⚡ 2026-06-17 SESSION STATE (read this first)
+## ⚡ 2026-06-17 SESSION STATE (SUPERSEDED — see the 2026-06-20 F&O PIVOT note at the top)
+
+> The block below is historical (backfill/M2.5/Kronos era). It's kept for context but the project has
+> since pivoted F&O-focused; M2.5/backfill/Kronos are all DONE and the equity/Kronos edge was ruled out.
 
 ```
 BACKFILL COMPLETE (NSE_EQ 9470/9470). The */15 backfill watchdog cron is RETIRED;
@@ -159,12 +177,16 @@ disturbed). Highlights (see memory `terraform-state-and-apply`, `credential-scru
 | M6 — Auth layer | ❌ Schema only | `/api/mode` POST is read-only + live toggle env-gated as mitigation |
 | M7 — Readonly validation | ❌ | Needs M3 |
 | M8 — Tiny live | ❌ | Needs M7; Elastic IP whitelisted at Dhan 2026-06-12 (7-day change lock) |
-| Kronos zero-shot + shadow gate | ✅ Done | Every verdict persisted (signals, strategy='orb_gate') for calibration |
-| Kronos fine-tune (base) | ❌ After M2.5 | Spot GPU, trains on clean Parquet, checkpoint → S3 |
+| Kronos zero-shot + shadow gate | ✅ Done | OOS +0.61 on ORB — marginal/fragile; the only positive equity config |
+| Kronos fine-tune (base) | ✅ Done — NO EDGE | v2/v1 fine-tuned gate HURT (OOS −3.22/−4.54); equity-Kronos ruled out |
+| M3 three-way + strategy sweep | ✅ Done — NO EQUITY EDGE | 10 strategies + ORB all lose; results in `s3://…/kronos/m3/` |
+| **F&O orchestration engine (NEW FOCUS)** | ⏳ Building | regime router → vol-gated GO premium-sellers; specs in `research/backtest/orchestrator_specs/` |
+| **F&O scalper hardening** | ⏳ Planned | honest positive-EV + daily governor; forward-paper validation (un-backtestable) |
+| Multi-index expansion | ❌ Data-blocked | NIFTY-only today; needs per-index Dhan ingestion (likely forward-only) |
 
-**Critical path: backfill → M2.5 clean DB → M3 three-way backtest → live decision.**
-Post-M3 research queue: scheduled-event calendar filter → Kronos small-vs-base shadow A/B.
-News/NLP deprioritized (Kronos is OHLCV-only; honest backtests of news are impractical).
+**Critical path (NEW): F&O orchestrator MVP (NIFTY) → backtest vs single-strategy → real-IV forward
+paper-log → (user-gated) defined-risk small-live.** Equity/Kronos path is CONCLUDED (no edge).
+The backfill→M2.5→M3 equity pipeline is complete and its verdict (no equity intraday edge) is final.
 
 ---
 
