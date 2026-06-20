@@ -1416,7 +1416,20 @@ def run_strategy_backtest(
 
         # ── Build legs ───────────────────────────────────────────────────
         atm_strike = _round_to_step(spot, step)
-        legs = spec.build(spot, atm_strike, step, dte, straddle_iv, merged_params)
+        # Per-cycle skew bridge: if the cycle carries a real per-strike IV map
+        # (option_chain_snapshot, projected onto the cycle), expose it to the
+        # builder under the well-known "per_strike_iv" key. ``merged_params`` is
+        # GLOBAL (one dict for the whole run), so this is the only way a builder
+        # can see a PER-CYCLE quantity. Builders that ignore the key (the
+        # symmetric strategies) are unaffected; skew-aware builders (RAVEN) use it
+        # to place fixed-delta short strikes on the real per-strike IV. A fresh
+        # dict per cycle avoids leaking one cycle's map into the next.
+        cycle_per_strike_iv = cycle.get("per_strike_iv")
+        if cycle_per_strike_iv is not None:
+            build_params = {**merged_params, "per_strike_iv": cycle_per_strike_iv}
+        else:
+            build_params = merged_params
+        legs = spec.build(spot, atm_strike, step, dte, straddle_iv, build_params)
 
         # ── Price + slippage ─────────────────────────────────────────────
         mids = [price_leg_hist(leg, spot, straddle_iv, dte) for leg in legs]
