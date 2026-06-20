@@ -327,6 +327,15 @@ def _make_main_patches(*, token: Any = "tok123", with_instruments: bool = False)
     """Return a context manager that patches all deferred imports used by main().
 
     The returned mapping exposes the individual mocks so tests can assert on them.
+
+    NOTE: this helper short-circuits ``asyncio.run`` (``_fake_asyncio_run`` just
+    closes the coroutine and returns a stub summary), so the async ``_run`` body
+    inside ``main()`` is NOT executed for tests that use this helper — those tests
+    only cover the synchronous sections of ``main()`` (arg parsing, instrument
+    sync, paper-log). The real async body (token resolution → DhanClient →
+    run_eod_collection) is exercised by ``test_main_resolves_token_inside_run``,
+    which deliberately does NOT use this helper and lets real ``asyncio.run`` drive
+    ``_run``.
     """
     import contextlib
     import sys
@@ -343,7 +352,11 @@ def _make_main_patches(*, token: Any = "tok123", with_instruments: bool = False)
 
         mock_get_config = MagicMock(return_value=mock_cfg)
         mock_init_db = MagicMock()
+        # main() now resolves the token inside the async _run via
+        # fb.resolve_access_token(); patch that (read_current_token is its first
+        # source). mock_token stands in for the cached read.
         mock_token = MagicMock(return_value=token)
+        mock_resolve = AsyncMock(return_value=token)
         mock_client_cls = MagicMock()
         mock_client_instance = MagicMock()
         mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client_instance)
@@ -389,6 +402,7 @@ def _make_main_patches(*, token: Any = "tok123", with_instruments: bool = False)
                     "get_config": mock_get_config,
                     "init_db": mock_init_db,
                     "read_current_token": mock_token,
+                    "resolve_access_token": mock_resolve,
                     "DhanClient": mock_client_cls,
                     "compute_index_realized_vol": mock_rv_fn,
                     "asyncio_run": mock_asyncio_run,
@@ -426,13 +440,57 @@ def test_main_runs_paper_log():
         mocks["record_paper_entry"].assert_called_once()
 
 
-def test_main_raises_systemexit_when_no_token():
-    """When read_current_token() returns None, main() must raise SystemExit
-    and never construct a DhanClient or call asyncio.run."""
-    with _make_main_patches(token=None, with_instruments=False) as mocks:
-        import pytest
+def test_main_resolves_token_inside_run():
+    """main() must build DhanClient with the token-MANAGER token (resolved inside
+    the async _run via fb.resolve_access_token), NEVER cfg.dhan_access_token.
+
+    This test does NOT stub asyncio.run — it lets the real event loop drive the
+    real _run() coroutine, so it actually catches main() passing the static env
+    token. resolve_access_token is patched to a sentinel ("MANAGED"); the static
+    cfg.dhan_access_token is a distinct sentinel ("STATIC-EXPIRED") that must be
+    absent from the DhanClient construction call.
+    """
+    import sys
+
+    mock_cfg = MagicMock()
+    mock_cfg.db_url = "postgresql://fake/db"
+    mock_cfg.dhan_client_id = "CLIENT1"
+    mock_cfg.dhan_access_token = "STATIC-EXPIRED"
+
+    mock_client_cls = MagicMock()
+    mock_client_instance = MagicMock()
+    mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client_instance)
+    mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_resolve = AsyncMock(return_value="MANAGED")
+    mock_run_eod = AsyncMock(return_value={
+        "index_bars": 1, "vix_bars": 1, "expiries": 2,
+        "snapshots": 1, "chain_rows": 10, "atm": 1, "errors": [],
+    })
+
+    with (
+        patch.object(sys, "argv", ["fno_collector"]),
+        patch("core.fno_collector.compute_index_realized_vol", MagicMock(return_value=0)),
+        patch.object(fb, "resolve_access_token", mock_resolve),
+        patch("core.fno_collector.run_eod_collection", mock_run_eod),
+        patch("core.fno_paper.record_paper_entry",
+              MagicMock(return_value={"recorded": False})),
+        patch("core.fno_paper.resolve_paper_trades", MagicMock(return_value=0)),
+        patch.dict("sys.modules", {
+            "config": MagicMock(get_config=MagicMock(return_value=mock_cfg)),
+            "db": MagicMock(init_db=MagicMock()),
+            "core.client": MagicMock(DhanClient=mock_client_cls),
+        }),
+    ):
         import core.fno_collector as _col
-        with pytest.raises(SystemExit):
-            _col.main()
-        mocks["DhanClient"].assert_not_called()
-        mocks["asyncio_run"].assert_not_called()
+        _col.main()
+
+    # The real async body ran: token was resolved and the collection executed.
+    mock_resolve.assert_awaited_once()
+    mock_run_eod.assert_awaited_once()
+
+    # DhanClient built with the MANAGED token, never the static env token.
+    pos, kw = mock_client_cls.call_args
+    passed = list(pos) + list(kw.values())
+    assert "MANAGED" in passed
+    assert "STATIC-EXPIRED" not in passed
