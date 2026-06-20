@@ -15,15 +15,22 @@ the strategy never assumes an order it requested was actually executed
 """
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, time as dtime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
+
+from core.sessions import EQUITY
 
 logger = logging.getLogger("dhan.strategy.orb")
 
 IST = ZoneInfo("Asia/Kolkata")
-MARKET_OPEN = dtime(9, 15)
-MARKET_CLOSE = dtime(15, 30)
+# Equity trading hours — sourced from the EQUITY session profile (core/sessions.py)
+# so the platform has a single source of truth for session hours. The names and
+# values (09:15 / 15:30) are preserved verbatim: ~10 sibling strategies import
+# MARKET_OPEN/MARKET_CLOSE from this module, and equity behaviour must stay
+# byte-identical. The MCX profile lives in the same module for a future runner.
+MARKET_OPEN = EQUITY.open_time
+MARKET_CLOSE = EQUITY.close_time
 # A tick stamped further than this ahead of the wall clock is implausible —
 # we ignore it rather than trust it to date a session or widen the OR.
 MAX_FUTURE_SKEW = timedelta(minutes=2)

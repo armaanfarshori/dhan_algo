@@ -16,20 +16,25 @@ strategy only mirrors what it is told via notify_*.
 """
 import asyncio
 import logging
-from datetime import datetime, time as dtime
+from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+from core.sessions import EQUITY, SessionClock
 from engine.types import OrderIntent
 from strategies.orb import ORB, Decision
 
 logger = logging.getLogger("dhan.engine.runner")
 IST = ZoneInfo("Asia/Kolkata")
 
-# Poll only inside the trading window (with pre/post margin) — zero API
-# calls outside 9:00–15:35 IST weekdays.
-_WINDOW_OPEN = dtime(9, 0)
-_WINDOW_CLOSE = dtime(15, 35)
+# Poll only inside the trading window (with pre/post margin) — zero API calls
+# outside 9:00–15:35 IST weekdays. The window now comes from the EQUITY session
+# profile (core/sessions.py) so a future MCX runner can swap the profile rather
+# than fork this gate; the equity values (09:00–15:35) are unchanged.
+_EQUITY_CLOCK = SessionClock(EQUITY)
+# Back-compat aliases (some tools reference these names directly).
+_WINDOW_OPEN = EQUITY.poll_open
+_WINDOW_CLOSE = EQUITY.poll_close
 _FEED_FRESH_S = 30   # use WS tick if younger than this, else REST fallback
 
 
@@ -83,7 +88,10 @@ class StrategyRunner:
 
     @staticmethod
     def _in_window(now: datetime) -> bool:
-        return now.weekday() < 5 and _WINDOW_OPEN <= now.time() <= _WINDOW_CLOSE
+        # Equity poll-window gate, sourced from the EQUITY session profile.
+        # Identical semantics to the legacy check (Mon–Fri, 09:00–15:35 IST,
+        # both ends inclusive).
+        return _EQUITY_CLOCK.in_poll_window(now)
 
     # ── One poll ──────────────────────────────────────────────────────────────
 
