@@ -273,6 +273,62 @@ class RegimeRoutingPolicy:
             # downtrend → keep the default put-wide skew (skew>1 → wider put wing)
         return params
 
+    def _candidates(
+        self, signals: RegimeSignals
+    ) -> tuple[list[tuple[str, dict[str, Any], str]], str]:
+        """Build the per-regime ORDERED candidate list (spec 02 §3, R4–R7).
+
+        Returns ``(candidates, regime_tag)`` where each candidate is
+        ``(strategy_name, builder_params, reason)`` in fall-through order — the
+        caller returns the first that is BOTH allowed AND enabled, else
+        STAND_ASIDE. A strong DOWNTREND yields ``[iron_condor]`` ONLY (never a
+        bullish spread into weakness → stand aside if disabled).
+        """
+        p = self.params
+        s = signals
+        trend = s.trend  # None in a short-history regime → neutral default
+        strength = s.trend_strength
+
+        # R4 — STRONG DOWNTREND → iron_condor only (never a bullish put spread).
+        if trend is not None and trend < 0 and strength >= p.trend_strong:
+            return (
+                [("iron_condor", dict(p.iron_condor_params), "R4/strong-downtrend->iron_condor")],
+                "R4/strong-downtrend",
+            )
+
+        # R5 — CLEAR UPTREND → (credit_put if rich IV else bull_put) → broken_wing → iron_condor.
+        if trend is not None and trend > 0 and strength >= p.trend_strong:
+            cands: list[tuple[str, dict[str, Any], str]] = []
+            if s.iv_rank is not None and s.iv_rank >= p.iv_rank_aggressive:
+                cands.append(("credit_put_spread", dict(p.credit_put_params),
+                              "R5/uptrend+rich-iv->credit_put_spread"))
+            else:
+                cands.append(("bull_put_spread", dict(p.bull_put_params),
+                              "R5/uptrend->bull_put_spread"))
+            cands.append(("broken_wing_condor", self._broken_wing_params(trend),
+                          "R5/uptrend(spread disabled)->broken_wing_condor"))
+            cands.append(("iron_condor", dict(p.iron_condor_params),
+                          "R5/uptrend(spreads disabled)->iron_condor"))
+            return (cands, "R5/strong-uptrend")
+
+        # R6 — NEUTRAL-WITH-SKEW → broken_wing_condor (skew toward trend) → iron_condor.
+        if trend is not None and trend != 0 and p.trend_skew <= strength < p.trend_strong:
+            return (
+                [
+                    ("broken_wing_condor", self._broken_wing_params(trend),
+                     "R6/neutral-skew->broken_wing_condor"),
+                    ("iron_condor", dict(p.iron_condor_params),
+                     "R6/neutral-skew(broken_wing disabled)->iron_condor"),
+                ],
+                "R6/neutral-skew",
+            )
+
+        # R7 — NEUTRAL DEFAULT → iron_condor (the workhorse + catch-all).
+        return (
+            [("iron_condor", dict(p.iron_condor_params), "R7/neutral-default->iron_condor")],
+            "R7/neutral-default",
+        )
+
     def select(
         self, signals: RegimeSignals, allowed: frozenset[str]
     ) -> tuple[Optional[str], Optional[dict[str, Any]], str]:
@@ -297,42 +353,17 @@ class RegimeRoutingPolicy:
             return (*aside[:2], f"R3/iv={s.implied_vol} < {p.iv_floor}->STAND_ASIDE")
 
         # --- gate GO, DTE in-window, edge & IV clear floors ---
-        trend = s.trend  # None in a short-history regime → falls through to the neutral default
-        strength = s.trend_strength
-
-        # R4 — STRONG DOWNTREND → iron_condor (never a bullish put spread)
-        if trend is not None and trend < 0 and strength >= p.trend_strong:
-            ic = self._strat("iron_condor", allowed)
-            if ic:
-                return (ic, dict(p.iron_condor_params), "R4/strong-downtrend->iron_condor")
-            # iron_condor disabled — do NOT sell a bullish spread into weakness; stand aside.
-            return (*aside[:2], "R4/strong-downtrend, iron_condor disabled->STAND_ASIDE")
-
-        # R5 — CLEAR UPTREND → bull_put (or credit_put when IV rank is rich)
-        if trend is not None and trend > 0 and strength >= p.trend_strong:
-            if s.iv_rank is not None and s.iv_rank >= p.iv_rank_aggressive:
-                cps = self._strat("credit_put_spread", allowed)
-                if cps:
-                    return (cps, dict(p.credit_put_params),
-                            "R5/uptrend+rich-iv->credit_put_spread")
-            bps = self._strat("bull_put_spread", allowed)
-            if bps:
-                return (bps, dict(p.bull_put_params), "R5/uptrend->bull_put_spread")
-            # R5's strategies disabled — FALL THROUGH to R6/R7 (do not jump straight to R7).
-
-        # R6 — NEUTRAL-WITH-SKEW → broken_wing_condor (skew toward the trend)
-        if trend is not None and trend != 0 and p.trend_skew <= strength < p.trend_strong:
-            bwc = self._strat("broken_wing_condor", allowed)
-            if bwc:
-                return (bwc, self._broken_wing_params(trend),
-                        "R6/neutral-skew->broken_wing_condor")
-            # broken_wing disabled — fall through to the neutral default.
-
-        # R7 — NEUTRAL DEFAULT → iron_condor (the workhorse + catch-all)
-        ic = self._strat("iron_condor", allowed)
-        if ic:
-            return (ic, dict(p.iron_condor_params), "R7/neutral-default->iron_condor")
-        return (*aside[:2], "R7/no enabled strategy->STAND_ASIDE")
+        # Ordered candidate fall-through (spec 02 §3/§5.4): return the FIRST candidate
+        # that is BOTH allowed AND enabled, else STAND_ASIDE. This is what makes a
+        # disabled strategy fall through to the next within the SAME regime (e.g. a
+        # strong uptrend with bull_put/credit_put disabled → broken_wing_condor, NOT a
+        # jump to the neutral iron_condor; a strong downtrend's [iron_condor]-only list
+        # → STAND_ASIDE if disabled, never a bullish spread).
+        candidates, regime_tag = self._candidates(s)
+        for name, params, reason in candidates:
+            if self._strat(name, allowed):
+                return (name, params, reason)
+        return (*aside[:2], f"{regime_tag}/no enabled candidate->STAND_ASIDE")
 
 
 class VrpDefaultPolicy:
@@ -377,11 +408,13 @@ def trend_slope(closes: list[float], *, ma_window: int = TREND_MA_WINDOW) -> Opt
     """Normalised 20DMA slope (estimator B: ``(spot − SMA20) / SMA20``), PIT-safe (spec 01 §4).
 
     ``closes`` must be NIFTY closes ≤ entry_date (inclusive, no future bars); the
-    last element is today's spot. Returns ``None`` when fewer than ``ma_window``
-    closes exist (fail-safe). Positive → spot above the 20DMA (uptrend).
+    last element is today's spot. Returns ``None`` when fewer than ``ma_window + 1``
+    closes exist (fail-safe) — estimator B needs today's spot to be DISTINCT from
+    the ``ma_window``-day MA it is compared against, so a full window PLUS the
+    current bar is required. Positive → spot above the 20DMA (uptrend).
     """
     vals = [c for c in closes if c is not None and c > 0]
-    if len(vals) < ma_window:
+    if len(vals) < ma_window + 1:
         return None
     ma = mean(vals[-ma_window:])
     if ma <= 0:
@@ -396,14 +429,16 @@ def regime_from_cycle(
     cycle: dict[str, Any],
     *,
     k: float = DEFAULT_K,
-    iv_rank: Optional[float] = None,
+    iv_rank_val: Optional[float] = None,
     trend: Optional[float] = None,
 ) -> RegimeSignals:
     """Build ``RegimeSignals`` from a raw cycle dict (the ``cycles_from_db``
     shape). Calls the real ``gate_decision`` + ``implied_move`` — the regime rule
-    is consumed, never re-derived. ``iv_rank`` / ``trend`` are injected by the
+    is consumed, never re-derived. ``iv_rank_val`` / ``trend`` are injected by the
     caller (the sidecar computes them from trailing windows; the orchestrator
-    stays single-cycle-pure). Reads ONLY entry-date observables — never ``expiry_spot``.
+    stays single-cycle-pure). The param is named ``iv_rank_val`` to avoid shadowing
+    the module-level ``iv_rank()`` helper (L-SHADOW). Reads ONLY entry-date
+    observables — never ``expiry_spot``.
 
     Data quality: a missing / non-positive ``realized_vol_20d`` or ``straddle_iv``
     is kept as ``None`` (never coerced to a fabricated 0.0 that would masquerade as a
@@ -437,7 +472,7 @@ def regime_from_cycle(
         iv_ratio=iv_ratio,
         gate_label=gate_label,
         implied_move=float(im) if im else 0.0,
-        iv_rank=iv_rank,
+        iv_rank=iv_rank_val,
         trend=trend,
     )
 
@@ -523,7 +558,9 @@ class RegimeSidecar:
         if entry is None or not self._nifty_closes:
             return (None, None)
         closes = [c for d, c in self._nifty_closes if d <= entry]
-        iv_hist = [v for d, v in self._vix_iv if d <= entry]
+        # Cap the IV-rank history to the trailing IV_RANK_WINDOW (~1y) so the
+        # percentile is a ROLLING rank, not an ever-growing all-time one (M-IVW).
+        iv_hist = [v for d, v in self._vix_iv if d <= entry][-IV_RANK_WINDOW:]
         iv_today = cycle.get("straddle_iv")
         rank = (
             iv_rank(float(iv_today), iv_hist)
@@ -661,7 +698,7 @@ class FnoOrchestrator:
             rank, trend = (None, None)
             if self.sidecar is not None:
                 rank, trend = self.sidecar.signals_for(cycle)
-            signals = regime_from_cycle(cycle, k=self.k, iv_rank=rank, trend=trend)
+            signals = regime_from_cycle(cycle, k=self.k, iv_rank_val=rank, trend=trend)
             decision = self.decide(signals)
             decisions.append(decision)
             if decision.stand_aside:
@@ -677,9 +714,10 @@ class FnoOrchestrator:
 
         # Sort chronologically before any IS/OOS split (mirrors the engine).
         chosen_trades.sort(key=lambda t: t.entry_date)
-        metrics = self._aggregate(chosen_trades, n_cycles=len(cycles))
-
         n_aside = sum(1 for d in decisions if d.stand_aside)
+        n_traded = len(decisions) - n_aside
+        metrics = self._aggregate(chosen_trades, n_cycles=len(cycles), n_traded=n_traded)
+
         return OrchestratorResult(
             index=self.index.symbol,
             n_cycles=len(cycles),
@@ -692,17 +730,22 @@ class FnoOrchestrator:
         )
 
     # ---- §8 aggregation — reuse engine helpers, reimplement nothing -------
-    def _aggregate(self, trades: list[Any], *, n_cycles: int) -> dict[str, Any]:
+    def _aggregate(
+        self, trades: list[Any], *, n_cycles: int, n_traded: int
+    ) -> dict[str, Any]:
         """Portfolio rollup using the SAME math ``run_strategy_backtest`` uses —
         ``_sharpe_from_pnls`` / ``_max_drawdown`` / ``go_no_go`` are imported,
         never copied. ROM = Σnet_pnl / Σspan; ROM_oos = the OOS-slice ROM (same
         70/30 chronological split as the engine), which gates the verdict.
 
-        ``participation_rate`` = n_traded / n_cycles and ``rom_deployment_norm``
-        (net_pnl / (Σspan / participation_rate)) make the stand-aside / idle-capital
-        cost explicit so the comparison vs an always-deployed single is honest
+        ``participation_rate`` = n_traded / n_cycles — where ``n_traded`` is the
+        count of DEPLOYED cycles (decisions that were not stand-aside), NOT the
+        number of filled trades (M-PART). ``rom_deployment_norm`` (net_pnl /
+        (Σspan / participation_rate)) makes the stand-aside / idle-capital cost
+        explicit so the comparison vs an always-deployed single is honest
         (spec-flagged M4)."""
         n_trades = len(trades)
+        participation_rate = (n_traded / n_cycles) if n_cycles > 0 else 0.0
         if n_trades == 0:
             metrics: dict[str, Any] = {
                 "strategy": "ORCHESTRATED",
@@ -710,7 +753,7 @@ class FnoOrchestrator:
                 "trades": [],
                 "n_cycles": n_cycles,
                 "n_trades": 0,
-                "participation_rate": 0.0,
+                "participation_rate": participation_rate,
                 "win_rate": 0.0,
                 "profit_factor": 0.0,
                 "sharpe": 0.0,
@@ -752,7 +795,6 @@ class FnoOrchestrator:
 
         rom_oos = _rom_oos_from_trades(trades)
 
-        participation_rate = (n_trades / n_cycles) if n_cycles > 0 else 0.0
         # Deployment-normalised ROM: penalises idle/stand-aside capital so an
         # orchestrator that trades few cycles cannot inflate ROM vs always-deployed.
         rom_deployment_norm = (
@@ -926,6 +968,12 @@ def _print_comparison(
         f"\npicks: {picks or '(none)'}  aside:{orch_result.n_stand_aside}  "
         f"traded:{orch_result.n_traded}  "
         f"participation:{orch.get('participation_rate', 0.0):.1%}"
+    )
+    # Surface the deployment-normalised ROM (idle/stand-aside-penalised) so the
+    # always-deployed-single comparison is honest (M-NORM).
+    print(
+        f"rom_deployment_norm:{_fmt_pct(orch.get('rom_deployment_norm', 0.0))}"
+        f"  (vs ROM {_fmt_pct(orch.get('return_on_margin', 0.0))} — idle-capital penalised)"
     )
 
     # best_single summary line (clearly labelled — NOT a duplicate table row).
@@ -1122,7 +1170,6 @@ def main() -> None:  # pragma: no cover
 
     gate_modes = ["vol", "none"] if args.gate == "both" else [args.gate]
     comparisons: dict[str, dict[str, Any]] = {}
-    summary_lines: list[str] = []
     for gm in gate_modes:
         cmp = run_comparison(
             cycles, index=index, k=args.k, capital=args.capital, slip_pct=args.slip_pct,
@@ -1130,15 +1177,31 @@ def main() -> None:  # pragma: no cover
             sidecar=sidecar,
         )
         comparisons[gm] = cmp
-        _print_comparison(cmp, index=index, k=args.k, capital=args.capital, policy_id=args.policy)
-        print()
 
-    _print_verdict(comparisons.get("vol", comparisons[gate_modes[0]]), comparisons.get("none"))
+    # Render the comparison + verdict ONCE, capturing the exact stdout text into a
+    # buffer so the S3 summary.txt is the REAL report, not a "(see stdout)" stub
+    # (L-SUM). Tee: print to the console AND keep the lines for archival.
+    import contextlib
+    import io
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        for gm in gate_modes:
+            _print_comparison(
+                comparisons[gm], index=index, k=args.k, capital=args.capital,
+                policy_id=args.policy,
+            )
+            print()
+        _print_verdict(
+            comparisons.get("vol", comparisons[gate_modes[0]]), comparisons.get("none")
+        )
+    summary_text = buf.getvalue()
+    print(summary_text, end="")
 
     if args.upload_s3:
         archive_s3(
             comparisons, index=index, policy_id=args.policy,
-            args=vars(args), summary_text="\n".join(summary_lines) or "(see stdout)",
+            args=vars(args), summary_text=summary_text or "(see stdout)",
         )
 
 

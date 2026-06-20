@@ -221,12 +221,36 @@ class TestRoutingPolicy:
         assert name == "iron_condor"
 
     def test_allowed_strategies_fall_through_via_allowed_set(self):
-        # bull_put EXCLUDED from allowed + strong uptrend → falls through to iron_condor (R7).
+        # bull_put EXCLUDED from allowed + strong uptrend → ordered candidate fall-through
+        # picks the NEXT enabled+allowed candidate in the strong-up list
+        # ([bull_put/credit_put, broken_wing_condor, iron_condor]) → broken_wing_condor,
+        # NOT a jump to the neutral iron_condor (H-R56).
         pol = RegimeRoutingPolicy(RoutingParams())
         allowed = frozenset({"iron_condor", "credit_put_spread", "broken_wing_condor"})
-        # strong uptrend, low iv_rank → would be bull_put, but it's not allowed → R7 condor.
+        # strong uptrend, low iv_rank → would be bull_put, but it's not allowed →
+        # next candidate broken_wing_condor (allowed) wins.
         name, _, _ = pol.select(_signals(trend=0.9, iv_rank=0.1), allowed)
-        assert name == "iron_condor"
+        assert name == "broken_wing_condor"
+
+    def test_r5_strong_uptrend_bullput_disabled_falls_to_broken_wing(self):
+        # H-R56 GUARD: strong uptrend, bull_put AND credit_put disabled → ordered
+        # fall-through inside the SAME (strong-up) regime → broken_wing_condor,
+        # NOT iron_condor (the old bug jumped straight past R6 to R7).
+        pol = RegimeRoutingPolicy(
+            RoutingParams(enabled=frozenset({"iron_condor", "broken_wing_condor"}))
+        )
+        name, _, _ = pol.select(_signals(trend=0.9), DEFAULT_ALLOWED)
+        assert name == "broken_wing_condor"
+
+    def test_r4_strong_downtrend_iron_condor_disabled_stands_aside(self):
+        # H-R56 / M-T4 GUARD: strong downtrend's candidate list is [iron_condor] ONLY.
+        # iron_condor disabled → STAND_ASIDE, NEVER a bullish spread into weakness.
+        pol = RegimeRoutingPolicy(
+            RoutingParams(enabled=frozenset({"bull_put_spread", "credit_put_spread",
+                                             "broken_wing_condor"}))
+        )
+        name, _, _ = pol.select(_signals(trend=-0.9), DEFAULT_ALLOWED)
+        assert name is None
 
     def test_vrp_default_policy(self):
         pol = VrpDefaultPolicy()
