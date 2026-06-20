@@ -5,16 +5,28 @@ three signal-helper cases.
 Tests are pure: no DB, no network.  Premiums are supplied by the test
 (representing the held contract's LTP).
 
-IMPORTANT: The future-skew guard rejects ticks stamped > 2 min ahead of
-``datetime.now(IST)``.  Unit tests therefore use **wall-clock-relative**
-timestamps (``NOW + offset``) so that all ticks pass the guard naturally.
-The only exception is test_future_skew_guard (test 15), which deliberately
-supplies a +5-min future tick to assert the guard fires.
+DATE-DETERMINISM (ci-ist-date-trap)
+-----------------------------------
+Every tick/now in these tests is built from a single FIXED past trading-day
+base — Friday 2024-06-21 @ 11:00 IST — NOT the wall clock.  This makes the
+suite independent of the real date and time-of-day:
+
+* The scalper has no weekday/trading-day guard; the only wall-clock coupling
+  is the future-skew guard (``on_tick`` rejects ticks stamped > 2 min ahead of
+  ``datetime.now(IST)``).  A FIXED PAST base is never in the future, so the
+  guard passes on every run — weekday, weekend, before 09:15, after 15:30, and
+  on the UTC CI runner alike.  Earlier the base pinned today's date @ 11:00, so
+  any run before ~10:58 wall-clock (every weekend dawn, every UTC CI run that
+  happened to start in that window) tripped the skew guard and 11 tests failed.
+
+* The only deliberate exception is test_future_skew_guard (test 15): it builds
+  a genuinely-future tick as ``datetime.now(IST) + 5 min`` (wall-clock-relative)
+  specifically to assert the guard fires.  That is the one place a real-clock
+  read is correct, and its other assertions are pinned to the fixed base.
 
 For tests that inject tranches directly into ``_tranches`` and set
-``_session_date`` manually (to avoid going through on_tick warm-up), the
-session_date is set to today's date so no session-reset is triggered by
-on_tick.
+``_session_date`` via ``_inject_session`` (to bypass on_tick warm-up), the
+session_date is set to the fixed base's date so no session-reset is triggered.
 """
 
 from __future__ import annotations
@@ -33,6 +45,15 @@ from strategies.options_scalper import (
 IST = ZoneInfo("Asia/Kolkata")
 LOT = 65
 
+# Fixed trading-day base: Friday 2024-06-21, 11:00 IST (mid-session, weekday).
+# A constant datetime SAFELY IN THE PAST — never the wall clock — so the
+# future-skew guard in on_tick (which compares to the REAL datetime.now(IST))
+# always sees a non-future tick and passes, regardless of the day/time the suite
+# runs (ci-ist-date-trap).  The year is kept well in the past (not the current
+# year) so the base can never coincide with "today, but earlier than 11:00",
+# which would make the base momentarily future and re-trip the guard.
+FIXED_BASE = datetime(2024, 6, 21, 11, 0, 0, tzinfo=IST)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -40,15 +61,19 @@ LOT = 65
 
 
 def _now() -> datetime:
-    """Fixed mid-session IST base (today @ 11:00), NOT the wall clock.
+    """Fixed mid-session IST base — Friday 2024-06-21 @ 11:00 IST, NOT the wall clock.
 
-    Using datetime.now(IST) directly made these tests pass only during market
-    hours and fail before 09:15 / after the 15:25 EOD square-off (and on the UTC
-    CI runner outside that window) — the IST-time trap. Pinning the time to 11:00
-    keeps every tick mid-session and deterministic; today's date is retained so
-    _inject_session's session_date still matches on_tick's now.date().
+    Pinning to a constant PAST weekday makes the suite fully date/time-independent:
+    the only wall-clock coupling in the scalper is on_tick's future-skew guard
+    (rejects ticks > 2 min ahead of datetime.now(IST)).  A fixed past base is never
+    in the future, so every tick passes the guard whether the suite runs on a
+    weekday, a weekend, before 09:15, after 15:30, or on the UTC CI runner.
+
+    Previously this returned ``datetime.now(IST).replace(hour=11, ...)`` — which
+    keeps TODAY's date, so any run before ~10:58 wall-clock (every weekend dawn,
+    UTC CI runs in that window) stamped ticks in the future and tripped the guard.
     """
-    return datetime.now(IST).replace(hour=11, minute=0, second=0, microsecond=0)
+    return FIXED_BASE
 
 
 def _t(offset_minutes: float) -> datetime:
