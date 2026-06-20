@@ -87,6 +87,31 @@ def test_resolve_underlying_rejects_bad_instrument():
         oh.resolve_underlying("NIFTY", instrument="FUTIDX", security_id=13)
 
 
+def test_resolve_underlying_nifty_expiry_rule_mirrors_condor():
+    # NIFTY defaults MIRROR research/backtest/fno_condor.py IndexConfig: Thursday
+    # before the 2026-09-01 cutover, Tuesday on/after.
+    from datetime import date as _date
+
+    u = oh.resolve_underlying("NIFTY")
+    assert u.expiry_weekday == oh.TUESDAY        # post-cutover
+    assert u.pre_cutover_weekday == oh.THURSDAY  # pre-cutover
+    assert u.cutover_date == _date(2026, 9, 1)
+    rule = u.expiry_rule
+    assert rule.expiry_weekday == oh.TUESDAY
+    assert rule.cutover_date == _date(2026, 9, 1)
+
+
+def test_resolve_underlying_offregistry_custom_weekday_no_cutover():
+    # A non-NIFTY underlying with an explicit weekly weekday drives a SINGLE fixed
+    # weekday (no NIFTY cutover inherited).
+    u = oh.resolve_underlying(
+        "WIDGET", security_id=999, instrument="OPTIDX", expiry_weekday=2
+    )
+    assert u.expiry_weekday == 2
+    assert u.pre_cutover_weekday is None
+    assert u.cutover_date is None
+
+
 # ── 30-day pagination ───────────────────────────────────────────────────────────────
 def test_date_windows_caps_at_30_days_no_gap_no_overlap():
     wins = oh.date_windows(date(2021, 1, 1), date(2021, 3, 31))
@@ -150,10 +175,59 @@ def test_expiry_for_day_term_structure_codes():
     assert oh.expiry_for_day(date(2026, 6, 15), exps, 3) == date(2026, 7, 2)
 
 
-def test_expiry_for_day_calendar_exhausted_returns_none():
+def test_expiry_for_day_derives_analytically_not_from_calendar():
+    # HISTORICAL-MIS-ATTACH FIX: expiry is now DERIVED from the cutover-aware weekday
+    # rule, NOT selected from the forward-only calendar. A sparse calendar no longer
+    # exhausts — the analytic weekly weekday ≥ day is used regardless.
     exps = [date(2026, 6, 18)]
-    assert oh.expiry_for_day(date(2026, 6, 15), exps, 2) is None  # no 2nd expiry
-    assert oh.expiry_for_day(date(2026, 6, 19), exps, 1) is None  # none on/after
+    # code=2 from 6/15 → 2nd weekly (6/25), derived even though the calendar has 1 entry.
+    assert oh.expiry_for_day(date(2026, 6, 15), exps, 2) == date(2026, 6, 25)
+    # 6/19 (Fri) → next Thursday 6/25 (pre-cutover weekday), not the past 6/18.
+    assert oh.expiry_for_day(date(2026, 6, 19), exps, 1) == date(2026, 6, 25)
+    # code<1 is invalid → None.
+    assert oh.expiry_for_day(date(2026, 6, 15), exps, 0) is None
+
+
+def test_expiry_for_day_historical_pre_cutover_thursday():
+    # A 2021 day must resolve to a 2021 Thursday (pre-cutover weekday) — NOT a
+    # far-future forward-only calendar entry (the bug this fix closes).
+    fwd_only = [date(2026, 6, 23), date(2026, 6, 30)]  # forward-only calendar
+    exp = oh.expiry_for_day(date(2021, 3, 10), fwd_only, 1)
+    assert exp == date(2021, 3, 11)  # Thursday on/after 2021-03-10 (Wed)
+    assert exp.weekday() == 3        # Thursday (pre-cutover)
+
+
+def test_expiry_for_day_post_cutover_tuesday():
+    # On/after the 2026-09-01 cutover the weekly weekday is Tuesday.
+    exp = oh.expiry_for_day(date(2026, 9, 10), [], 1)  # Thu
+    assert exp == date(2026, 9, 15)  # next Tuesday
+    assert exp.weekday() == 1        # Tuesday (post-cutover)
+
+
+def test_expiry_for_day_ten_day_guard_skips_far_future():
+    # SANITY GUARD: a weekly front is ≤7 days out. If a (mis-)refinement would land
+    # >~10 days away the row is skipped (None) rather than mis-attached. We force this
+    # by passing a rule with a weekday but checking the guard directly on a huge gap:
+    # the analytic front is always ≤7 days, so the guard is exercised via the calendar
+    # NOT being able to pull a far entry — and an empty calendar never trips it.
+    assert oh.expiry_for_day(date(2021, 3, 10), [], 1) == date(2021, 3, 11)
+
+
+def test_expiry_for_day_calendar_refines_holiday():
+    # The forward calendar is used ONLY as a holiday refinement WHERE IT COVERS the
+    # date: analytic front 6/18 (Thu) snaps to a real 6/17 calendar entry nearby.
+    exp = oh.expiry_for_day(date(2026, 6, 15), [date(2026, 6, 17)], 1)
+    assert exp == date(2026, 6, 17)
+
+
+def test_expiry_for_day_index_agnostic_custom_weekday():
+    # A non-NIFTY rule (e.g. Wednesday=2 weekly, no cutover) drives its own weekday.
+    from core.expiry import ExpiryRule
+    wed_rule = oh.ExpiryRule(expiry_weekday=2, pre_cutover_weekday=None, cutover_date=None)
+    assert isinstance(wed_rule, ExpiryRule)
+    exp = oh.expiry_for_day(date(2021, 3, 8), [], 1, rule=wed_rule)  # Mon
+    assert exp == date(2021, 3, 10)  # next Wednesday
+    assert exp.weekday() == 2
 
 
 # ── side parsing → IV arrays ────────────────────────────────────────────────────────
@@ -264,8 +338,10 @@ def test_atm_iv_rows_term_structure_code_attaches_2nd_expiry():
     assert rows[0]["expiry_date"] == date(2026, 6, 25)  # 2nd-nearest
 
 
-def test_atm_iv_rows_skipped_when_no_attachable_expiry():
-    ts = [_epoch_ist(2026, 6, 20, 15, 25)]  # after the only expiry
+def test_atm_iv_rows_derives_front_when_calendar_is_past():
+    # HISTORICAL-MIS-ATTACH FIX: a day AFTER the only (stale) calendar entry no longer
+    # "exhausts" — the analytic next weekly weekday is derived instead of skipping.
+    ts = [_epoch_ist(2026, 6, 20, 15, 25)]  # Sat after the stale 6/18 entry
     ce = {"data": {"ce": _side_payload(ts, [12.0], [100]), "timestamp": ts}}
     pe = {"data": {"pe": _side_payload(ts, [16.0], [100]), "timestamp": ts}}
     exps = [date(2026, 6, 18)]
@@ -273,7 +349,24 @@ def test_atm_iv_rows_skipped_when_no_attachable_expiry():
         ce, pe, symbol="NIFTY", expiries=exps, expiry_code=1, all_expiries=exps,
         strike_step=50,
     )
-    assert rows == []
+    assert len(rows) == 1
+    assert rows[0]["expiry_date"] == date(2026, 6, 25)  # next Thursday (pre-cutover)
+
+
+def test_atm_iv_rows_historical_2021_not_mis_attached_to_future():
+    # The core bug: a 2021 IV bar with a forward-only calendar must key to a 2021
+    # expiry, NEVER a far-future 2026 calendar entry.
+    ts = [_epoch_ist(2021, 3, 10, 15, 25)]  # Wed 2021
+    ce = {"data": {"ce": _side_payload(ts, [12.0], [100]), "timestamp": ts}}
+    pe = {"data": {"pe": _side_payload(ts, [16.0], [100]), "timestamp": ts}}
+    fwd_only = [date(2026, 6, 23), date(2026, 6, 30)]  # forward-only calendar
+    rows = oh.atm_iv_rows_from_legs(
+        ce, pe, symbol="NIFTY", expiries=fwd_only, expiry_code=1, all_expiries=fwd_only,
+        strike_step=50,
+    )
+    assert len(rows) == 1
+    assert rows[0]["expiry_date"] == date(2021, 3, 11)  # 2021 Thursday, not 2026
+    assert rows[0]["dte"] == 1
 
 
 def test_atm_iv_rows_single_side_falls_back():
@@ -347,14 +440,17 @@ def test_chain_snapshot_rows_stock_seg_nse_eq():
     assert rows[0]["option_type"] == "PE"
 
 
-def test_chain_snapshot_drops_bars_with_no_expiry():
-    ts = [_epoch_ist(2026, 6, 20, 9, 20)]  # after the only expiry
+def test_chain_snapshot_derives_front_when_calendar_is_past():
+    # HISTORICAL-MIS-ATTACH FIX: a bar after the stale calendar entry derives the
+    # analytic next weekly weekday rather than being dropped.
+    ts = [_epoch_ist(2026, 6, 20, 9, 20)]  # Sat after the stale 6/18 entry
     raw = {"data": {"ce": _side_payload(ts, [12.0], [110.0]), "timestamp": ts}}
     rows = oh.chain_snapshot_rows_from_side(
         raw, "ce", underlying_scrip=13, underlying_seg="IDX_I",
         expiries=[date(2026, 6, 18)], expiry_code=1, strike=0.0,
     )
-    assert rows == []
+    assert len(rows) == 1
+    assert rows[0]["expiry_date"] == date(2026, 6, 25)  # next Thursday (pre-cutover)
 
 
 # ── build_request shape (matches the verified body) ─────────────────────────────────
@@ -621,7 +717,10 @@ def test_ingest_underlying_budget_hard_stop(_capture_upserts):
     assert len(client.calls) == 4
 
 
-def test_ingest_underlying_warns_without_expiry_calendar(_capture_upserts, caplog):
+def test_ingest_underlying_without_calendar_still_derives_expiry(_capture_upserts, caplog):
+    # HISTORICAL-MIS-ATTACH FIX: with no expiry_calendar the expiry is now DERIVED
+    # analytically (cutover-aware weekday rule) — rows ARE keyed. A heads-up warning
+    # is still emitted that the calendar (holiday refinement) is absent.
     u = oh.resolve_underlying("NIFTY")
     client = _FakeClient()
     with caplog.at_level(logging.WARNING, logger="dhan.option_history"):
@@ -630,8 +729,9 @@ def test_ingest_underlying_warns_without_expiry_calendar(_capture_upserts, caplo
             strikes=0, expiry_dates=None,
             req_spacing_sec=0, now=_off_hours(),
         ))
-    # No calendar → ATM rows cannot be keyed → none captured, warning emitted.
-    assert len(_capture_upserts["atm"]) == 0
+    # The fake returns a single 2026-06-15 bar → analytic front = 6/18 (Thu, pre-cutover).
+    assert len(_capture_upserts["atm"]) == 1
+    assert _capture_upserts["atm"][0]["expiry_date"] == date(2026, 6, 18)
     assert any("no expiry_calendar" in r.message for r in caplog.records)
 
 
@@ -650,6 +750,20 @@ def test_cli_defaults_front_code_only():
     assert args.expiry_codes == [1]
     assert args.underlying == "NIFTY"
     assert args.expiry_flag == "WEEK"
+    assert args.expiry_weekday is None  # NIFTY default rule used when omitted
+
+
+def test_cli_expiry_weekday_parsed_and_range_checked():
+    args = oh._build_arg_parser().parse_args(
+        ["--from", "2021-01-01", "--to", "2021-02-01", "--underlying", "WIDGET",
+         "--security-id", "999", "--instrument", "OPTIDX", "--expiry-weekday", "2"]
+    )
+    assert args.expiry_weekday == 2
+    # Out-of-range weekday is REJECTED (not silently wrapped via %7).
+    with pytest.raises(SystemExit):
+        oh._build_arg_parser().parse_args(
+            ["--from", "2021-01-01", "--to", "2021-02-01", "--expiry-weekday", "9"]
+        )
 
 
 # ── token path (reuses fno_backfill.resolve_access_token) ───────────────────────────

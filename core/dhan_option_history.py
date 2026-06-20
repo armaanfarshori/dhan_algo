@@ -24,9 +24,18 @@ and a 405K-call blowout and is GONE. Instead we pull ``expiryCode=1`` (front), a
 optionally 2..N for term structure, paginating 30-day windows over the date range.
 
 To store into ``option_atm_iv`` (keyed by ``expiry_date``) we ATTACH each trading
-day's expiry from ``expiry_calendar``: for a row dated ``d`` under expiryCode ``k``
-the expiry is the **k-th weekly/monthly expiry ≥ d**. That is the correct,
-index-agnostic use of ``expiry_calendar`` (and the only thing it is used for here).
+day's expiry by DERIVING the **k-th weekly expiry ≥ d** ANALYTICALLY from the
+cutover-aware, index-agnostic weekday rule (``core/expiry``) — for a row dated ``d``
+under expiryCode ``k``. The forward-only ``expiry_calendar`` is used ONLY as a
+holiday refinement where it actually covers ``d``; it is NEVER allowed to pick a
+far-future entry for a historical day.
+
+HISTORICAL-MIS-ATTACH FIX (2026-06-20): the previous design selected the k-th entry
+of the forward-only ``expiry_calendar`` (which currently starts 2026-06-23). For any
+pre-2026 day that picked a far-future 2026 expiry, mis-keying 2021–2025 IV rows onto
+2026 expiries (the condor joins ``option_atm_iv`` by ``(date, expiry)`` → wrong
+backtests). A >~10-day sanity guard (a weekly front is ≤7 days out) now skips/flags
+any implausibly-distant resolution rather than mis-attaching.
 
 Verified request body (smoke-tested → HTTP 200, real IV returned)::
 
@@ -97,6 +106,20 @@ from core.fno_backfill import (
     nifty_atm_strike,
     resolve_access_token,
 )
+# Cutover-aware, index-agnostic front-expiry derivation. We attach each historical
+# bar's expiry ANALYTICALLY (the k-th weekly weekday ≥ day, holiday-refined where
+# the calendar covers it) — NOT by picking the nearest forward-only expiry_calendar
+# entry (which mis-attached 2021–2025 IV rows to far-future 2026 expiries). See
+# core/expiry.py for the full rationale.
+from core.expiry import (
+    NIFTY_EXPIRY_RULE,
+    NIFTY_TUESDAY_EXPIRY_CUTOVER,
+    THURSDAY,
+    TUESDAY,
+    WEEKLY_EXPIRY_MAX_DAYS,
+    ExpiryRule,
+    derive_front_expiry,
+)
 
 logger = logging.getLogger("dhan.option_history")
 
@@ -144,11 +167,31 @@ class Underlying:
     max_strikes: int
     exchange_segment: str = "NSE_FNO"
     chain_seg: str = "IDX_I"
+    # Expiry-weekday rule (cutover-aware, index-agnostic). Defaults to NIFTY —
+    # Tuesday on/after the 2026-09-01 cutover, Thursday before — MIRRORING the
+    # IndexConfig values in research/backtest/fno_condor.py (replicated in core to
+    # avoid a research→core import). A non-NIFTY underlying overrides these.
+    expiry_weekday: int = TUESDAY
+    pre_cutover_weekday: Optional[int] = THURSDAY
+    cutover_date: Optional[date] = NIFTY_TUESDAY_EXPIRY_CUTOVER
+
+    @property
+    def expiry_rule(self) -> ExpiryRule:
+        """The cutover-aware ExpiryRule derived from this underlying's fields."""
+        return ExpiryRule(
+            expiry_weekday=self.expiry_weekday,
+            pre_cutover_weekday=self.pre_cutover_weekday,
+            cutover_date=self.cutover_date,
+        )
 
 
 # Index defaults — index supports ATM±10. Extend per new underlying (data-blocked
 # multi-index expansion lands here). Stocks (OPTSTK) get ATM±3. BSE indices
 # (SENSEX/BANKEX) route through BSE_FNO; their chain segment is still IDX_I.
+# NOTE (multi-index): an OFF-REGISTRY symbol with NO --expiry-weekday silently
+# inherits NIFTY's Thursday→Tuesday cutover rule. That is fine for NIFTY today, but
+# each new index MUST be added here with its OWN expiry weekday/cutover (or pass
+# --expiry-weekday) so it does not borrow NIFTY's expiry calendar by accident.
 UNDERLYINGS: dict[str, Underlying] = {
     "NIFTY": Underlying("NIFTY", 13, "OPTIDX", 50, 10, "NSE_FNO", "IDX_I"),
 }
@@ -161,6 +204,9 @@ def resolve_underlying(
     instrument: Optional[str] = None,
     strike_step: Optional[int] = None,
     exchange_segment: Optional[str] = None,
+    expiry_weekday: Optional[int] = None,
+    pre_cutover_weekday: Optional[int] = None,
+    cutover_date: Optional[date] = None,
 ) -> Underlying:
     """Resolve an Underlying for ``symbol`` from the registry, with explicit
     overrides for off-registry underlyings (e.g. a single stock not yet listed).
@@ -186,6 +232,25 @@ def resolve_underlying(
     # Chain (snapshot) underlying segment is per-instrument: index → IDX_I,
     # single stock → NSE_EQ. NEVER the FNO segment (that was a hardcoded bug).
     chain_seg = "IDX_I" if is_index else "NSE_EQ"
+    # Expiry-weekday rule (index-agnostic). Precedence per field:
+    #   explicit override > registry base value > sensible default.
+    # The default depends on whether the caller pinned a custom weekly weekday for an
+    # OFF-REGISTRY underlying: if so it gets a SINGLE fixed weekday (no NIFTY cutover);
+    # otherwise (NIFTY / no custom weekday) it reproduces fno_condor.NIFTY's cutover.
+    custom_offreg = base is None and expiry_weekday is not None
+    e_wd = expiry_weekday if expiry_weekday is not None else (base.expiry_weekday if base else TUESDAY)
+    if pre_cutover_weekday is not None:
+        e_pre: Optional[int] = pre_cutover_weekday
+    elif base is not None:
+        e_pre = base.pre_cutover_weekday
+    else:
+        e_pre = None if custom_offreg else THURSDAY
+    if cutover_date is not None:
+        e_cut: Optional[date] = cutover_date
+    elif base is not None:
+        e_cut = base.cutover_date
+    else:
+        e_cut = None if custom_offreg else NIFTY_TUESDAY_EXPIRY_CUTOVER
     return Underlying(
         symbol=symbol.upper(),
         security_id=security_id if security_id is not None else base.security_id,  # type: ignore[union-attr]
@@ -194,6 +259,9 @@ def resolve_underlying(
         max_strikes=(base.max_strikes if base else (10 if is_index else 3)),
         exchange_segment=seg,
         chain_seg=chain_seg,
+        expiry_weekday=e_wd,
+        pre_cutover_weekday=e_pre,
+        cutover_date=e_cut,
     )
 
 
@@ -243,23 +311,36 @@ def strike_offset_of(param: str) -> int:
         return 0
 
 
-# ── expiry attachment (the ONLY use of expiry_calendar here) ───────────────────────
+# ── expiry attachment (cutover-aware analytic derivation, NOT forward-only calendar) ─
 def expiry_for_day(
-    day: date, expiries: list[date], code: int
+    day: date,
+    expiries: list[date],
+    code: int,
+    *,
+    rule: ExpiryRule = NIFTY_EXPIRY_RULE,
 ) -> Optional[date]:
     """Return the expiry to ATTACH to a row dated ``day`` under rolling expiryCode
-    ``code`` (1-based): the ``code``-th weekly/monthly expiry ≥ ``day``.
+    ``code`` (1-based): the ``code``-th WEEKLY expiry ≥ ``day``.
 
-    ``expiries`` is the sorted expiry_calendar list for the underlying. code=1 →
-    the next expiry on/after ``day`` (the front series that day); code=2 → the
-    one after that; etc. Returns None if there are fewer than ``code`` expiries
-    on/after ``day`` (e.g. near the end of the calendar) — the row is then skipped
-    rather than mis-attached."""
-    future = [e for e in expiries if e >= day]
-    idx = code - 1
-    if 0 <= idx < len(future):
-        return future[idx]
-    return None
+    HISTORICAL-MIS-ATTACH FIX (2026-06-20). The expiry is derived ANALYTICALLY from
+    the cutover-aware, index-agnostic weekday rule (``core/expiry.derive_front_expiry``)
+    — NOT by selecting the ``code``-th entry of the forward-only ``expiry_calendar``.
+    The old calendar-selection picked the nearest *available* calendar expiry, which
+    for any pre-2026 day was a far-future 2026 entry (the calendar starts 2026-06-23),
+    so a 5-year pull mis-keyed 2021–2025 IV rows onto 2026 expiries.
+
+    ``expiries`` (the expiry_calendar list) is now used ONLY as a REFINEMENT where it
+    actually covers the date (snapping the analytic expiry to a nearby real/holiday-
+    adjusted entry); it can NEVER pull a historical day to a far-future expiry.
+
+    A >~10-day SANITY GUARD (a weekly front is ≤7 days out) returns ``None`` when the
+    resolved expiry is implausibly far from ``day`` — the row is then SKIPPED/flagged
+    rather than mis-attached. Returns ``None`` for ``code`` < 1 as well."""
+    if code < 1:
+        return None
+    return derive_front_expiry(
+        day, code, rule=rule, calendar=expiries, max_days=WEEKLY_EXPIRY_MAX_DAYS
+    )
 
 
 # ── request builder + epoch helpers ──────────────────────────────────────────────
@@ -379,6 +460,7 @@ def atm_iv_rows_from_legs(
     all_expiries: list[date],
     strike_step: int,
     spot_by_day: Optional[dict[date, float]] = None,
+    rule: ExpiryRule = NIFTY_EXPIRY_RULE,
 ) -> list[dict[str, Any]]:
     """Collapse CE+PE minute bars for the ATM strike into one option_atm_iv row
     PER TRADING DAY (the table is one ATM sample/day/expiry — alembic 009).
@@ -413,12 +495,13 @@ def atm_iv_rows_from_legs(
 
     rows: list[dict[str, Any]] = []
     for d in days:
-        expiry_date = expiry_for_day(d, expiries, expiry_code)
+        expiry_date = expiry_for_day(d, expiries, expiry_code, rule=rule)
         if expiry_date is None:
-            # No expiry on/after this day for this rolling code → cannot key the
-            # option_atm_iv row; skip rather than attach a wrong/absent expiry.
+            # No plausible expiry for this day under this rolling code (sanity guard
+            # tripped or code<1) → cannot key the option_atm_iv row; skip rather than
+            # attach a wrong/far-future expiry.
             logger.debug(
-                "atm_iv: no expiry for %s under code=%d (calendar exhausted) — skipping",
+                "atm_iv: no plausible expiry for %s under code=%d (guard/skip) — skipping",
                 d, expiry_code,
             )
             continue
@@ -472,21 +555,23 @@ def chain_snapshot_rows_from_side(
     expiries: list[date],
     expiry_code: int,
     strike: float,
+    rule: ExpiryRule = NIFTY_EXPIRY_RULE,
 ) -> list[dict[str, Any]]:
     """Project one CE/PE rollingoption side into option_chain_snapshot rows
     (one per minute bar). IV stored RAW (percent) to match the snapshot table's
     convention. option_type is CE for the call side, PE for the put.
 
     ``underlying_seg`` is per-instrument (IDX_I for an index, NSE_EQ for a single
-    stock) — NOT the FNO segment. Each bar's ``expiry_date`` is attached from the
-    rolling-code calendar (``expiry_for_day``) so snapshot rows carry the right
-    expiry across the multi-day window; bars with no attachable expiry are dropped."""
+    stock) — NOT the FNO segment. Each bar's ``expiry_date`` is DERIVED analytically
+    via ``expiry_for_day`` (the cutover-aware weekly rule, with ``expiries`` only
+    refining to holiday-adjusted dates) so snapshot rows carry the right expiry
+    across the multi-day window; bars whose expiry trips the sanity guard are dropped."""
     opt_type = "CE" if side == "ce" else "PE"
     bars = parse_rolling_side(raw, side)
     rows: list[dict[str, Any]] = []
     for b in bars:
         d = b["time"].astimezone(_IST).date()
-        expiry_date = expiry_for_day(d, expiries, expiry_code)
+        expiry_date = expiry_for_day(d, expiries, expiry_code, rule=rule)
         if expiry_date is None:
             continue
         rows.append(
@@ -657,7 +742,8 @@ async def ingest_underlying(
 
     For every (expiry_code, ≤30-day window, ATM±n strike) it pulls the CE+PE legs
     (with rate-limit backoff), writes the per-day ATM straddle into option_atm_iv
-    — attaching each day's expiry from ``expiry_dates`` via the rolling-code rule —
+    — DERIVING each day's expiry analytically from the underlying's cutover-aware
+    weekday rule (``expiry_dates`` only refines it to holiday-adjusted dates) —
     and (when ``capture_chain``) the per-strike bars into option_chain_snapshot.
     Non-rate-limit per-window failures are tolerated (logged, skipped). A daily
     budget guard hard-stops near the 100K cap.
@@ -665,7 +751,9 @@ async def ingest_underlying(
     ``strikes`` overrides the per-instrument ATM±n fan-out (clamped to the cap).
     ``expiry_codes`` is the rolling indices to pull (default ``[1]`` = front; pass
     e.g. ``[1,2,3]`` for term structure). ``expiry_dates`` (the expiry_calendar
-    list) is REQUIRED for date attachment — without it ATM rows cannot be keyed.
+    list) is now OPTIONAL — expiries are DERIVED analytically from the underlying's
+    cutover-aware weekday rule; the calendar, when supplied, only refines them to
+    holiday-adjusted real dates where it covers the bar.
     ``spot_by_day`` (index/underlying close per day) supplies atm_strike/spot_ref
     per day; absent → left NULL for fno_derived. Off-hours preferred (warns only).
     Returns a counts dict.
@@ -686,9 +774,10 @@ async def ingest_underlying(
     expiries = sorted(set(expiry_dates)) if expiry_dates is not None else []
     if not expiries:
         logger.warning(
-            "ingest_underlying[%s]: no expiry_calendar dates supplied — option_atm_iv "
-            "rows cannot be keyed by expiry and will be skipped. Build expiry_calendar "
-            "(core.fno_backfill build_expiry_calendar) first.",
+            "ingest_underlying[%s]: no expiry_calendar dates supplied — expiries will "
+            "be DERIVED analytically from the cutover-aware weekday rule (correct, but "
+            "without the holiday refinement the calendar provides). Build expiry_calendar "
+            "(core.fno_backfill build_expiry_calendar) for holiday-adjusted snapping.",
             u.symbol,
         )
 
@@ -723,6 +812,7 @@ async def ingest_underlying(
                         ce_raw, pe_raw, symbol=u.symbol, expiries=expiries,
                         expiry_code=expiry_code, all_expiries=expiries,
                         strike_step=u.strike_step, spot_by_day=spot_by_day,
+                        rule=u.expiry_rule,
                     )
                     counts["atm_rows"] += _upsert_atm_iv(atm_rows)
 
@@ -736,11 +826,13 @@ async def ingest_underlying(
                         ce_raw, "ce", underlying_scrip=u.security_id,
                         underlying_seg=u.chain_seg, expiries=expiries,
                         expiry_code=expiry_code, strike=pseudo_strike,
+                        rule=u.expiry_rule,
                     )
                     rows += chain_snapshot_rows_from_side(
                         pe_raw, "pe", underlying_scrip=u.security_id,
                         underlying_seg=u.chain_seg, expiries=expiries,
                         expiry_code=expiry_code, strike=pseudo_strike,
+                        rule=u.expiry_rule,
                     )
                     counts["chain_rows"] += _upsert_option_chain_snapshot(rows)
 
@@ -819,6 +911,18 @@ def _parse_codes(s: str) -> list[int]:
     return out or [1]
 
 
+def _parse_weekday(s: str) -> int:
+    """Parse a Python weekday int in range 0..6 (Mon=0..Sun=6). Rejects out-of-range
+    values rather than silently wrapping them (the derivation uses %7, so an
+    un-validated 9 would silently become Wednesday — a footgun)."""
+    val = int(s)
+    if not 0 <= val <= 6:
+        raise argparse.ArgumentTypeError(
+            f"--expiry-weekday must be 0..6 (Mon=0..Sun=6); got {val}"
+        )
+    return val
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Dhan rollingoption historical option-IV ingester (rolling expiryCode model)"
@@ -835,6 +939,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--exchange-segment", default=None,
         help="rollingoption exchangeSegment (NSE_FNO default; BSE_FNO for SENSEX/BANKEX)",
+    )
+    p.add_argument(
+        "--expiry-weekday", type=_parse_weekday, default=None,
+        help="weekly-expiry weekday (Mon=0..Sun=6) for a non-NIFTY underlying "
+             "(default = NIFTY rule: Tuesday on/after the 2026-09-01 cutover)",
     )
     p.add_argument(
         "--strikes", type=int, default=None,
@@ -870,6 +979,7 @@ async def _amain(args: argparse.Namespace) -> None:
         instrument=args.instrument,
         strike_step=args.strike_step,
         exchange_segment=args.exchange_segment,
+        expiry_weekday=args.expiry_weekday,
     )
     from_d = _parse_date(args.from_date)
     to_d = _parse_date(args.to_date)
