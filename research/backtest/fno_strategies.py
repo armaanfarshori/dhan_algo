@@ -134,7 +134,7 @@ class StrategySpec:
     name: str
     build: StrategyBuilder
     defined_risk: bool       # True → max loss is bounded (spreads)
-    sell_premium: bool       # True → strategy harvests VRP (gate must say SELL_PREMIUM)
+    sell_premium: bool       # True → harvests VRP; under gate="vol" trades only SELL_PREMIUM cycles (ignored when gate="none")
     needs_multi_expiry: bool = False  # True → historically infeasible
     default_params: dict[str, Any] = field(default_factory=dict)
     span_model: str = "defined"  # "defined" | "naked_short" | "spread_naked_mix"
@@ -1251,10 +1251,34 @@ def _max_drawdown(pnls: list[float]) -> float:
     return worst
 
 
-def _zero_metrics(n_cycles: int, capital: float, strategy: str) -> dict[str, Any]:
+_UNDEFINED_RISK_DISCLAIMER = (
+    " | UNDEFINED-RISK, EXPIRY-ONLY backtest — tail-blind"
+    " (no path stop, SPAN approximate); treat any GO as diagnostic only."
+)
+_UNDEFINED_RISK_STRATEGIES = frozenset(
+    {"short_straddle", "short_strangle", "jade_lizard", "ratio_spread"}
+)
+
+
+def _apply_undefined_risk_disclaimer(go_result, spec) -> tuple:
+    """Append the tail-blind disclaimer to go_no_go for undefined-risk strategies.
+
+    Applied on BOTH the normal and the zero-trades return paths so the honesty
+    label is never dropped.
+    """
+    if not spec.defined_risk or spec.name in _UNDEFINED_RISK_STRATEGIES:
+        go_flag, go_reason = go_result
+        return (go_flag, go_reason + _UNDEFINED_RISK_DISCLAIMER)
+    return go_result
+
+
+def _zero_metrics(
+    n_cycles: int, capital: float, strategy: str, gate: str = "vol"
+) -> dict[str, Any]:
     """Return the zero-filled metrics dict shape for an empty-trades result."""
     metrics: dict[str, Any] = {
         "strategy": strategy,
+        "gate": gate,
         "trades": [],
         "n_cycles": n_cycles,
         "n_trades": 0,
@@ -1283,15 +1307,20 @@ def run_strategy_backtest(
     lot: int = NIFTY_LOT,
     step: int = 50,
     slip_pct: float = 0.005,
+    gate: str = "vol",
 ) -> dict[str, Any]:
     """Run ``spec`` over ``cycles``. Returns the SAME metrics dict shape as
     ``fno_condor.run_backtest`` PLUS return-on-margin fields.
 
-    Gate routing
-    ------------
-    - ``spec.sell_premium=True``  → trade only on ``SELL_PREMIUM`` gate decisions.
-    - ``spec.sell_premium=False`` → trade only on ``BUY_PREMIUM`` gate decisions.
-    - ``STAND_ASIDE`` → never trade (either type).
+    Gate routing (``gate`` param)
+    -----------------------------
+    - ``gate="vol"`` (default): apply the vol-regime gate —
+      ``spec.sell_premium=True`` trades only ``SELL_PREMIUM`` cycles,
+      ``spec.sell_premium=False`` trades only ``BUY_PREMIUM`` cycles, ``STAND_ASIDE`` never.
+    - ``gate="none"``: ungated A/B baseline — every valid cycle is traded regardless of the
+      vol-regime decision (the decision is still computed + recorded per trade for analysis).
+    (The CLI also accepts ``--gate both`` to run both modes; "both" is a CLI-only expansion,
+    not a valid value for this param.)
 
     Multi-expiry guard
     ------------------
@@ -1325,7 +1354,7 @@ def run_strategy_backtest(
             "run_strategy_backtest: strategy=%s refused in historical mode (%s)",
             spec.name, reason,
         )
-        metrics = _zero_metrics(len(cycles), capital, spec.name)
+        metrics = _zero_metrics(len(cycles), capital, spec.name, gate)
         # Override the go_no_go reason to surface the infeasibility note
         metrics["go_no_go"] = (
             False,
@@ -1358,9 +1387,12 @@ def run_strategy_backtest(
             continue
 
         # ── Gate decision ────────────────────────────────────────────────
+        # gate="vol": only take cycles the vol-regime gate favours for this
+        # strategy. gate="none": ungated A/B — take every cycle (direction is
+        # encoded in the strategy structure, not the gate).
         decision = gate_decision(realized_vol_20d, straddle_iv, k=k)
         want = SELL_PREMIUM if spec.sell_premium else BUY_PREMIUM
-        if decision != want:
+        if gate == "vol" and decision != want:
             logger.debug(
                 "Cycle %s skipped: gate=%s want=%s (rv=%.4f iv=%.4f)",
                 cycle.get("entry_date", "<?>"),
@@ -1431,7 +1463,9 @@ def run_strategy_backtest(
     n_trades = len(trades)
 
     if n_trades == 0:
-        return _zero_metrics(n_cycles, capital, spec.name)
+        zm = _zero_metrics(n_cycles, capital, spec.name, gate)
+        zm["go_no_go"] = _apply_undefined_risk_disclaimer(zm["go_no_go"], spec)
+        return zm
 
     # Sort by entry_date (chronological) before IS/OOS split.
     # Precondition: trades must be in chronological order so the 70/30 split
@@ -1468,6 +1502,7 @@ def run_strategy_backtest(
 
     metrics: dict[str, Any] = {
         "strategy": spec.name,
+        "gate": gate,
         "trades": trades,
         "n_cycles": n_cycles,
         "n_trades": n_trades,
@@ -1483,22 +1518,9 @@ def run_strategy_backtest(
         "mean_span": mean_span,
     }
     go_result = go_no_go(metrics, capital=capital)
-
-    # For undefined-risk (naked / partial) strategies, append a disclaimer so
-    # a GO verdict is never read as clean.  These strategies have no intra-cycle
-    # path stop in the backtest — only expiry resolution — making them tail-blind.
-    _UNDEFINED_RISK_DISCLAIMER = (
-        " | UNDEFINED-RISK, EXPIRY-ONLY backtest — tail-blind"
-        " (no path stop, SPAN approximate); treat any GO as diagnostic only."
-    )
-    _UNDEFINED_RISK_STRATEGIES = {
-        "short_straddle", "short_strangle", "jade_lizard", "ratio_spread",
-    }
-    if not spec.defined_risk or spec.name in _UNDEFINED_RISK_STRATEGIES:
-        go_flag, go_reason = go_result
-        go_result = (go_flag, go_reason + _UNDEFINED_RISK_DISCLAIMER)
-
-    metrics["go_no_go"] = go_result
+    # Undefined-risk strategies carry a tail-blind disclaimer so a GO is never read as
+    # clean (module-level helper — also applied on the zero-trades path).
+    metrics["go_no_go"] = _apply_undefined_risk_disclaimer(go_result, spec)
     return metrics
 
 
@@ -1523,6 +1545,12 @@ def main() -> None:  # pragma: no cover
         default="weekly",
         choices=["weekly", "expiry_calendar"],
     )
+    parser.add_argument(
+        "--gate",
+        default="both",
+        choices=["vol", "none", "both"],
+        help="vol = vol-regime gated; none = ungated; both = gated-vs-ungated A/B (default)",
+    )
     parser.add_argument("--k", type=float, default=DEFAULT_K)
     parser.add_argument("--capital", type=float, default=200_000.0)
     parser.add_argument("--span-pct", type=float, default=None)
@@ -1545,26 +1573,38 @@ def main() -> None:  # pragma: no cover
         except ValueError:
             extra[k2.strip()] = v
 
+    # Initialise the DB only after args are parsed, so `--help` never touches it.
+    # F&O tables (index_bars/option_atm_iv/...) live in dhan_trading (cfg.db_url), NOT dhan_clean.
+    from config import get_config
+    from db import init_db
+    init_db(get_config().db_url)
+
     cycs = cycles_from_db(mode=args.mode)
 
+    gate_modes = ["vol", "none"] if args.gate == "both" else [args.gate]
     names = list(FNO_STRATEGIES) if args.strategy == "all" else [args.strategy]
     rows = []
     for name in names:
         spec = FNO_STRATEGIES[name]
-        m = run_strategy_backtest(spec, cycs, extra, k=args.k, capital=args.capital)
-        go, reason = m["go_no_go"]
-        rows.append((name, m["n_trades"], m["net_pnl"], m["return_on_margin"], go, reason))
+        for gm in gate_modes:
+            m = run_strategy_backtest(
+                spec, cycs, extra, k=args.k, capital=args.capital, gate=gm
+            )
+            go, reason = m["go_no_go"]
+            rows.append(
+                (name, gm, m["n_trades"], m["net_pnl"], m["return_on_margin"], go, reason)
+            )
 
-    if args.strategy == "all":
-        hdr = f"{'strategy':<20} {'n':>5} {'net_pnl':>12} {'ROM':>8} {'go?':>5}"
-        print(hdr)
-        print("-" * len(hdr))
-        for name, n, pnl, rom, go, _ in rows:
-            print(f"{name:<20} {n:>5} {pnl:>12,.0f} {rom:>8.2%} {'GO' if go else 'NO-GO':>5}")
-    else:
-        name, n, pnl, rom, go, reason = rows[0]
-        print(f"strategy={name}  n_trades={n}  net_pnl=₹{pnl:,.0f}  ROM={rom:.2%}")
-        print(f"go_no_go: {reason}")
+    hdr = f"{'strategy':<20} {'gate':>5} {'n':>5} {'net_pnl':>12} {'ROM':>8} {'go?':>5}"
+    print(hdr)
+    print("-" * len(hdr))
+    for name, gm, n, pnl, rom, go, _ in rows:
+        print(
+            f"{name:<20} {gm:>5} {n:>5} {pnl:>12,.0f} {rom:>8.2%} {'GO' if go else 'NO-GO':>5}"
+        )
+    if args.strategy != "all":
+        for name, gm, n, pnl, rom, go, reason in rows:
+            print(f"\n[{name} · gate={gm}] go_no_go: {reason}")
 
 
 if __name__ == "__main__":

@@ -589,6 +589,56 @@ class TestRunStrategyBacktest:
         metrics = run_strategy_backtest(spec, self._three_cycles, k=0.9)
         assert metrics["n_cycles"] == 3
 
+    # ── Gate A/B toggle (gated vs ungated) ────────────────────────────────
+    def test_gate_default_is_vol(self):
+        """No gate arg → vol-gated → iron_condor trades only the SELL cycle."""
+        spec = FNO_STRATEGIES["iron_condor"]
+        m = run_strategy_backtest(spec, self._three_cycles, k=0.9)
+        assert m["n_trades"] == 1
+        assert m["gate"] == "vol"
+
+    def test_gate_none_takes_all_cycles(self):
+        """gate='none' → ungated → every valid cycle trades (3), not just 1."""
+        spec = FNO_STRATEGIES["iron_condor"]
+        m = run_strategy_backtest(spec, self._three_cycles, k=0.9, gate="none")
+        assert m["n_trades"] == 3
+        assert m["gate"] == "none"
+
+    def test_ungated_ge_gated_across_strategies(self):
+        """Ungated n_trades >= gated n_trades for every strategy (gate only filters)."""
+        for name in ("iron_condor", "short_strangle", "bull_put_spread", "long_straddle"):
+            spec = FNO_STRATEGIES[name]
+            gated = run_strategy_backtest(spec, self._three_cycles, k=0.9, gate="vol")
+            ungated = run_strategy_backtest(spec, self._three_cycles, k=0.9, gate="none")
+            assert ungated["n_trades"] >= gated["n_trades"], name
+            assert ungated["n_trades"] == 3, name  # all valid cycles taken
+
+    def test_zero_trades_has_gate_key(self):
+        """Zero-trades result still carries the 'gate' key (JSON-archive safe)."""
+        spec = FNO_STRATEGIES["iron_condor"]  # sell_premium
+        cycles = [self._make_cycle(rv=0.20, iv=0.15),   # BUY_PREMIUM → skipped
+                  self._make_cycle(rv=0.14, iv=0.15)]   # STAND_ASIDE → skipped
+        m = run_strategy_backtest(spec, cycles, k=0.9, gate="vol")
+        assert m["n_trades"] == 0
+        assert m["gate"] == "vol"
+
+    def test_zero_trades_undefined_risk_keeps_disclaimer(self):
+        """Undefined-risk strategy with 0 trades still carries the tail-blind disclaimer."""
+        spec = FNO_STRATEGIES["short_straddle"]  # undefined-risk, sell_premium
+        cycles = [self._make_cycle(rv=0.20, iv=0.15)]  # BUY_PREMIUM → 0 trades
+        m = run_strategy_backtest(spec, cycles, k=0.9, gate="vol")
+        assert m["n_trades"] == 0
+        assert m["gate"] == "vol"
+        _, reason = m["go_no_go"]
+        assert "UNDEFINED-RISK" in reason
+
+    def test_calendar_refusal_has_gate_key(self):
+        """Multi-expiry refusal path also carries the 'gate' key."""
+        spec = FNO_STRATEGIES["calendar_spread"]
+        m = run_strategy_backtest(spec, self._three_cycles, k=0.9, gate="none")
+        assert m["n_trades"] == 0
+        assert m["gate"] == "none"
+
     def test_mean_span_positive_when_trades(self):
         spec = FNO_STRATEGIES["iron_condor"]
         metrics = run_strategy_backtest(spec, self._three_cycles, k=0.9)
