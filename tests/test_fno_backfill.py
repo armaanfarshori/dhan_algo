@@ -443,6 +443,47 @@ def test_backfill_futures_bars_off_hours_calls_and_upserts(monkeypatch):
     assert captured["rows"][0]["symbol"] == "NIFTY"
 
 
+def test_backfill_futures_bars_stock_instrument_futstk(monkeypatch):
+    """instrument='FUTSTK' must be forwarded to the charts endpoint (stock futures)."""
+    captured = {}
+    monkeypatch.setattr(fb, "_upsert_futures_bars", _capture(captured))
+    client = _FakeClient()
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=_IST)
+    n = asyncio.run(fb.backfill_futures_bars(
+        client, "RELIANCE-FUT", "61001", "2026-06-01", "2026-06-18",
+        instrument="FUTSTK", now=now,
+    ))
+    assert n == 1
+    assert client.calls[0][1]["instrument"] == "FUTSTK"
+    assert client.calls[0][1]["exchange_segment"] == "NSE_FNO"
+    assert captured["rows"][0]["symbol"] == "RELIANCE-FUT"
+
+
+def test_extract_atm_iv_nearest_fallback_for_stock_strikes():
+    """With nearest=True (stock options), an absent computed-ATM strike snaps to the
+    chain strike nearest spot instead of returning None. Default (False) is strict."""
+    # Stock chain with a 25-step grid; spot 2912 → computed step-50 ATM (2900) absent
+    # only if the chain lacks it. Use a chain whose strikes are off the step-50 grid.
+    chain = {
+        "data": {
+            "last_price": 2912.0,
+            "oc": {
+                "2880.000000": {"ce": {"implied_volatility": 30.0}, "pe": {"implied_volatility": 31.0}},
+                "2910.000000": {"ce": {"implied_volatility": 28.0}, "pe": {"implied_volatility": 29.0}},
+                "2940.000000": {"ce": {"implied_volatility": 27.0}, "pe": {"implied_volatility": 28.0}},
+            },
+        }
+    }
+    now = datetime(2026, 6, 20, 18, 0, tzinfo=_IST)
+    # Strict (default): computed ATM 2900 (round 2912/50*50) is absent → None.
+    assert fb.extract_atm_iv(chain, "RELIANCE", date(2026, 6, 26), "monthly", 50, now=now) is None
+    # nearest=True: snap to 2910 (nearest to spot 2912).
+    row = fb.extract_atm_iv(chain, "RELIANCE", date(2026, 6, 26), "monthly", 50, now=now, nearest=True)
+    assert row is not None
+    assert row["atm_strike"] == 2910
+    assert row["call_iv"] == pytest.approx(0.28)
+
+
 def test_backfill_futures_bars_refuses_in_market_hours(monkeypatch):
     monkeypatch.setattr(fb, "_upsert_futures_bars", lambda rows: 1 / 0)  # must never run
     client = _FakeClient()
