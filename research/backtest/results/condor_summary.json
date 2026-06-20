@@ -1,0 +1,22 @@
+{
+  "as_of": "2026-06-19",
+  "strategy": "NIFTY weekly iron condor, vol-gated (SELL_PREMIUM)",
+  "period": "2022-2026",
+  "move_mult": 1.5,
+  "n_trades": 164,
+  "n_cycles": 233,
+  "win_rate": 0.909,
+  "profit_factor": 1.74,
+  "net_pnl": 36400,
+  "vrp_note": "India VIX > NIFTY realized on 100% of SELL days, mean edge +3.8 vol pts",
+  "go": true,
+  "go_reason": "n_trades>=30, net>0, PF>1 — clears the go_no_go bar (PRELIMINARY)",
+  "caveats": [
+    "PRELIMINARY — backtest only, not a validated live edge.",
+    "VIX (~30d) used as a proxy for weekly (~4-7 DTE) IV; the bias is REGIME-DEPENDENT, not uniformly conservative — real weekly IV can sit BELOW VIX in calm regimes, making this OPTIMISTIC.",
+    "Settlement = index daily close, not NSE FSP.",
+    "Entry at prior-expiry close on synthetic ISO-week cycles, not real fills.",
+    "P&L on Rs2L notional is the wrong denominator; return-on-SPAN-margin not yet computed.",
+    "Re-validate on real ATM IV + FSP before any live consideration."
+  ]
+}

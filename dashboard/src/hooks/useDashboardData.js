@@ -28,6 +28,13 @@ export function useDashboardData() {
   const systemHealth  = usePoller('/api/system/health',  30000)
   const rateLimitsData = usePoller('/api/rate-limits',   12000)    // account-wide across all processes
 
+  // ── F&O panel (data refreshes at most daily via the 16:00 IST collector) ──
+  const fnoVrp       = usePoller('/api/fno/vrp',         60000)
+  const fnoVrpSeries = usePoller('/api/fno/vrp/series', 300000)
+  const fnoPaper     = usePoller('/api/fno/paper',       60000)
+  const fnoChain     = usePoller('/api/fno/chain',       60000)
+  const fnoBacktest  = usePoller('/api/fno/backtest',   600000)
+
   // ── Legacy-shape adapters (older panels expect /api/status & /api/risk) ───
   const first = trader?.strategies?.[0]
   const status = {
@@ -62,5 +69,6 @@ export function useDashboardData() {
     status, risk, paperPositions,
     signals, funds, positions, watchlist, market, tradelog, logs, equity,
     dbStats, kronosSignals, kronosLive, screener, backfill, systemHealth, rateLimitsData,
+    fnoVrp, fnoVrpSeries, fnoPaper, fnoChain, fnoBacktest,
   }
 }

@@ -247,6 +247,13 @@ from apps.routes.backtest import (  # noqa: E402
     backtest_runs_handler,
     backtest_run_handler,
 )
+from apps.routes.fno import (  # noqa: E402
+    fno_vrp_handler,
+    fno_vrp_series_handler,
+    fno_paper_handler,
+    fno_chain_handler,
+    fno_backtest_handler,
+)
 
 
 # ── Postback webhook (Dhan order-update notifications) ────────────────────────
@@ -355,6 +362,11 @@ def build_app() -> web.Application:
     app.router.add_get("/api/system/health", system_health_handler)
     app.router.add_get("/api/backtest/runs", backtest_runs_handler)
     app.router.add_get("/api/backtest/runs/{name}", backtest_run_handler)
+    app.router.add_get("/api/fno/vrp", fno_vrp_handler)
+    app.router.add_get("/api/fno/vrp/series", fno_vrp_series_handler)
+    app.router.add_get("/api/fno/paper", fno_paper_handler)
+    app.router.add_get("/api/fno/chain", fno_chain_handler)
+    app.router.add_get("/api/fno/backtest", fno_backtest_handler)
     app.router.add_post("/postback", postback_handler)
 
     if (DIST_DIR / "assets").exists():
