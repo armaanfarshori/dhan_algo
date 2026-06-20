@@ -146,40 +146,107 @@ def reregister_position_risk(runners, portfolio, risk):
                            "placeholder risk budget (real stop unknown)", r.sid)
 
 
-async def flatten_all(runners, portfolio, executor, risk, reason: str, segment: str):
-    """Flatten every open position on a halt, then UNCONDITIONALLY release each
-    risk slot. A halt blocks new entries regardless, so the slot serves no
-    purpose; a failed flatten must not leak committed risk forever. apply_fill +
-    notify_flat only run when the executor actually returned a fill."""
+async def flatten_all(runners, portfolio, executor, risk, reason: str, segment: str,
+                      orchestrators=None):
+    """Flatten EVERY open position on a halt — equity (ORB) AND option legs
+    (scalper) — then UNCONDITIONALLY release each risk slot. A halt blocks new
+    entries regardless, so the slot serves no purpose; a failed flatten must not
+    leak committed risk forever.
+
+    The kill-switch must cover option legs too, so this no longer assumes
+    ORB/NSE_EQ for every position. Each open position flattens with ITS OWN
+    exchange_segment + strategy:
+      1. Each scalper orchestrator flattens its own book FIRST through its own
+         exit path (so the signal engine + governor stay consistent).
+      2. Whatever remains in the portfolio is swept generically, resolving each
+         position's segment from (runner → orchestrator leg → default equity
+         segment) and its strategy from the position row.
+
+    apply_fill + notify_flat only run when the executor actually returned a fill.
+    """
     from engine.types import OrderIntent
-    for r in runners:
-        pos = portfolio.get(r.sid)
-        if pos.qty != 0:
-            # ref_price priority: live last_price → entry avg_price. A never-ticked
-            # position has last_price==0; the executor rejects ref_price<=0, so
-            # without the avg_price fallback such a position could never be closed
-            # on a halt — left naked past the kill switch. Surface the fallback.
-            ref_price = r.last_price if r.last_price > 0 else pos.avg_price
-            if ref_price <= 0:
+
+    orchestrators = orchestrators or []
+    runner_by_sid = {r.sid: r for r in runners}
+
+    # Per-leg segment from every orchestrator (option legs carry their own seg).
+    leg_seg: dict = {}
+    for orch in orchestrators:
+        try:
+            leg_seg.update(orch.open_leg_segments())
+        except Exception as exc:
+            logger.warning("flatten_all: orchestrator leg-segment read failed (%s)", exc)
+
+    # 1. Each scalper orchestrator flattens its own book through its exit path.
+    for orch in orchestrators:
+        try:
+            await orch.flatten_open(reason=f"risk halt: {reason}")
+        except Exception as exc:
+            logger.error("flatten_all: orchestrator flatten failed (%s)", exc)
+
+    # 2. Sweep every still-open position generically (covers ORB equities AND any
+    #    residual option leg an orchestrator could not flatten).
+    for pos in list(portfolio.open_positions()):
+        if pos.qty == 0:
+            continue
+        sid = pos.security_id
+        r = runner_by_sid.get(sid)
+        # ref_price priority: live runner last_price → entry avg_price. A
+        # never-ticked position has last_price==0; the executor rejects
+        # ref_price<=0, so without the avg_price fallback such a position could
+        # never be closed on a halt — left naked past the kill switch.
+        last_price = r.last_price if r is not None else 0.0
+        ref_price = last_price if last_price > 0 else pos.avg_price
+        strat = pos.strategy or ("ORB" if r is not None else "")
+        # Resolve the position's OWN segment, never a hardcoded ORB/NSE_EQ:
+        # runner segment → orchestrator leg segment → strategy-aware fallback.
+        # A scalper option leg the orchestrator could NOT reconcile (e.g. the
+        # screener no longer picks it as best after a restart) is absent from
+        # leg_seg and has no runner — its strategy tag still identifies it as an
+        # option leg, so fall back to the F&O segment, never the equity default.
+        from engine.scalper_orchestrator import SCALPER_STRATEGY
+        default_seg = "NSE_FNO" if strat == SCALPER_STRATEGY else segment
+        seg = (getattr(r, "_segment", None) if r is not None
+               else None) or leg_seg.get(sid, default_seg)
+        if ref_price <= 0:
+            logger.critical(
+                "flatten_all %s: cannot flatten qty=%+d — no last_price AND no "
+                "avg_price; position left OPEN (release risk slot anyway)",
+                sid, pos.qty)
+        else:
+            if r is not None and last_price <= 0:
                 logger.critical(
-                    "flatten_all %s: cannot flatten qty=%+d — no last_price AND no "
-                    "avg_price; position left OPEN (release risk slot anyway)",
-                    r.sid, pos.qty)
-            else:
-                if r.last_price <= 0:
-                    logger.critical(
-                        "flatten_all %s: no last_price — flattening on avg_price ₹%.2f",
-                        r.sid, pos.avg_price)
-                side = "SELL" if pos.qty > 0 else "BUY"
-                fill = await executor.submit(OrderIntent(
-                    security_id=r.sid, exchange_segment=segment,
-                    side=side, qty=abs(pos.qty), strategy="ORB",
-                    reason=f"risk halt: {reason}"), ref_price=ref_price)
-                if fill:
-                    await portfolio.apply_fill(fill, strategy="ORB")
+                    "flatten_all %s: no last_price — flattening on avg_price ₹%.2f",
+                    sid, pos.avg_price)
+            side = "SELL" if pos.qty > 0 else "BUY"
+            fill = await executor.submit(OrderIntent(
+                security_id=sid, exchange_segment=seg,
+                side=side, qty=abs(pos.qty), strategy=strat or "ORB",
+                reason=f"risk halt: {reason}",
+                product_type="INTRADAY"), ref_price=ref_price)
+            if fill:
+                await portfolio.apply_fill(fill, strategy=strat or "ORB")
+                if r is not None:
                     r.strategy.notify_flat()
-            # Release UNCONDITIONALLY (even when the flatten produced no fill).
-            risk.release_risk(r.sid)
+        # Release UNCONDITIONALLY (even when the flatten produced no fill).
+        risk.release_risk(sid)
+
+
+async def scalper_chain_refresh_loop(resolver, interval: float):
+    """Keep the scalper option-chain cache warm for the orchestrator's (sync)
+    resolver. The resolver itself enforces the ≥3 s/index Dhan optionchain rate
+    limit; this loop just nudges it on the trader's cadence. Never raises — a
+    fetch error logs inside resolver.refresh and the loop continues."""
+    from datetime import timezone as _tz
+    period = max(3.0, float(interval))
+    while True:
+        try:
+            await resolver.refresh(datetime.now(_tz.utc))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("scalper chain refresh loop error: %s", exc)
+        await asyncio.sleep(period)
 
 
 def make_ltp_lookup(feed, runners, stale_s: float, warn_every_s: float = 60.0):
@@ -475,6 +542,11 @@ async def main():
         for p in portfolio.open_positions():
             risk.register_risk(p.security_id, risk.risk_budget_per_trade)
 
+        # Scalper sleeves the kill-switch must also flatten. Populated below ONLY
+        # when cfg.scalper_enabled; the closure captures this list, so when the
+        # scalper ships dark it stays empty and flatten_all is ORB-identical.
+        scalper_orchestrators: list = []
+
         @risk.on_halt
         async def on_halt(reason: str):
             logger.critical("⛔ HALT: %s — flattening open positions", reason)
@@ -482,7 +554,8 @@ async def main():
             await send_async(f"⛔ TRADING HALTED ({portfolio.mode})\n{reason}\n"
                              f"Open positions are being flattened.")
             await flatten_all(runners, portfolio, executor, risk, reason,
-                              cfg.watchlist_exchange_segment)
+                              cfg.watchlist_exchange_segment,
+                              orchestrators=scalper_orchestrators)
 
         @risk.on_resume
         async def on_resume():
@@ -536,6 +609,124 @@ async def main():
             from core.kronos_scanner import KronosScanner
             kronos_scanner = KronosScanner(kronos, db_backend=db, n=cfg.watchlist_n)
 
+        # ── Optional options-scalper sleeve (PAPER, SHIPS DARK — default OFF) ──
+        # When cfg.scalper_enabled is False (the default) NOTHING below runs: no
+        # task is created, no index is subscribed, the heartbeat "scalper" key is
+        # None, and the trader behaves byte-identically to the ORB-only engine.
+        global _scalper
+        scalper_resolver = None
+        if cfg.scalper_enabled and not cfg.paper_trading:
+            # The scalper is un-backtestable and forward-PAPER-validated only.
+            # Refuse to run it against the LIVE executor — it must NOT place real
+            # option orders until forward validation graduates it (a deliberate,
+            # separate change). The ORB engine is unaffected.
+            logger.critical(
+                "Scalper enabled but PAPER_TRADING=false — the options scalper is "
+                "forward-paper-only and is REFUSED in LIVE mode. ORB continues; "
+                "scalper sleeve stays OFF.")
+        if cfg.scalper_enabled and cfg.paper_trading:
+            from core.instruments import InstrumentMaster
+            from engine.scalper_adapters import (
+                ScalperOptionResolver,
+                ScalperSignalProvider,
+            )
+            from engine.daily_governor import GovernorParams
+            from engine.scalper_orchestrator import (
+                OrchestratorParams,
+                ScalperOrchestrator,
+            )
+
+            underlyings = [
+                u for u in cfg.scalper_underlyings_list
+                if u in InstrumentMaster.INDEX_CONFIGS
+            ]
+            dropped = [u for u in cfg.scalper_underlyings_list if u not in underlyings]
+            for u in dropped:
+                logger.warning("Scalper: dropping unknown underlying %s "
+                               "(not in INDEX_CONFIGS)", u)
+            if not underlyings:
+                logger.error("Scalper enabled but no valid underlyings — sleeve OFF")
+            else:
+                # Subscribe each index's spot (IDX_I) so the signal engine can tick.
+                # Guard the latent collision: the feed's tick cache is keyed by
+                # bare security_id (no segment namespace), so an index spot sid
+                # equal to an already-subscribed equity sid would corrupt the spot
+                # lookup. Indices use small reserved ids (13/25/51/…) that don't
+                # appear in NSE_EQ, but warn loudly if one ever does.
+                already = set(feed.all_subscribed_sids())
+                idx_sids: dict = {}
+                for u in underlyings:
+                    icfg = InstrumentMaster.INDEX_CONFIGS[u]
+                    seg = icfg["underlying_segment"]
+                    sid = str(icfg["underlying_id"])
+                    if sid in already:
+                        logger.critical(
+                            "Scalper: index %s spot sid %s collides with an already-"
+                            "subscribed instrument — spot lookup may be corrupted "
+                            "(tick cache has no segment namespace)", u, sid)
+                    idx_sids.setdefault(seg, []).append(int(icfg["underlying_id"]))
+                for seg, sids in idx_sids.items():
+                    feed.subscribe({seg: sids})
+                # underlying name → its index spot sid (string, as the feed keys).
+                spot_sid = {u: str(InstrumentMaster.INDEX_CONFIGS[u]["underlying_id"])
+                            for u in underlyings}
+
+                def _spot_lookup(underlying: str) -> float:
+                    sid = spot_sid.get(underlying)
+                    return feed.get_ltp(sid) if sid else 0.0
+
+                # The resolver is built FIRST so the held-leg premium lookup can
+                # read its REST option-chain cache. The WS feed cannot stream a
+                # contract subscribed mid-session (MarketFeed binds its sub list
+                # once at connect), so the ≥3 s-throttled chain cache is the
+                # truthful premium source for the scalper's premium-based exits.
+                scalper_resolver = ScalperOptionResolver(
+                    client=dhan,
+                    underlyings=underlyings,
+                    max_spread_pct=cfg.scalper_max_spread_pct)
+
+                def _premium_lookup(security_id):
+                    # Held option leg's premium from the cached chain LTP (None if
+                    # not yet cached → the scalper fail-safe suppresses premium
+                    # exits; EOD square-off still flattens it).
+                    return scalper_resolver.premium_for(security_id)
+
+                signal_provider = ScalperSignalProvider(
+                    underlyings=underlyings,
+                    spot_lookup=_spot_lookup,
+                    premium_lookup=_premium_lookup,
+                    simple=True)
+                scalper_resolver._signal_provider = signal_provider
+
+                gov_params = GovernorParams(
+                    sleeve_capital=cfg.scalper_sleeve_capital,
+                    max_trades_per_day=cfg.scalper_max_trades_per_day,
+                    max_trades_per_underlying=cfg.scalper_max_trades_per_underlying,
+                    max_concurrent_total=cfg.scalper_max_concurrent_total,
+                    max_concurrent_per_underlying=cfg.scalper_max_concurrent_per_underlying,
+                    max_daily_loss=cfg.scalper_max_daily_loss,
+                    daily_profit_lock=(cfg.scalper_daily_profit_lock
+                                       if cfg.scalper_daily_profit_lock > 0 else None),
+                    consecutive_loss_stop=cfg.scalper_consecutive_loss_stop)
+                orch_params = OrchestratorParams(
+                    underlyings=underlyings,
+                    session_name="EQUITY",
+                    tick_interval_seconds=cfg.scalper_poll_interval,
+                    governor=gov_params)
+                scalper = ScalperOrchestrator(
+                    signals=signal_provider, resolver=scalper_resolver,
+                    portfolio=portfolio, risk=risk, executor=executor,
+                    params=orch_params)
+                # Warm the resolver cache first so the orchestrator's boot-time
+                # reconcile probe (security_id match) can resolve any open SCALPER
+                # contracts the Portfolio restored on boot. The orchestrator's own
+                # run()→boot() then does the reconcile + governor seed.
+                await scalper_resolver.refresh(datetime.now(timezone.utc))
+                scalper_orchestrators.append(scalper)
+                _scalper = scalper   # surface state on the heartbeat
+                logger.info("🟢 Options scalper sleeve ON (PAPER) — underlyings=%s "
+                            "poll=%.0fs", underlyings, cfg.scalper_poll_interval)
+
         # ── Launch ────────────────────────────────────────────────────────────
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -563,6 +754,13 @@ async def main():
         ]
         if kronos_scanner:
             tasks.append(asyncio.create_task(kronos_scanner.run(), name="kronos_scanner"))
+        for orch in scalper_orchestrators:
+            tasks.append(asyncio.create_task(orch.run(), name="scalper"))
+        if scalper_resolver is not None:
+            tasks.append(asyncio.create_task(
+                scalper_chain_refresh_loop(scalper_resolver,
+                                           cfg.scalper_poll_interval),
+                name="scalper_chain"))
 
         logger.info("🚀 dhan-trader running (%d tasks)", len(tasks))
         await stop_event.wait()

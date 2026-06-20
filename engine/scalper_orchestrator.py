@@ -509,6 +509,21 @@ class ScalperOrchestrator:
             return None
         await self.portfolio.apply_fill(fill, strategy=SCALPER_STRATEGY)
         self.signals.notify_fill(underlying, "BUY", lots, fill.price, now)
+        # Tell the signal provider which concrete contract is now held so its
+        # exit logic can price off that leg's premium (duck-typed; the narrow
+        # SignalProvider Protocol need not implement set_held).
+        set_held = getattr(self.signals, "set_held", None)
+        if callable(set_held):
+            set_held(underlying, leg.security_id)
+
+        # Book a platform-risk slot for this open so RiskEngine.committed_risk
+        # accounts for the leg — symmetric with the boot placeholder the trader
+        # books for every open position (one risk_budget_per_trade), NOT the full
+        # premium: registering full premium would let one open (possibly winning)
+        # leg consume most of the platform daily-loss budget and silently block
+        # the governor's allowed concurrency. The governor's sleeve caps remain
+        # the binding concurrency authority; this is just honest accounting.
+        self.risk.register_risk(leg.security_id, self.risk.risk_budget_per_trade)
 
         # register + record this NEW open with the governor.
         self._legs[underlying][leg.security_id] = leg
@@ -549,6 +564,33 @@ class ScalperOrchestrator:
         self._cooldown_until = {u: None for u in self.p.underlyings}
         self.governor.reset_session(today)
         logger.info("ScalperOrchestrator: new session %s — reset", today)
+
+    # ── halt / kill-switch flatten (driven by the RiskEngine on_halt) ─────────
+
+    async def flatten_open(self, now: Optional[datetime] = None, *,
+                           reason: str = "risk halt") -> None:
+        """Public flatten entry-point for the platform kill-switch / halt path.
+
+        Routes every open scalper leg through the SAME exit path the EOD
+        square-off uses (so the signal engine + governor stay consistent), then
+        forces MANAGING/DONE.  Exits are never gated — this mirrors Safety rule 2:
+        the RiskEngine owns the kill-switch and this is its flatten route into the
+        scalper sleeve.  Best-effort; logs but never raises into the halt path."""
+        now = now or self.clock.now()
+        try:
+            await self._flatten_all(now, reason=reason)
+        except Exception as exc:
+            logger.error("ScalperOrchestrator: flatten_open error (%s)", exc)
+        self.state = DONE if self._total_open() == 0 else FLATTEN_ALL
+
+    def open_leg_segments(self) -> Dict[str, str]:
+        """security_id → exchange_segment for every open leg (for an external
+        flatten sweep that needs each option leg's own segment)."""
+        out: Dict[str, str] = {}
+        for legs in self._legs.values():
+            for sid, leg in legs.items():
+                out[sid] = leg.exchange_segment
+        return out
 
     # ── introspection ──────────────────────────────────────────────────────────
 

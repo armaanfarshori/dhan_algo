@@ -29,6 +29,10 @@ class FakePortfolio:
     def get(self, sid: str) -> Position:
         return self._positions.get(sid, Position(security_id=sid, qty=0))
 
+    def open_positions(self) -> list:
+        # Mirrors the real Portfolio.open_positions() — non-flat rows only.
+        return [p for p in self._positions.values() if p.qty != 0]
+
     async def apply_fill(self, fill: Fill, *, strategy: str = "ORB") -> float:
         self.fills_applied.append(fill)
         return 0.0
