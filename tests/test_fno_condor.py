@@ -17,13 +17,18 @@ import pytest
 # fno_costs — always available (already written)
 # ---------------------------------------------------------------------------
 from research.backtest.fno_costs import (
+    BANKNIFTY_LOT,
     BROKERAGE_PER_ORDER,
     GST_PCT,
+    INDEX_LOT_SIZE,
     NIFTY_LOT,
     OPTION_EXERCISE_STT_PCT,
     OPTION_STT_SELL_PCT,
+    STAMP_BUY_PCT,
     condor_costs,
     leg_turnover,
+    scalp_breakeven,
+    scalp_round_trip_costs,
     slippage,
 )
 
@@ -130,11 +135,15 @@ class TestCondorCosts:
         total_turnover = 8645
         brokerage     = 20 * 4       = 80.00
         STT           = 0.0015 * 6175 = 9.2625
-        exchange_fee  = 0.0003553 * 8645 ≈ 3.0706
+        exchange_fee  = 0.0003503 * 8645 ≈ 3.0284
         sebi_fee      = 0.000001 * 8645 = 0.008645
         stamp_duty    = 0.00003 * 2470  = 0.0741
-        gst           = 0.18 * (80 + 3.0706... + 0.008645...) ≈ 14.95
-        total         ≈ 80 + 9.26 + 3.07 + 0.01 + 0.07 + 14.95
+        gst           = 0.18 * (80 + 3.0284... + 0.008645...) ≈ 14.95
+        total         ≈ 80 + 9.26 + 3.03 + 0.01 + 0.07 + 14.95
+
+    (These derived figures are illustrative; the assertions below recompute
+    every component from the module-level rate constants, so a rate change does
+    not silently break them.)
     """
 
     _LEGS = [
@@ -216,6 +225,211 @@ class TestCondorCosts:
     def test_bad_side_raises(self):
         with pytest.raises(ValueError, match="BUY.*SELL"):
             condor_costs([(50.0, NIFTY_LOT, "SHORT")])
+
+
+# ---------------------------------------------------------------------------
+# SECTION 1b — SCALPER round-trip costs (fno_costs.py)
+# ---------------------------------------------------------------------------
+
+
+class TestScalpRoundTripCosts:
+    """Single-leg long-option scalp: BUY entry → SELL exit.
+
+    Statutory comes from condor_costs over [(entry, qty, BUY), (exit, qty,
+    SELL)]; slippage (double-crossed spread) is returned separately.
+    """
+
+    def test_returns_costs_and_slippage_tuple(self):
+        result = scalp_round_trip_costs(100.0, 100.0, NIFTY_LOT)
+        assert isinstance(result, tuple) and len(result) == 2
+        costs, slip = result
+        assert hasattr(costs, "total")
+        assert isinstance(slip, float)
+
+    def test_brokerage_two_legs(self):
+        costs, _ = scalp_round_trip_costs(100.0, 110.0, NIFTY_LOT)
+        assert costs.brokerage == pytest.approx(BROKERAGE_PER_ORDER * 2)
+
+    def test_stt_only_on_sell_turnover(self):
+        """STT is charged on the SELL (exit) leg's turnover ONLY, never BUY."""
+        entry, exit_, qty = 100.0, 130.0, NIFTY_LOT
+        costs, _ = scalp_round_trip_costs(entry, exit_, qty)
+        expected_stt = OPTION_STT_SELL_PCT * leg_turnover(exit_, qty)
+        assert costs.stt == pytest.approx(expected_stt, abs=0.01)
+        # explicitly: STT must NOT scale with the entry (BUY) premium
+        costs_hi_entry, _ = scalp_round_trip_costs(500.0, exit_, qty)
+        assert costs_hi_entry.stt == pytest.approx(costs.stt, abs=0.01)
+
+    def test_stamp_only_on_buy_turnover(self):
+        """Stamp duty is charged on the BUY (entry) leg's turnover ONLY."""
+        entry, exit_, qty = 100.0, 130.0, NIFTY_LOT
+        costs, _ = scalp_round_trip_costs(entry, exit_, qty)
+        expected_stamp = STAMP_BUY_PCT * leg_turnover(entry, qty)
+        assert costs.stamp_duty == pytest.approx(expected_stamp, abs=0.0001)
+        # stamp must NOT scale with the exit (SELL) premium
+        costs_hi_exit, _ = scalp_round_trip_costs(entry, 900.0, qty)
+        assert costs_hi_exit.stamp_duty == pytest.approx(costs.stamp_duty, abs=0.0001)
+
+    def test_gst_excludes_stt_and_stamp(self):
+        """GST base = brokerage + exchange + SEBI; never STT or stamp."""
+        costs, _ = scalp_round_trip_costs(100.0, 130.0, NIFTY_LOT)
+        gst_base = costs.brokerage + costs.exchange_fee + costs.sebi_fee
+        assert costs.gst == pytest.approx(GST_PCT * gst_base, abs=0.01)
+        # sanity: STT + stamp are NOT in the GST base
+        wrong_base = gst_base + costs.stt + costs.stamp_duty
+        assert costs.gst != pytest.approx(GST_PCT * wrong_base, abs=0.01)
+
+    def test_no_exercise_stt(self):
+        """Scalp closes in market → exercise_intrinsic=0 → STT = sell only."""
+        entry, exit_, qty = 100.0, 130.0, NIFTY_LOT
+        costs, _ = scalp_round_trip_costs(entry, exit_, qty)
+        assert costs.stt == pytest.approx(OPTION_STT_SELL_PCT * leg_turnover(exit_, qty), abs=0.01)
+
+    def test_matches_condor_costs_path(self):
+        """Statutory must equal condor_costs over the same two legs."""
+        entry, exit_, qty = 100.0, 130.0, NIFTY_LOT
+        costs, _ = scalp_round_trip_costs(entry, exit_, qty)
+        ref = condor_costs(
+            [(entry, qty, "BUY"), (exit_, qty, "SELL")], exercise_intrinsic=0.0
+        )
+        assert costs == ref
+
+    # --- slippage: separate + linear ----------------------------------------
+
+    def test_slippage_separate_from_statutory(self):
+        """Slippage is NOT folded into the statutory total."""
+        costs, slip = scalp_round_trip_costs(100.0, 100.0, NIFTY_LOT)
+        assert slip > 0.0
+        # statutory total has no spread component
+        ref = condor_costs(
+            [(100.0, NIFTY_LOT, "BUY"), (100.0, NIFTY_LOT, "SELL")]
+        )
+        assert costs.total == pytest.approx(ref.total)
+
+    def test_slippage_value(self):
+        """Both legs cross half_spread_pct of their premium, times qty."""
+        entry, exit_, qty, hsp = 100.0, 120.0, NIFTY_LOT, 0.0075
+        _, slip = scalp_round_trip_costs(entry, exit_, qty, half_spread_pct=hsp)
+        expected = (slippage(entry, hsp) + slippage(exit_, hsp)) * qty
+        assert slip == pytest.approx(expected, abs=0.01)
+
+    def test_slippage_scales_linearly_with_qty(self):
+        _, slip1 = scalp_round_trip_costs(120.0, 120.0, NIFTY_LOT)
+        _, slip2 = scalp_round_trip_costs(120.0, 120.0, NIFTY_LOT * 2)
+        assert slip2 == pytest.approx(2.0 * slip1, rel=1e-6)
+
+    def test_slippage_scales_linearly_with_half_spread(self):
+        _, slip1 = scalp_round_trip_costs(120.0, 120.0, NIFTY_LOT, half_spread_pct=0.0075)
+        _, slip2 = scalp_round_trip_costs(120.0, 120.0, NIFTY_LOT, half_spread_pct=0.015)
+        assert slip2 == pytest.approx(2.0 * slip1, rel=1e-6)
+
+    def test_default_half_spread_is_75bp(self):
+        entry = exit_ = 200.0
+        _, slip_default = scalp_round_trip_costs(entry, exit_, NIFTY_LOT)
+        _, slip_explicit = scalp_round_trip_costs(
+            entry, exit_, NIFTY_LOT, half_spread_pct=0.0075
+        )
+        assert slip_default == pytest.approx(slip_explicit)
+
+    # --- input guards --------------------------------------------------------
+
+    def test_negative_entry_premium_raises(self):
+        with pytest.raises(ValueError, match="premium"):
+            scalp_round_trip_costs(-1.0, 100.0, NIFTY_LOT)
+
+    def test_negative_exit_premium_raises(self):
+        with pytest.raises(ValueError, match="premium"):
+            scalp_round_trip_costs(100.0, -1.0, NIFTY_LOT)
+
+    def test_zero_qty_raises(self):
+        with pytest.raises(ValueError, match="qty"):
+            scalp_round_trip_costs(100.0, 100.0, 0)
+
+    def test_negative_half_spread_floors_slippage_to_zero(self):
+        _, slip = scalp_round_trip_costs(100.0, 100.0, NIFTY_LOT, half_spread_pct=-0.01)
+        assert slip == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# SECTION 1c — SCALPER break-even (fno_costs.py)
+# ---------------------------------------------------------------------------
+
+
+class TestScalpBreakeven:
+    def test_nifty_breakeven_regression(self):
+        """Pin NIFTY 1-lot break-even at premium=120, lot=65, delta=0.5.
+
+        Round-trip drag (statutory + double-crossed spread @ 0.75%/leg) over a
+        65-unit lot is ~₹182.6 → ~₹2.81/unit premium move → ~2.34% of premium →
+        ~5.62 underlying points (delta 0.5). Spec target: ~2.3% / ~5.6pt.
+        """
+        be = scalp_breakeven(120.0, lot_size=65)
+        assert be["premium_pct"] == pytest.approx(2.34, abs=0.05)
+        assert be["premium_points"] == pytest.approx(2.81, abs=0.05)
+        assert be["underlying_points"] == pytest.approx(5.62, abs=0.1)
+
+    def test_breakeven_keys(self):
+        be = scalp_breakeven(120.0)
+        assert set(be) == {"premium_pct", "premium_points", "underlying_points"}
+
+    def test_default_lot_is_nifty(self):
+        assert scalp_breakeven(120.0) == scalp_breakeven(120.0, lot_size=NIFTY_LOT)
+
+    def test_underlying_points_scales_inverse_delta(self):
+        be_half = scalp_breakeven(120.0, delta=0.5)
+        be_quarter = scalp_breakeven(120.0, delta=0.25)
+        # half the delta → double the required underlying move
+        assert be_quarter["underlying_points"] == pytest.approx(
+            2.0 * be_half["underlying_points"], abs=0.01
+        )
+        # premium move is delta-independent
+        assert be_quarter["premium_points"] == pytest.approx(be_half["premium_points"])
+
+    def test_breakeven_consistent_with_round_trip(self):
+        """premium_points * lot == statutory.total + slippage."""
+        premium, lot = 120.0, 65
+        be = scalp_breakeven(premium, lot_size=lot)
+        costs, slip = scalp_round_trip_costs(premium, premium, lot)
+        assert be["premium_points"] * lot == pytest.approx(costs.total + slip, abs=0.01)
+
+    def test_banknifty_lot_breakeven(self):
+        """BANKNIFTY uses its own lot size; pure brokerage/stamp share spreads
+        over fewer/more units so the % differs from NIFTY but stays sane."""
+        be = scalp_breakeven(120.0, lot_size=BANKNIFTY_LOT)
+        assert 0.0 < be["premium_pct"] < 10.0
+        assert be["underlying_points"] > 0.0
+
+    def test_bad_delta_raises(self):
+        with pytest.raises(ValueError, match="delta"):
+            scalp_breakeven(120.0, delta=0.0)
+
+    def test_bad_lot_size_raises(self):
+        with pytest.raises(ValueError, match="lot_size"):
+            scalp_breakeven(120.0, lot_size=0)
+
+    def test_zero_premium_no_div_by_zero(self):
+        """premium=0 → premium_pct guarded to 0.0 (no ZeroDivisionError)."""
+        be = scalp_breakeven(0.0)
+        assert be["premium_pct"] == pytest.approx(0.0)
+        # the absolute drag still produces a positive per-unit premium move
+        assert be["premium_points"] > 0.0
+
+    def test_stamp_pct_constant_used(self):
+        """Stamp on the break-even round trip equals STAMP_BUY_PCT * buy turnover."""
+        premium, lot = 120.0, 65
+        costs, _ = scalp_round_trip_costs(premium, premium, lot)
+        assert costs.stamp_duty == pytest.approx(
+            STAMP_BUY_PCT * leg_turnover(premium, lot), abs=0.0001
+        )
+
+
+class TestIndexLotTable:
+    def test_nifty_and_banknifty_present(self):
+        assert INDEX_LOT_SIZE["NIFTY"] == NIFTY_LOT
+        assert INDEX_LOT_SIZE["BANKNIFTY"] == BANKNIFTY_LOT
+
+    def test_nifty_lot_value(self):
+        assert NIFTY_LOT == 65
 
 
 # ===========================================================================
