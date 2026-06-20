@@ -482,7 +482,7 @@ def cycles_for_index(index: IndexParams) -> list[dict[str, Any]]:
     the re-exported ``cycles_from_db`` for the given index."""
     return cycles_from_db(
         symbol=index.symbol,
-        nifty_id=index.index_security_id,
+        index_id=index.index_security_id,
         vix_id=index.vix_id if index.vix_id is not None else "21",
         mode=index.expiry_mode,
     )

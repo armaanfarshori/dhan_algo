@@ -1,5 +1,48 @@
 # NIFTY Iron-Condor — Phase-1 Backtest Harness & Go/No-Go (status report)
 
+> **Phase-0a fidelity update (2026-06-20, branch `feat/fno-backtest-fidelity`).**
+> Four fidelity bugs in the harness were fixed; each is feature-flagged by data
+> availability and changes results as noted. **The headline §0 GO numbers above
+> were produced by the PRE-fix harness and must be RE-RUN on a box with DB access
+> before being quoted again** — they are superseded pending that re-run.
+>
+> 1. **Tuesday expiry (fix #1).** NIFTY weekly expiry moved Thursday→Tuesday at the
+>    project-convention cutover `2026-09-01` (real-life 2025-09-01; the repo runs
+>    +1yr ahead). `cycles_from_db(mode="weekly")` now snaps each ISO week to its
+>    real expiry weekday (Thu pre-cutover / Tue on/after) with a holiday roll-back
+>    to the prior trading day, instead of "last trading day of the ISO week".
+>    *Result impact:* shifts entry/expiry/settlement dates for many cycles → spot,
+>    IV, DTE and settlement all move slightly; net edge can move either way. Most
+>    historical cycles are pre-cutover (Thursday) so the change is modest, but the
+>    Fri-floating boundaries of holiday/short weeks are corrected.
+> 2. **Day-count (fix #2).** The vol-gate compared a √252-annualised
+>    `realized_vol_20d` against a √365-annualised implied vol (VIX/100) — a
+>    cross-basis mix biasing the realized/implied ratio by √(365/252)≈1.204 (~20%).
+>    The gate now rebases realized vol onto the calendar (365) basis
+>    (`realized_vol_to_calendar_basis`) before comparing, so both sides share ONE
+>    convention. Black-76 pricing (calendar IV × T=dte/365) was already consistent
+>    and is unchanged. *Result impact:* the rebased realized vol is ~17% LOWER, so
+>    `realized < k·implied` fires MORE often → MORE SELL cycles at a given `k`. **`k`
+>    should be re-calibrated on calendar-basis ratios; the old k≈0.898 is no longer
+>    apples-to-apples.**
+> 3. **Real ATM IV preference (fix #3).** When a cycle carries a real per-expiry
+>    ATM IV (`atm_straddle_iv`, from `option_atm_iv.straddle_iv` /
+>    `option_chain_snapshot`) it is used for pricing/settlement in preference to the
+>    VIX proxy; the VIX/100 proxy remains the fallback for the historical window
+>    with no forward IV. The IV source is logged per cycle and counted
+>    (`n_real_iv` / `n_vix_proxy_iv`). *Result impact:* none on the current
+>    historical run (no real IV accrued yet → all `vix_proxy`); takes effect as the
+>    forward collector accrues real IV, at which point the calm-regime optimistic
+>    bias is removed for those cycles.
+> 4. **FSP settlement (fix #4).** Expiry resolution prefers NSE Final Settlement
+>    Price (`fsp`), then a last-half-hour VWAP proxy (`expiry_halfhour_vwap`), then
+>    the bar close (`expiry_spot`, least faithful). Source is recorded + counted
+>    (`n_official_fsp` / `n_proxy_settlement`). When real FSP is not used, `go_no_go`
+>    now appends a `FIDELITY:` disclaimer flagging the residual close-vs-FSP and
+>    proxy-IV bias (the GO/NO-GO criteria themselves are unchanged). *Result impact:*
+>    none on the current run (no FSP collected → all `close_proxy`); the residual
+>    limitation is now explicit in the verdict string.
+
 **Status (2026-06-19): FIRST REAL BACKTEST RUN — preliminary GO.** Data ingested into
 `dhan_trading` (NIFTY 50 + India VIX index bars via Dhan charts, detailed scrip master,
 expiry calendar). Realized vol computed; VIX used as the historical implied baseline.

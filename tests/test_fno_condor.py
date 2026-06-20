@@ -1173,24 +1173,29 @@ class TestCyclesFromDb:
 
 @needs_condor
 class TestCyclesFromDbWeekly:
-    """Verify mode="weekly" builds ISO-week-boundary cycles from index_bars.
+    """Verify mode="weekly" builds expiry-weekday cycle boundaries from index_bars.
 
-    Canned trading calendar: 4 ISO weeks, 2-3 trading days each.
-    Week boundaries (last trading day per ISO week):
+    Fidelity fix #1: the cycle boundary is the weekly-EXPIRY trading day (Thursday
+    before the 2026-09-01 Tuesday cutover; holiday-rolled to the prior trading day
+    when the expiry weekday is closed), NOT just the last trading day of the ISO
+    week. All canned dates are in Jan-2026 → pre-cutover → target weekday Thursday.
+
+    Canned trading calendar: 4 ISO weeks.
 
         ISO week (2026, 1): Mon 2026-01-05, Tue 2026-01-06, Thu 2026-01-08
-            → last = 2026-01-08 (Thu)
+            → Thursday present → boundary 2026-01-08 (Thu)
         ISO week (2026, 2): Mon 2026-01-12, Wed 2026-01-14, Fri 2026-01-16
-            → last = 2026-01-16 (Fri)
+            → no Thursday (expiry-day holiday) → roll back to last day on/before
+              Thu = Wed 2026-01-14
         ISO week (2026, 3): Mon 2026-01-19, Thu 2026-01-22
-            → last = 2026-01-22 (Thu)
+            → Thursday present → boundary 2026-01-22 (Thu)
         ISO week (2026, 4): Tue 2026-01-27, Fri 2026-01-30
-            → last = 2026-01-30 (Fri)
+            → no Thursday → roll back to last day on/before Thu = Tue 2026-01-27
 
-    Boundaries: [2026-01-08, 2026-01-16, 2026-01-22, 2026-01-30]
-    Pairs: (01-08, 01-16), (01-16, 01-22), (01-22, 01-30)
+    Boundaries: [2026-01-08, 2026-01-14, 2026-01-22, 2026-01-27]
+    Pairs: (01-08, 01-14), (01-14, 01-22), (01-22, 01-27)
 
-    VIX missing for 2026-01-16 → middle pair skipped → 2 cycles survive.
+    VIX missing for 2026-01-14 → middle pair skipped → 2 cycles survive.
     """
 
     # All trading dates across 4 ISO weeks (2026 week numbers)
@@ -1198,17 +1203,17 @@ class TestCyclesFromDbWeekly:
         # ISO week 1
         (date(2026, 1, 5),  22800.0, 0.11),
         (date(2026, 1, 6),  22900.0, 0.11),
-        (date(2026, 1, 8),  23000.0, 0.12),   # boundary: last of week 1
-        # ISO week 2
+        (date(2026, 1, 8),  23000.0, 0.12),   # boundary: Thu of week 1
+        # ISO week 2 (no Thursday → expiry rolls to Wed 01-14)
         (date(2026, 1, 12), 23050.0, 0.12),
-        (date(2026, 1, 14), 23100.0, 0.13),
-        (date(2026, 1, 16), 23200.0, 0.13),   # boundary: last of week 2
+        (date(2026, 1, 14), 23100.0, 0.13),   # boundary: rolled expiry of week 2
+        (date(2026, 1, 16), 23200.0, 0.13),
         # ISO week 3
         (date(2026, 1, 19), 23250.0, 0.13),
-        (date(2026, 1, 22), 23300.0, 0.14),   # boundary: last of week 3
-        # ISO week 4
-        (date(2026, 1, 27), 23350.0, 0.14),
-        (date(2026, 1, 30), 23400.0, 0.15),   # boundary: last of week 4
+        (date(2026, 1, 22), 23300.0, 0.14),   # boundary: Thu of week 3
+        # ISO week 4 (no Thursday → expiry rolls to Tue 01-27)
+        (date(2026, 1, 27), 23350.0, 0.14),   # boundary: rolled expiry of week 4
+        (date(2026, 1, 30), 23400.0, 0.15),
     ]
 
     _VIX_ROWS_FULL = [
@@ -1224,8 +1229,8 @@ class TestCyclesFromDbWeekly:
         (date(2026, 1, 30), 16.0),
     ]
 
-    # VIX missing at 2026-01-16 (boundary of week 2 → entry of pair 2)
-    _VIX_ROWS_MISSING_W2 = [r for r in _VIX_ROWS_FULL if r[0] != date(2026, 1, 16)]
+    # VIX missing at 2026-01-14 (rolled expiry of week 2 → entry of pair 2)
+    _VIX_ROWS_MISSING_W2 = [r for r in _VIX_ROWS_FULL if r[0] != date(2026, 1, 14)]
 
     @staticmethod
     def _make_weekly_session(nifty_rows, vix_rows):
@@ -1262,16 +1267,18 @@ class TestCyclesFromDbWeekly:
              patch("db.get_session", new=fake_gs):
             return cycles_from_db(mode="weekly")
 
-    def test_boundaries_are_last_trading_day_per_iso_week(self):
-        """The 4 ISO weeks produce exactly 4 boundaries; check their dates."""
+    def test_boundaries_are_expiry_weekday_per_iso_week(self):
+        """The 4 ISO weeks produce 4 expiry-weekday boundaries (fidelity fix #1).
+
+        boundaries = [01-08 (Thu), 01-14 (rolled), 01-22 (Thu), 01-27 (rolled)].
+        """
         cycles = self._run()
-        # boundaries = [01-08, 01-16, 01-22, 01-30]; pairs are consecutive
-        # Cycle 0: entry=01-08, expiry=01-16
+        # Cycle 0: entry=01-08 (Thu), expiry=01-14 (rolled expiry of week 2)
         assert cycles[0]["entry_date"] == date(2026, 1, 8)
-        assert cycles[0]["expiry_date"] == date(2026, 1, 16)
-        # Last cycle: entry=01-22, expiry=01-30
+        assert cycles[0]["expiry_date"] == date(2026, 1, 14)
+        # Last cycle: entry=01-22 (Thu), expiry=01-27 (rolled expiry of week 4)
         assert cycles[-1]["entry_date"] == date(2026, 1, 22)
-        assert cycles[-1]["expiry_date"] == date(2026, 1, 30)
+        assert cycles[-1]["expiry_date"] == date(2026, 1, 27)
 
     def test_correct_number_of_cycles(self):
         """4 boundaries → 3 consecutive pairs → 3 cycles (all data present)."""
@@ -1283,8 +1290,8 @@ class TestCyclesFromDbWeekly:
         cycles = self._run()
         # Cycle 0: boundary=01-08, VIX=14.0 → 0.14
         assert cycles[0]["straddle_iv"] == pytest.approx(14.0 / 100.0)
-        # Cycle 1: boundary=01-16, VIX=15.0 → 0.15
-        assert cycles[1]["straddle_iv"] == pytest.approx(15.0 / 100.0)
+        # Cycle 1: boundary=01-14, VIX=14.5 → 0.145
+        assert cycles[1]["straddle_iv"] == pytest.approx(14.5 / 100.0)
         # Cycle 2: boundary=01-22, VIX=15.5 → 0.155
         assert cycles[2]["straddle_iv"] == pytest.approx(15.5 / 100.0)
 
@@ -1297,12 +1304,12 @@ class TestCyclesFromDbWeekly:
     def test_expiry_spot_is_nifty_close_at_next_boundary(self):
         """expiry_spot is the NIFTY close on the NEXT boundary date."""
         cycles = self._run()
-        # Cycle 0: expiry=01-16 → NIFTY close = 23200.0
-        assert cycles[0]["expiry_spot"] == pytest.approx(23200.0)
+        # Cycle 0: expiry=01-14 → NIFTY close = 23100.0
+        assert cycles[0]["expiry_spot"] == pytest.approx(23100.0)
         # Cycle 1: expiry=01-22 → NIFTY close = 23300.0
         assert cycles[1]["expiry_spot"] == pytest.approx(23300.0)
-        # Cycle 2: expiry=01-30 → NIFTY close = 23400.0
-        assert cycles[2]["expiry_spot"] == pytest.approx(23400.0)
+        # Cycle 2: expiry=01-27 → NIFTY close = 23350.0
+        assert cycles[2]["expiry_spot"] == pytest.approx(23350.0)
 
     def test_spot_and_rvol_from_entry_boundary(self):
         """spot and realized_vol_20d come from the ENTRY boundary date."""
@@ -1313,11 +1320,11 @@ class TestCyclesFromDbWeekly:
 
     def test_missing_vix_at_boundary_skips_that_pair(self):
         """When VIX is absent for a boundary date, that pair is skipped."""
-        # VIX missing at 2026-01-16 (entry of pair 2: 01-16 → 01-22)
+        # VIX missing at 2026-01-14 (rolled expiry of week 2 → entry of pair 2)
         cycles = self._run(vix_rows=self._VIX_ROWS_MISSING_W2)
-        # Pair (01-08→01-16): VIX at 01-08=14.0 → survives
-        # Pair (01-16→01-22): VIX at 01-16=missing → SKIPPED
-        # Pair (01-22→01-30): VIX at 01-22=15.5 → survives
+        # Pair (01-08→01-14): VIX at 01-08=14.0 → survives
+        # Pair (01-14→01-22): VIX at 01-14=missing → SKIPPED
+        # Pair (01-22→01-27): VIX at 01-22=15.5 → survives
         assert len(cycles) == 2
         assert cycles[0]["entry_date"] == date(2026, 1, 8)
         assert cycles[1]["entry_date"] == date(2026, 1, 22)
@@ -1499,3 +1506,375 @@ class TestCyclesFromDbWeeklyEndToEnd:
         ok, reason = metrics["go_no_go"]
         assert isinstance(ok, bool)
         assert isinstance(reason, str)
+
+
+# ===========================================================================
+# SECTION 10 — Phase-0a fidelity fixes (Tuesday-expiry, day-count, real-IV, FSP)
+# ===========================================================================
+
+
+@needs_condor
+class TestExpiryWeekday:
+    """Fix #1 — date-aware NIFTY weekly-expiry weekday (Thu → Tue cutover)."""
+
+    def test_thursday_before_cutover(self):
+        from research.backtest.fno_condor import (
+            NIFTY_TUESDAY_EXPIRY_CUTOVER,
+            expiry_weekday_for,
+        )
+        # Day before cutover → Thursday (Python weekday 3)
+        before = date(NIFTY_TUESDAY_EXPIRY_CUTOVER.year, 8, 15)
+        assert expiry_weekday_for(before) == 3
+
+    def test_tuesday_on_or_after_cutover(self):
+        from research.backtest.fno_condor import (
+            NIFTY_TUESDAY_EXPIRY_CUTOVER,
+            expiry_weekday_for,
+        )
+        # On the cutover and after → Tuesday (Python weekday 1)
+        assert expiry_weekday_for(NIFTY_TUESDAY_EXPIRY_CUTOVER) == 1
+        after = date(NIFTY_TUESDAY_EXPIRY_CUTOVER.year + 1, 1, 1)
+        assert expiry_weekday_for(after) == 1
+
+    def test_cutover_is_project_convention_2026_09_01(self):
+        """Project runs +1yr ahead of real life → real 2025-09-01 == 2026-09-01."""
+        from research.backtest.fno_condor import NIFTY_TUESDAY_EXPIRY_CUTOVER
+        assert NIFTY_TUESDAY_EXPIRY_CUTOVER == date(2026, 9, 1)
+
+    def test_snap_picks_thursday_before_cutover(self):
+        from research.backtest.fno_condor import snap_to_expiry_weekday
+        # Full pre-cutover week Mon..Fri → Thursday chosen
+        week = [date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7),
+                date(2026, 1, 8), date(2026, 1, 9)]  # Mon..Fri; Thu = 01-08
+        assert snap_to_expiry_weekday(week) == date(2026, 1, 8)
+
+    def test_snap_picks_tuesday_after_cutover(self):
+        from research.backtest.fno_condor import snap_to_expiry_weekday
+        # Week in Sep-2026 (post-cutover) Mon..Fri → Tuesday chosen
+        # 2026-09-07 is Mon, 09-08 Tue, ... 09-11 Fri
+        week = [date(2026, 9, 7), date(2026, 9, 8), date(2026, 9, 9),
+                date(2026, 9, 10), date(2026, 9, 11)]
+        assert snap_to_expiry_weekday(week) == date(2026, 9, 8)
+
+    def test_snap_rolls_back_when_expiry_weekday_holiday(self):
+        from research.backtest.fno_condor import snap_to_expiry_weekday
+        # Pre-cutover week with NO Thursday (holiday) → roll back to Wed
+        week = [date(2026, 1, 12), date(2026, 1, 14), date(2026, 1, 16)]  # Mon,Wed,Fri
+        assert snap_to_expiry_weekday(week) == date(2026, 1, 14)
+
+    def test_snap_empty_week_returns_none(self):
+        from research.backtest.fno_condor import snap_to_expiry_weekday
+        assert snap_to_expiry_weekday([]) is None
+
+
+@needs_condor
+class TestIndexConfigAgnostic:
+    """Fix #1 (index-agnostic) — a NON-NIFTY underlying config drives its own
+    expiry rule; the NIFTY default is unchanged.
+
+    F&O code must not be NIFTY-hardcoded. ``expiry_weekday_for`` /
+    ``snap_to_expiry_weekday`` take an ``IndexConfig``; here we define a
+    monthly-only index whose expiry weekday is WEDNESDAY (2) with no cutover, and
+    prove it snaps to Wednesday — while NIFTY still snaps to Thu/Tue.
+    """
+
+    @staticmethod
+    def _monthly_only_index():
+        from research.backtest.fno_condor import IndexConfig
+        # A fictitious monthly-only underlying: no weeklies, fixed Wednesday
+        # expiry, no Thursday→Tuesday cutover. Values are illustrative (the task
+        # explicitly says non-NIFTY indices need no real data — just no hardcode).
+        return IndexConfig(
+            symbol="TESTIDX",
+            security_id="999",
+            vix_security_id=None,
+            lot_size=15,
+            strike_step=100,
+            has_weeklies=False,
+            expiry_weekday=2,        # Wednesday
+            pre_cutover_weekday=None,
+            cutover_date=None,
+        )
+
+    def test_nifty_default_config_values(self):
+        from research.backtest.fno_condor import NIFTY, NIFTY_TUESDAY_EXPIRY_CUTOVER
+        assert NIFTY.symbol == "NIFTY"
+        assert NIFTY.security_id == "13"
+        assert NIFTY.vix_security_id == "21"
+        assert NIFTY.lot_size == 65
+        assert NIFTY.strike_step == 50
+        assert NIFTY.has_weeklies is True
+        assert NIFTY.expiry_weekday == 1            # Tuesday (post-cutover)
+        assert NIFTY.pre_cutover_weekday == 3       # Thursday (pre-cutover)
+        assert NIFTY.cutover_date == NIFTY_TUESDAY_EXPIRY_CUTOVER
+
+    def test_non_nifty_expiry_weekday_is_its_own(self):
+        """A monthly-only index returns its OWN expiry weekday on every date —
+        no NIFTY Thursday/Tuesday rule leaks in."""
+        from research.backtest.fno_condor import expiry_weekday_for
+        idx = self._monthly_only_index()
+        # Both before and after NIFTY's cutover, the custom index stays Wednesday.
+        assert expiry_weekday_for(date(2026, 1, 15), index=idx) == 2
+        assert expiry_weekday_for(date(2026, 12, 15), index=idx) == 2
+
+    def test_non_nifty_snap_picks_its_own_weekday(self):
+        """snap_to_expiry_weekday on a non-NIFTY index snaps to its weekday."""
+        from research.backtest.fno_condor import snap_to_expiry_weekday
+        idx = self._monthly_only_index()
+        # Mon..Fri week → Wednesday should be chosen (2026-01-14 is a Wednesday).
+        week = [date(2026, 1, 12), date(2026, 1, 13), date(2026, 1, 14),
+                date(2026, 1, 15), date(2026, 1, 16)]
+        assert snap_to_expiry_weekday(week, index=idx) == date(2026, 1, 14)
+
+    def test_nifty_behaviour_unchanged_via_config(self):
+        """Passing the NIFTY config explicitly reproduces the default behaviour."""
+        from research.backtest.fno_condor import (
+            NIFTY,
+            expiry_weekday_for,
+            snap_to_expiry_weekday,
+        )
+        # Pre-cutover → Thursday; on/after → Tuesday (unchanged from the default).
+        assert expiry_weekday_for(date(2026, 1, 15), index=NIFTY) == 3
+        assert expiry_weekday_for(date(2026, 9, 1), index=NIFTY) == 1
+        # Default arg (no index passed) must match passing NIFTY explicitly.
+        assert expiry_weekday_for(date(2026, 1, 15)) == expiry_weekday_for(
+            date(2026, 1, 15), index=NIFTY
+        )
+        pre_week = [date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7),
+                    date(2026, 1, 8), date(2026, 1, 9)]
+        assert snap_to_expiry_weekday(pre_week, index=NIFTY) == date(2026, 1, 8)
+
+    def test_non_nifty_index_drives_weekly_cycles_from_db(self):
+        """End-to-end: a non-NIFTY IndexConfig drives cycles_from_db weekly
+        boundaries via its own security_id and Wednesday expiry rule."""
+        from research.backtest.fno_condor import IndexConfig, cycles_from_db
+
+        idx = IndexConfig(
+            symbol="TESTIDX",
+            security_id="999",
+            vix_security_id="888",
+            lot_size=15,
+            strike_step=100,
+            has_weeklies=False,
+            expiry_weekday=2,   # Wednesday
+        )
+        # Two ISO weeks, each with a Wednesday → boundaries are the Wednesdays.
+        #   2026-01-14 (Wed), 2026-01-21 (Wed) → 1 pair → 1 cycle
+        index_rows = [
+            (date(2026, 1, 12), 50000.0, 0.10),
+            (date(2026, 1, 14), 50000.0, 0.10),   # Wed boundary week 1
+            (date(2026, 1, 16), 50000.0, 0.10),
+            (date(2026, 1, 19), 50000.0, 0.10),
+            (date(2026, 1, 21), 50000.0, 0.10),   # Wed boundary week 2
+        ]
+        vix_rows = [(d, 15.0) for d, *_ in index_rows]
+
+        def _make_result(rows):
+            result = MagicMock()
+            result.fetchall.return_value = rows
+            return result
+
+        session = MagicMock()
+        # Assert the query used the custom index security_id (999), not NIFTY (13).
+        captured = {}
+
+        def _execute(stmt, params):
+            captured.setdefault("ids", []).append(params.get("nid") or params.get("vid"))
+            # First call → index rows, second → vix rows
+            if params.get("nid") == "999":
+                return _make_result(index_rows)
+            return _make_result(vix_rows)
+
+        session.execute.side_effect = _execute
+
+        @contextmanager
+        def fake_get_session():
+            yield session
+
+        with patch("research.backtest.fno_condor.get_session", new=fake_get_session, create=True), \
+             patch("db.get_session", new=fake_get_session):
+            cycles = cycles_from_db(index=idx, mode="weekly")
+
+        assert "999" in captured["ids"], "custom index security_id must drive the query"
+        assert "888" in captured["ids"], "custom vix security_id must drive the query"
+        assert len(cycles) == 1
+        assert cycles[0]["entry_date"] == date(2026, 1, 14)   # Wednesday
+        assert cycles[0]["expiry_date"] == date(2026, 1, 21)  # Wednesday
+
+
+@needs_condor
+class TestDayCountConvention:
+    """Fix #2 — realized vol (√252) rebased to calendar (√365) for the gate."""
+
+    def test_rebase_factor_is_sqrt_252_over_365(self):
+        import math
+
+        from research.backtest.fno_condor import realized_vol_to_calendar_basis
+        rv = 0.20
+        out = realized_vol_to_calendar_basis(rv)
+        assert out == pytest.approx(rv * math.sqrt(252 / 365))
+        # The factor is < 1 → calendar-basis vol is LOWER than trading-basis vol
+        assert out < rv
+
+    def test_none_passes_through(self):
+        from research.backtest.fno_condor import realized_vol_to_calendar_basis
+        assert realized_vol_to_calendar_basis(None) is None
+
+    def test_gate_uses_calendar_basis(self):
+        """A cycle that would STAND_ASIDE on the raw √252 vol but SELL once the
+        vol is correctly rebased to the calendar basis must now produce a trade.
+
+        realized_vol_20d=0.135 (√252). 0.9*iv with iv=0.15 → 0.135, so raw
+        0.135 is NOT < 0.135 → STAND_ASIDE under the buggy mix. Rebased:
+        0.135*√(252/365) ≈ 0.1121 < 0.135 → SELL.
+        """
+        from research.backtest.fno_condor import run_backtest
+        cycle = {
+            "cycle_id": "daycount",
+            "spot": 23400.0,
+            "straddle_iv": 0.15,
+            "realized_vol_20d": 0.135,
+            "dte": 7,
+            "expiry_spot": 23400.0,
+        }
+        result = run_backtest([cycle], k=0.9, move_mult=1.0)
+        assert result["n_trades"] == 1, "rebased realized vol should pass the SELL gate"
+
+
+@needs_condor
+class TestIvSourcePreference:
+    """Fix #3 — prefer real ATM IV over the VIX proxy; source recorded + counted."""
+
+    def test_resolve_prefers_real_atm(self):
+        from research.backtest.fno_condor import IV_SOURCE_REAL, resolve_iv_source
+        iv, src = resolve_iv_source({"atm_straddle_iv": 0.11, "straddle_iv": 0.15})
+        assert iv == pytest.approx(0.11)
+        assert src == IV_SOURCE_REAL
+
+    def test_resolve_falls_back_to_vix_proxy(self):
+        from research.backtest.fno_condor import IV_SOURCE_VIX_PROXY, resolve_iv_source
+        iv, src = resolve_iv_source({"straddle_iv": 0.15})
+        assert iv == pytest.approx(0.15)
+        assert src == IV_SOURCE_VIX_PROXY
+
+    def test_resolve_ignores_non_positive_real(self):
+        from research.backtest.fno_condor import IV_SOURCE_VIX_PROXY, resolve_iv_source
+        iv, src = resolve_iv_source({"atm_straddle_iv": 0.0, "straddle_iv": 0.15})
+        assert iv == pytest.approx(0.15)
+        assert src == IV_SOURCE_VIX_PROXY
+
+    def test_resolve_none_when_no_iv(self):
+        from research.backtest.fno_condor import resolve_iv_source
+        iv, _src = resolve_iv_source({})
+        assert iv is None
+
+    def test_trade_records_real_iv_source_and_count(self):
+        from research.backtest.fno_condor import IV_SOURCE_REAL, run_backtest
+        cycle = {
+            "cycle_id": "real_iv",
+            "spot": 23400.0,
+            "atm_straddle_iv": 0.15,   # real → preferred
+            "straddle_iv": 0.30,       # proxy present but should be ignored
+            "realized_vol_20d": 0.08,
+            "dte": 7,
+            "expiry_spot": 23400.0,
+        }
+        result = run_backtest([cycle], k=0.9, move_mult=1.0)
+        assert result["n_trades"] == 1
+        assert result["trades"][0].iv_source == IV_SOURCE_REAL
+        assert result["trades"][0].straddle_iv == pytest.approx(0.15)
+        assert result["n_real_iv"] == 1
+        assert result["n_vix_proxy_iv"] == 0
+
+    def test_go_no_go_flags_proxy_iv(self):
+        from research.backtest.fno_condor import go_no_go
+        metrics = {
+            "n_trades": 30, "win_rate": 0.9, "profit_factor": 2.0, "sharpe": 1.5,
+            "max_drawdown": -1000.0, "net_pnl": 50_000.0, "return_on_capital": 0.25,
+            "n_real_iv": 0, "n_vix_proxy_iv": 30,
+            "n_official_fsp": 0, "n_proxy_settlement": 30,
+        }
+        ok, reason = go_no_go(metrics, capital=200_000.0)
+        assert ok is True
+        assert "FIDELITY" in reason
+        assert "proxy" in reason.lower()
+
+
+@needs_condor
+class TestSettlementSource:
+    """Fix #4 — prefer NSE FSP, then half-hour VWAP, then close; flag residual."""
+
+    def test_resolve_prefers_fsp(self):
+        from research.backtest.fno_condor import FSP_SOURCE_OFFICIAL, resolve_settlement_price
+        val, src = resolve_settlement_price(
+            {"fsp": 23410.0, "expiry_halfhour_vwap": 23405.0, "expiry_spot": 23400.0}
+        )
+        assert val == pytest.approx(23410.0)
+        assert src == FSP_SOURCE_OFFICIAL
+
+    def test_resolve_uses_halfhour_vwap_when_no_fsp(self):
+        from research.backtest.fno_condor import (
+            FSP_SOURCE_HALFHOUR_VWAP,
+            resolve_settlement_price,
+        )
+        val, src = resolve_settlement_price(
+            {"expiry_halfhour_vwap": 23405.0, "expiry_spot": 23400.0}
+        )
+        assert val == pytest.approx(23405.0)
+        assert src == FSP_SOURCE_HALFHOUR_VWAP
+
+    def test_resolve_falls_back_to_close(self):
+        from research.backtest.fno_condor import FSP_SOURCE_CLOSE_PROXY, resolve_settlement_price
+        val, src = resolve_settlement_price({"expiry_spot": 23400.0})
+        assert val == pytest.approx(23400.0)
+        assert src == FSP_SOURCE_CLOSE_PROXY
+
+    def test_resolve_none_when_no_settlement(self):
+        from research.backtest.fno_condor import resolve_settlement_price
+        val, _src = resolve_settlement_price({})
+        assert val is None
+
+    def test_trade_records_fsp_source(self):
+        from research.backtest.fno_condor import FSP_SOURCE_OFFICIAL, run_backtest
+        cycle = {
+            "cycle_id": "fsp",
+            "spot": 23400.0,
+            "straddle_iv": 0.15,
+            "realized_vol_20d": 0.08,
+            "dte": 7,
+            "fsp": 23400.0,            # official FSP used for resolution
+            "expiry_spot": 23400.0,    # close present but FSP preferred
+        }
+        result = run_backtest([cycle], k=0.9, move_mult=1.0)
+        assert result["n_trades"] == 1
+        assert result["trades"][0].settlement_source == FSP_SOURCE_OFFICIAL
+        assert result["n_official_fsp"] == 1
+        assert result["n_proxy_settlement"] == 0
+
+    def test_go_no_go_flags_proxy_settlement(self):
+        from research.backtest.fno_condor import go_no_go
+        metrics = {
+            "n_trades": 30, "win_rate": 0.9, "profit_factor": 2.0, "sharpe": 1.5,
+            "max_drawdown": -1000.0, "net_pnl": 50_000.0, "return_on_capital": 0.25,
+            "n_real_iv": 30, "n_vix_proxy_iv": 0,
+            "n_official_fsp": 0, "n_proxy_settlement": 30,
+        }
+        ok, reason = go_no_go(metrics, capital=200_000.0)
+        assert ok is True
+        assert "FIDELITY" in reason
+        assert "FSP" in reason
+
+    def test_cycle_with_only_fsp_and_real_iv_trades(self):
+        """A cycle supplying ONLY the new fidelity keys (no VIX proxy / no close)
+        must still trade — the malformed guard accepts either IV/settlement source."""
+        from research.backtest.fno_condor import run_backtest
+        cycle = {
+            "cycle_id": "fidelity_only",
+            "spot": 23400.0,
+            "atm_straddle_iv": 0.15,   # no straddle_iv proxy
+            "realized_vol_20d": 0.08,
+            "dte": 7,
+            "fsp": 23400.0,            # no expiry_spot close
+        }
+        result = run_backtest([cycle], k=0.9, move_mult=1.0)
+        assert result["n_trades"] == 1
