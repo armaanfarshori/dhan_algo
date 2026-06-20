@@ -589,6 +589,30 @@ class TestRunStrategyBacktest:
         metrics = run_strategy_backtest(spec, self._three_cycles, k=0.9)
         assert metrics["n_cycles"] == 3
 
+    # ── Gate A/B toggle (gated vs ungated) ────────────────────────────────
+    def test_gate_default_is_vol(self):
+        """No gate arg → vol-gated → iron_condor trades only the SELL cycle."""
+        spec = FNO_STRATEGIES["iron_condor"]
+        m = run_strategy_backtest(spec, self._three_cycles, k=0.9)
+        assert m["n_trades"] == 1
+        assert m["gate"] == "vol"
+
+    def test_gate_none_takes_all_cycles(self):
+        """gate='none' → ungated → every valid cycle trades (3), not just 1."""
+        spec = FNO_STRATEGIES["iron_condor"]
+        m = run_strategy_backtest(spec, self._three_cycles, k=0.9, gate="none")
+        assert m["n_trades"] == 3
+        assert m["gate"] == "none"
+
+    def test_ungated_ge_gated_across_strategies(self):
+        """Ungated n_trades >= gated n_trades for every strategy (gate only filters)."""
+        for name in ("iron_condor", "short_strangle", "bull_put_spread", "long_straddle"):
+            spec = FNO_STRATEGIES[name]
+            gated = run_strategy_backtest(spec, self._three_cycles, k=0.9, gate="vol")
+            ungated = run_strategy_backtest(spec, self._three_cycles, k=0.9, gate="none")
+            assert ungated["n_trades"] >= gated["n_trades"], name
+            assert ungated["n_trades"] == 3, name  # all valid cycles taken
+
     def test_mean_span_positive_when_trades(self):
         spec = FNO_STRATEGIES["iron_condor"]
         metrics = run_strategy_backtest(spec, self._three_cycles, k=0.9)
