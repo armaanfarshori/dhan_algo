@@ -18,12 +18,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
+from pathlib import Path
 
-import db
-from config import get_config
-import core.fno_backfill as fb
-import core.fno_paper as fp
-from core.client import DhanClient
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import db  # noqa: E402
+from config import get_config  # noqa: E402
+import core.fno_backfill as fb  # noqa: E402
+import core.fno_paper as fp  # noqa: E402
+from core.client import DhanClient  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("dhan.fno_intraday")
