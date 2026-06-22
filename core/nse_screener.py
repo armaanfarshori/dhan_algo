@@ -45,7 +45,7 @@ def get_top_volatile(
     lookback_days: int = _DEFAULT_LOOKBACK,
     segment: str = "NSE_EQ",
     min_avg_volume: int = 50_000,
-    min_price: float = 50.0,
+    min_price: float = 200.0,
 ) -> list[dict[str, Any]]:
     """
     Rank NSE equity securities by average daily ATR % over the last lookback_days.
