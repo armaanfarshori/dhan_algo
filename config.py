@@ -42,15 +42,15 @@ class Config(BaseSettings):
     capital: float = 100_000.0            # live starting capital
     paper_balance: float = 500_000.0      # paper starting equity
     risk_per_trade: float = 0.005         # 0.5% of equity at risk per trade
-    max_daily_loss_pct: float = 0.02      # 2% — halt + flatten for the day
-    weekly_loss_pct: float = 0.05         # 5% — halt until next week
+    max_daily_loss_pct: float = 0.05      # 5% of ₹500K = ₹25,000/day — halt + flatten (raised from 2%/₹10k)
+    weekly_loss_pct: float = 0.10         # 10% of ₹500K = ₹50,000/week — backstop above the ₹25k daily
     max_notional_per_trade_pct: float = 0.20
     max_gross_exposure_pct: float = 1.00  # Σ|position notional| — no implicit leverage
     adv_participation_pct: float = 0.01   # qty ≤ 1% of 20-day avg daily volume
     min_stop_distance_pct: float = 0.0035 # stop floor — tiny ORB ranges can't explode size
     live_risk_scale: float = 0.5          # live mode halves every fraction (M8 training wheels)
     max_orders_per_session: int = 4
-    max_open_positions: int = 10
+    max_open_positions: int = 20
     paper_slippage_bps: float = 2.0       # adverse slippage on simulated fills
     # The risk loop must not price the daily-loss halt / equity snapshot off a
     # frozen feed. A WS tick older than this (or no tick at all) is treated as
