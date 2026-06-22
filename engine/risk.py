@@ -38,13 +38,13 @@ logger = logging.getLogger("dhan.engine.risk")
 class RiskParams:
     equity_base: float = 500_000.0        # starting capital (paper balance / live capital)
     risk_per_trade: float = 0.005         # fraction of equity at risk per trade
-    max_daily_loss_pct: float = 0.02      # halt + flatten for the day
-    weekly_loss_pct: float = 0.05         # halt until next week
+    max_daily_loss_pct: float = 0.05      # ₹25k/day on ₹500K — halt + flatten for the day
+    weekly_loss_pct: float = 0.10         # ₹50k/week — backstop above the daily
     max_notional_pct: float = 0.20        # per-trade notional cap
     max_gross_exposure_pct: float = 1.00  # Σ|position notional| cap — no implicit leverage
     adv_participation_pct: float = 0.01   # qty ≤ this fraction of 20-day ADV
     min_stop_distance_pct: float = 0.0035 # stop floor: 0.35% of entry
-    max_open_positions: int = 10
+    max_open_positions: int = 20
     check_interval_seconds: int = 10
     killswitch_file: Optional[Path] = None  # api process trips this
     halt_file: Optional[Path] = None        # loss halts persist here across restarts
