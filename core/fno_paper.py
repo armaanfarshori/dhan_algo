@@ -295,7 +295,7 @@ def record_paper_entry(
                     :spot_entry, :straddle_iv, :realized_vol_20d, :gate_decision, :k,
                     :short_put_k, :short_call_k, :long_put_k, :long_call_k,
                     :short_put_prem, :short_call_prem, :long_put_prem, :long_call_prem,
-                    :credit, :max_loss, :entry_costs, 'OPEN', :raw::jsonb
+                    :credit, :max_loss, :entry_costs, 'OPEN', CAST(:raw AS jsonb)
                 )
                 ON CONFLICT ON CONSTRAINT uq_fno_paper_symbol_expiry DO NOTHING
             """),
