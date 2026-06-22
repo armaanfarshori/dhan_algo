@@ -108,7 +108,7 @@ class Config(BaseSettings):
     # Day-1 lesson (2026-06-12): the unfloored ATR% screener picks ₹13 penny
     # stocks where 2bps paper slippage is fantasy (tick = 7bps), and a cached
     # watchlist once smuggled in a non-tradeable index.
-    screener_min_price: float = 50.0      # ₹ — average close floor
+    screener_min_price: float = 200.0     # ₹ — average close floor (raised 50→200 for quality names)
     screener_min_avg_volume: int = 50_000 # shares/day floor
 
     # ── Kronos ──────────────────────────────────────────────────────────────
