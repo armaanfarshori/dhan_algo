@@ -675,16 +675,20 @@ async def snapshot_option_chain(
     expiry_date: Optional[date] = None,
     expiry_type: Optional[str] = None,
     now: Optional[datetime] = None,
+    allow_market_hours: bool = False,
 ) -> dict[str, Any]:
     """Pull the LIVE option chain for one expiry, capture ALL rows into
     option_chain_snapshot, and also project the ATM IV into option_atm_iv.
 
     If ``expiry_date`` is None, the nearest upcoming expiry is picked via
-    ``client.get_fno_expiry_list``. Off-hours only.
+    ``client.get_fno_expiry_list``. Off-hours only by default; pass
+    ``allow_market_hours=True`` for the intraday forward-paper loop (the Dhan
+    chain endpoint is a data read that works during market hours).
 
     Returns ``{"chain_rows": n, "atm": 0|1}``.
     """
-    _assert_off_hours("snapshot_option_chain", now)
+    if not allow_market_hours:
+        _assert_off_hours("snapshot_option_chain", now)
     # Capture now once so snapshot_time and option_atm_iv.time are identical.
     now = now or _now_ist()
     scrip = underlying_scrip if underlying_scrip is not None else SYMBOL_SCRIP[symbol]
