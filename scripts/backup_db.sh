@@ -60,6 +60,20 @@ DB_USER="${DB_USER:-trader}"
 COMPOSE_SERVICE="${COMPOSE_SERVICE:-timescaledb}"
 S3_BUCKET="${S3_BUCKET:-}"
 
+# Cron runs this script with a bare environment: no S3_BUCKET, and a PATH
+# (/usr/bin:/bin) that misses /usr/local/bin where the AWS CLI v2 installer
+# puts `aws` — without these two lines the S3 leg silently self-skips forever
+# under cron while working fine when run by hand.
+PATH="$PATH:/usr/local/bin"
+if [ -z "$S3_BUCKET" ] && [ -f "$REPO_ROOT/.env" ]; then
+    # Conservative KEY=VALUE read (tolerates spaces around '=', export prefix,
+    # trailing inline comment, surrounding quotes) — same shape config.py's
+    # dotenv accepts. Only S3_BUCKET is read; the .env is never sourced.
+    S3_BUCKET="$(sed -nE \
+        's/^[[:space:]]*(export[[:space:]]+)?S3_BUCKET[[:space:]]*=[[:space:]]*//p' \
+        "$REPO_ROOT/.env" | tail -n 1 | sed -E 's/[[:space:]]+#.*$//; s/^"(.*)"$/\1/; s/^'\''(.*)'\''$/\1/; s/[[:space:]]+$//')"
+fi
+
 # ── Logging ──────────────────────────────────────────────────────────────────
 log()  { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$*"; }
 warn() { printf '%s  WARN  %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$*" >&2; }
