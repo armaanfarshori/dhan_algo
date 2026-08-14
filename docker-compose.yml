@@ -1,0 +1,100 @@
+# DhanAIBot — local TimescaleDB (home server, post-AWS).
+#
+# Replaces the retired AWS DB instance (bare-metal PostgreSQL 16 + TimescaleDB on
+# its own EC2 box). The whole platform now runs on ONE machine, so the database
+# lives here as a container and the engine talks to it over loopback.
+#
+#   docker compose up -d timescaledb        # start
+#   docker compose ps                       # wait for "healthy"
+#   .venv/bin/alembic upgrade head          # bootstrap schema (001 -> 014)
+#
+# See docs/local-db.md for the full operator runbook (verify, wipe, rebuild).
+#
+# Credentials/ports are interpolated from the repo-root `.env` (gitignored,
+# Compose reads it automatically) with defaults that match config.py's Config
+# fields — so `docker compose up` works on a fresh clone with no .env at all.
+
+# Fixed project name: keeps container/network names stable no matter which
+# directory (or git worktree) this file is invoked from.
+name: dhan
+
+services:
+  timescaledb:
+    # PINNED — repo convention (CLAUDE.md). Do NOT float this tag: TimescaleDB
+    # 2.18+ renames the compression DDL used by alembic 002/009/010
+    # (`timescaledb.compress` -> `timescaledb.enable_columnstore`), and a major
+    # PostgreSQL bump would require a dump/restore of the data volume.
+    # This is the community (TSL) build — `add_compression_policy` /
+    # `add_retention_policy` in the migrations need it; the `-apache` variant
+    # would fail on those.
+    image: timescale/timescaledb:2.17.2-pg16
+    container_name: dhan-timescaledb
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: ${DB_NAME:-dhan_trading}
+      POSTGRES_USER: ${DB_USER:-trader}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-trader123}
+      # Private single-user box — no usage reporting.
+      TIMESCALEDB_TELEMETRY: "off"
+
+    ports:
+      # LOOPBACK ONLY. This host sits on a LAN and a tailnet; binding 0.0.0.0
+      # would expose Postgres to both. The engine, dashboard and alembic all
+      # run on this machine, so 127.0.0.1 is the entire access surface.
+      # Remote access, if ever needed, goes through an SSH tunnel — never by
+      # widening this binding.
+      - "127.0.0.1:5432:5432"
+
+    volumes:
+      - dhan_pgdata:/var/lib/postgresql/data
+
+    # TimescaleDB's compression (alembic 002 attaches policies to ticks/bars/
+    # positions/equity_curve) builds batches in shared memory; Docker's 64MB
+    # default causes "could not resize shared memory segment" on compression
+    # jobs and on parallel scans over the bars hypertable.
+    shm_size: 1gb
+
+    healthcheck:
+      # Env-var forms so this stays correct if DB_USER/DB_NAME are overridden.
+      # `$$` escapes Compose interpolation -> the container shell expands it.
+      test: ["CMD-SHELL", 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      # First boot runs initdb + the timescaledb bootstrap; don't count
+      # failures until that has had time to finish.
+      start_period: 30s
+
+    # ── Resource guidance — 32GB RAM but only a 256GB SSD ────────────────────
+    # Disk is the binding constraint on this box, not memory. Defaults are
+    # deliberately left alone; if you tune, keep these rules:
+    #
+    #  • Do NOT enable aggressive WAL retention. Leave `archive_mode` off and
+    #    `wal_keep_size` at 0 — there is no standby to feed, and retained WAL
+    #    is the fastest way to fill 256GB. Same for `max_wal_size`: raising it
+    #    trades disk for write throughput this workload does not need.
+    #  • Do NOT re-run the full NSE_EQ backfill here. That dataset was ~300M
+    #    rows / tens of GB on AWS and will not fit alongside the OS. Keep the
+    #    local dataset to the F&O working set.
+    #  • The compression + retention policies in alembic 002 are what keep
+    #    ticks/bars bounded — never drop them to "speed up" ingestion.
+    #  • If you do tune for the 32GB host, a modest starting point is
+    #    shared_buffers=4GB, effective_cache_size=12GB, work_mem=32MB,
+    #    maintenance_work_mem=1GB, applied via a `command:` override, e.g.
+    #      command: >
+    #        postgres -c shared_buffers=4GB -c effective_cache_size=12GB
+    #                 -c work_mem=32MB -c maintenance_work_mem=1GB
+    #    Measure before and after; the defaults are fine for paper trading.
+    #  • Optional container caps (uncomment if the DB ever starves the engine):
+    #      deploy:
+    #        resources:
+    #          limits:
+    #            memory: 8g
+
+volumes:
+  dhan_pgdata:
+    # Explicit name -> the real Docker volume is `dhan_pgdata`, not
+    # `<project>_dhan_pgdata`. Keeps `docker volume` commands and the wipe
+    # procedure in docs/local-db.md predictable.
+    name: dhan_pgdata
