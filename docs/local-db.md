@@ -61,9 +61,14 @@ is a `config.py` feature, and Alembic never touches `config.py`. So export the
 file first:
 
 ```bash
-set -a && source .env && set +a          # skip if you are using the defaults
+[ -f .env ] && { set -a; source .env; set +a; }   # no-op when there is no .env
 .venv/bin/alembic upgrade head
 ```
+
+The guard is not decoration. `set -a && source .env && set +a` short-circuits when
+`.env` is absent — `source` fails, `set +a` never runs, and `allexport` stays on for
+the rest of that shell, silently exporting every later assignment. Since the
+defaults path above is explicitly a valid way to run, the file may well not exist.
 
 Run this from the **repo root** — `alembic.ini` lives there and points
 `script_location` at `alembic/`.
@@ -176,7 +181,7 @@ only), so a rebuild is cheap. **This destroys all data**:
 docker compose down -v                 # -v also removes the dhan_pgdata volume
 docker compose up -d timescaledb
 # wait for healthy (step 2), then:
-set -a && source .env && set +a
+[ -f .env ] && { set -a; source .env; set +a; }
 .venv/bin/alembic upgrade head
 ```
 
