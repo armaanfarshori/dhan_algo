@@ -88,10 +88,14 @@ def main() -> int:
     try:
         actual = asyncio.run(_fetch_egress_ip(proxy_url))
     except Exception as exc:
+        # The local log keeps the full exception — diagnosing a dead proxy needs
+        # it. The Telegram message does NOT: aiohttp's proxy errors stringify as
+        # "Cannot connect to host <proxy-host>:<port> …", which would push the
+        # egress VM's address out over an external channel. Type name only.
         logger.critical("egress_check: proxy UNREACHABLE (%s) — orders cannot be placed", exc)
         _alert(
-            "🚨 EGRESS CHECK: Dhan proxy unreachable "
-            f"({type(exc).__name__}: {exc}). Order placement will FAIL."
+            f"🚨 EGRESS CHECK: Dhan proxy unreachable ({type(exc).__name__}). "
+            "Order placement will FAIL — see the egress_check log for detail."
         )
         return 2
 

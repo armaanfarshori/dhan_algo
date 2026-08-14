@@ -186,10 +186,14 @@ class DhanClient:
         # carries nothing but the traffic that legally requires it — data/quote
         # calls (and the WebSocket feed, which never passes through here) stay
         # direct. The sentinel "all" routes every REST category.
+        # An EMPTY category set is treated exactly like an unset one: a client
+        # holding a proxy URL that routes nothing would send orders out of the
+        # un-whitelisted IP while looking configured. "Route nothing" is spelled
+        # proxy_url=None, never an empty category set.
         self._proxy_url = proxy_url or None
         self._proxy_categories = (
-            {"orders"} if proxy_categories is None
-            else {c.lower() for c in proxy_categories}
+            {c.lower() for c in proxy_categories} if proxy_categories
+            else {"orders"}
         )
 
         self._rate_limiters = {

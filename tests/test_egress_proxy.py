@@ -11,6 +11,7 @@ These tests pin the three things that can silently break that:
   3. that scripts/egress_check.py returns the right exit code per failure mode.
 """
 import asyncio
+import logging
 
 import pytest
 
@@ -131,11 +132,52 @@ def test_proxy_defaults_are_back_compatible():
     ("orders, data", {"orders", "data"}),
     ("ORDERS,Data", {"orders", "data"}),
     ("orders,,", {"orders"}),
+    # No proxy URL configured → nothing to route, and nothing to repair.
     ("", set()),
 ])
 def test_proxy_categories_parse(monkeypatch, raw, expected):
     monkeypatch.setenv("DHAN_PROXY_CATEGORIES", raw)
     assert Config(_env_file=None).dhan_proxy_categories_set == expected
+
+
+@pytest.mark.parametrize("raw", ["", "   ", ",", ", ,"])
+def test_empty_categories_with_proxy_url_fall_back_to_orders(monkeypatch, caplog, raw):
+    """A configured-but-inert proxy is the worst outcome: the platform looks
+    proxied while orders leave from the un-whitelisted IP. Empty repairs to
+    {"orders"} and says so."""
+    monkeypatch.setenv("DHAN_PROXY_URL", PROXY)
+    monkeypatch.setenv("DHAN_PROXY_CATEGORIES", raw)
+    with caplog.at_level(logging.WARNING, logger="dhan.config"):
+        cfg = Config(_env_file=None)
+    assert cfg.dhan_proxy_categories_set == {"orders"}
+    assert any("DHAN_PROXY_CATEGORIES" in r.message for r in caplog.records), \
+        "the operator must be told their category list was empty"
+
+
+def test_blank_categories_still_proxy_orders_end_to_end(monkeypatch):
+    """The whole point of the fallback: order traffic still takes the proxy,
+    and the non-gated categories still stay direct."""
+    monkeypatch.setenv("DHAN_PROXY_URL", PROXY)
+    monkeypatch.setenv("DHAN_PROXY_CATEGORIES", "   ")
+    cfg = Config(_env_file=None)
+    c = _client(
+        proxy_url=cfg.dhan_proxy_url or None,
+        proxy_categories=cfg.dhan_proxy_categories_set,
+    )
+    _get(c, "orders")
+    assert c._session.last_proxy == PROXY
+    _get(c, "data")
+    assert c._session.last_proxy is None
+
+
+def test_client_treats_empty_category_set_as_unset():
+    """Defence in depth at the client boundary — any caller handing over an
+    empty set gets the {"orders"} default, not a proxy that routes nothing."""
+    c = _client(proxy_url=PROXY, proxy_categories=set())
+    _get(c, "orders")
+    assert c._session.last_proxy == PROXY
+    _get(c, "data")
+    assert c._session.last_proxy is None
 
 
 def test_proxy_url_env_override(monkeypatch):
@@ -217,6 +259,19 @@ def test_egress_check_unreachable_alerts(egress):
     assert code == 2
     assert len(sent) == 1
     assert "unreachable" in sent[0].lower()
+
+
+def test_egress_check_unreachable_alert_hides_the_proxy_address(egress):
+    """aiohttp's real proxy errors embed the proxy host — that address must not
+    ride out to Telegram. Only the exception type does."""
+    exc = OSError(
+        "Cannot connect to host 100.64.0.1:8888 ssl:default "
+        "[Connect call failed ('100.64.0.1', 8888)]"
+    )
+    code, sent = egress("http://100.64.0.1:8888", "203.0.113.7", exc)
+    assert code == 2
+    assert "100.64.0.1" not in sent[0]
+    assert "OSError" in sent[0]
 
 
 def test_egress_check_alert_failure_does_not_mask_exit_code(monkeypatch):
