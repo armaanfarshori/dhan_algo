@@ -194,14 +194,18 @@ def load_universe(path: Path = UNIVERSE_FILE) -> list[dict[str, Any]]:
     return out
 
 
-def refresh_universe(force_download: bool = False, path: Path = UNIVERSE_FILE) -> list[dict[str, Any]]:
+def refresh_universe(
+    force_download: bool = False,
+    path: Path = UNIVERSE_FILE,
+    today: Optional[date] = None,
+) -> list[dict[str, Any]]:
     """Download (cached) the detailed scrip master, parse the stock-F&O universe,
     write the generated JSON, and return it. Network: only the cached CSV fetch
     (reused from core.fno_instruments)."""
     from core.fno_instruments import _download_csv  # reuse the cached downloader
 
     csv_text = _download_csv(force=force_download)
-    universe = parse_stock_fno_universe(csv_text)
+    universe = parse_stock_fno_universe(csv_text, today=today)
     write_universe(universe, path)
     return universe
 

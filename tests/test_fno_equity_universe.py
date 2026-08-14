@@ -54,16 +54,21 @@ _BSE_FUT = _row("BSE", "FUTSTK", "70000", "9999", "FOOBAR", "100", "2026-06-26")
 
 _CSV = "\n".join([_HEADER, _RELIANCE_FAR, _RELIANCE_NEAR, _TCS, _NIFTY_FUT, _RELIANCE_OPT, _BSE_FUT])
 
+# Frozen 'today' predating every fixture expiry above — the parser drops expired
+# contracts, so tests that ride on wall-clock time started failing once
+# 2026-06-26 passed. Always pin `today` when parsing the shared fixture CSV.
+_FROZEN_TODAY = date(2026, 6, 20)
+
 
 def test_parse_selects_distinct_stock_underlyings():
-    universe = eu.parse_stock_fno_universe(_CSV)
+    universe = eu.parse_stock_fno_universe(_CSV, today=_FROZEN_TODAY)
     syms = [u["underlying_symbol"] for u in universe]
     # Only the two NSE FUTSTK underlyings, sorted.
     assert syms == ["RELIANCE", "TCS"]
 
 
 def test_parse_picks_near_month_future():
-    universe = eu.parse_stock_fno_universe(_CSV)
+    universe = eu.parse_stock_fno_universe(_CSV, today=_FROZEN_TODAY)
     reliance = next(u for u in universe if u["underlying_symbol"] == "RELIANCE")
     # Near-month (2026-06-26 / id 61001) must win over far (2026-07-31 / id 61002).
     assert reliance["future_security_id"] == "61001"
@@ -73,21 +78,21 @@ def test_parse_picks_near_month_future():
 
 
 def test_parse_handles_datetime_expiry_format():
-    universe = eu.parse_stock_fno_universe(_CSV)
+    universe = eu.parse_stock_fno_universe(_CSV, today=_FROZEN_TODAY)
     tcs = next(u for u in universe if u["underlying_symbol"] == "TCS")
     assert tcs["near_expiry"] == date(2026, 6, 26)
     assert tcs["lot_size"] == 175
 
 
 def test_parse_excludes_index_options_and_non_nse():
-    universe = eu.parse_stock_fno_universe(_CSV)
+    universe = eu.parse_stock_fno_universe(_CSV, today=_FROZEN_TODAY)
     syms = {u["underlying_symbol"] for u in universe}
     assert "NIFTY" not in syms      # FUTIDX excluded
     assert "FOOBAR" not in syms     # non-NSE excluded
 
 
 def test_write_and_load_roundtrip(tmp_path: Path):
-    universe = eu.parse_stock_fno_universe(_CSV)
+    universe = eu.parse_stock_fno_universe(_CSV, today=_FROZEN_TODAY)
     path = tmp_path / "uni.json"
     eu.write_universe(universe, path)
     assert path.exists()
@@ -106,7 +111,7 @@ def test_refresh_universe_uses_cached_downloader(monkeypatch, tmp_path: Path):
 
     monkeypatch.setattr(fi, "_download_csv", lambda force=False: _CSV)
     path = tmp_path / "uni.json"
-    universe = eu.refresh_universe(path=path)
+    universe = eu.refresh_universe(path=path, today=_FROZEN_TODAY)
     assert [u["underlying_symbol"] for u in universe] == ["RELIANCE", "TCS"]
     assert path.exists()
 
