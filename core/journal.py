@@ -49,11 +49,14 @@ class AsyncDBBackend:
 
     def __init__(self):
         from config import get_config
-        # DB_HOST presence (not default value) decides whether journalling is
-        # on — local dev without a DB should run with the backend disabled.
-        # "localhost" is the pydantic-settings default; treat it (and "")
-        # the same as an unset variable so CI / dev boxes stay disabled.
-        self._enabled = get_config().db_host not in ("", "localhost")
+        # Explicit switch (JOURNAL_DB_ENABLED) — the old "localhost means dev,
+        # disable" heuristic silently killed journalling on a single-host deploy
+        # where localhost IS the production DB, starving RiskEngine's realized-
+        # loss meters (refresh_pnl reads trades). An empty DB_HOST still
+        # disables: there is nothing to connect to. Boxes without a DB rely on
+        # connect()'s fail-silent path, not on this predicate.
+        cfg = get_config()
+        self._enabled = cfg.journal_db_enabled and cfg.db_host != ""
         # _engine / _Session: None in production (db.py's shared pool is used);
         # may be set by tests to inject an alternate engine.
         self._engine  = None
@@ -61,7 +64,10 @@ class AsyncDBBackend:
 
     async def connect(self):
         if not self._enabled:
-            _log.info("AsyncDBBackend: DB_HOST not set — DB journalling disabled")
+            _log.info(
+                "AsyncDBBackend: journalling disabled "
+                "(JOURNAL_DB_ENABLED=false or DB_HOST empty)"
+            )
             return
         try:
             import db as _db
