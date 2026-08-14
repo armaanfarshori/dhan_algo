@@ -170,7 +170,11 @@ class _ReadOnlyDhan:
         from core.token_manager import read_current_token
         if self._client is None:
             token = read_current_token() or cfg.dhan_access_token
-            self._client = DhanClient(cfg.dhan_client_id, token)
+            self._client = DhanClient(
+                cfg.dhan_client_id, token,
+                proxy_url=cfg.dhan_proxy_url or None,
+                proxy_categories=cfg.dhan_proxy_categories_set,
+            )
             await self._client.__aenter__()
         return self._client
 

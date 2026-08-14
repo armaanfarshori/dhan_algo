@@ -240,7 +240,11 @@ async def _amain(args: argparse.Namespace) -> None:
     cfg = get_config()
     init_db(cfg.db_url)
     token = await fb.resolve_access_token()
-    async with DhanClient(cfg.dhan_client_id, token) as client:
+    async with DhanClient(
+        cfg.dhan_client_id, token,
+        proxy_url=cfg.dhan_proxy_url or None,
+        proxy_categories=cfg.dhan_proxy_categories_set,
+    ) as client:
         if args.futures:
             if not args.from_date or not args.to_date:
                 raise SystemExit("--futures requires --from and --to")

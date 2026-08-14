@@ -169,6 +169,8 @@ class DhanClient:
         max_retries: int = 3,
         timeout: int = 10,
         auth_manager=None,
+        proxy_url: Optional[str] = None,
+        proxy_categories: Optional[set[str]] = None,
     ):
         self.client_id    = client_id
         self.access_token = access_token
@@ -177,6 +179,18 @@ class DhanClient:
         self.timeout      = aiohttp.ClientTimeout(total=timeout)
         self._session: Optional[aiohttp.ClientSession] = None
         self._auth_manager = auth_manager
+
+        # Dhan IP-whitelists order placement only. When this box's own egress is
+        # not the whitelisted address, proxy_url points at an HTTP proxy hosted
+        # on one that is. Routing is per rate category so the whitelisted hop
+        # carries nothing but the traffic that legally requires it — data/quote
+        # calls (and the WebSocket feed, which never passes through here) stay
+        # direct. The sentinel "all" routes every REST category.
+        self._proxy_url = proxy_url or None
+        self._proxy_categories = (
+            {"orders"} if proxy_categories is None
+            else {c.lower() for c in proxy_categories}
+        )
 
         self._rate_limiters = {
             cat: RateLimiter(cat)
@@ -246,11 +260,20 @@ class DhanClient:
         rl = self._rate_limiters[rate_category]
         url = f"{self.BASE_URL}/{endpoint.lstrip('/')}"
 
+        # Static-egress routing decision — see __init__. proxy=None is aiohttp's
+        # "go direct", so an unconfigured client behaves byte-identically.
+        proxy = (
+            self._proxy_url
+            if self._proxy_url
+            and ("all" in self._proxy_categories or rate_category in self._proxy_categories)
+            else None
+        )
+
         for attempt in range(1, self.max_retries + 1):
             await rl.acquire()
             try:
                 async with self._session.request(
-                    method, url, json=payload, params=params
+                    method, url, json=payload, params=params, proxy=proxy
                 ) as resp:
                     body = await resp.json(content_type=None)
 

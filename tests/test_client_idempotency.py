@@ -43,7 +43,7 @@ class _FakeSession:
     def __init__(self, script):
         self._script = list(script)
         self.calls = []   # (method, endpoint_tail)
-    def request(self, method, url, json=None, params=None):
+    def request(self, method, url, json=None, params=None, proxy=None):
         self.calls.append((method, url.rsplit("/", 1)[-1], json))
         nxt = self._script.pop(0)
         if isinstance(nxt, Exception):

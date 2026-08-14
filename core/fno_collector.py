@@ -195,7 +195,11 @@ def main() -> None:
         # Token via the manager (live cache → PIN/TOTP fallback), NOT the static
         # .env access token, which expires and triggers DH-901. Never logged.
         token = await fb.resolve_access_token()
-        async with DhanClient(cfg.dhan_client_id, token) as client:
+        async with DhanClient(
+            cfg.dhan_client_id, token,
+            proxy_url=cfg.dhan_proxy_url or None,
+            proxy_categories=cfg.dhan_proxy_categories_set,
+        ) as client:
             return await run_eod_collection(
                 client,
                 args.symbol,
