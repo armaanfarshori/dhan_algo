@@ -11,6 +11,8 @@
 #      cannot be listed is not a backup) — a failed gate deletes the file
 #   3. rotates, keeping the newest $BACKUP_KEEP dumps of that database
 #   4. optionally copies the new dump to S3 (best effort — never fatal)
+# A dump is a full readable copy of the trading database, so $BACKUP_DIR is
+# forced to 0700 and every dump to 0600 (umask 077) — never world-readable.
 # Any fatal step fires a Telegram alert via the repo's core.notify and exits
 # non-zero so cron/systemd surfaces the failure.
 #
@@ -39,6 +41,12 @@ export LC_ALL=C
 # Empty globs must expand to nothing, not to the literal pattern — the
 # rotation feeds glob results straight to rm.
 shopt -s nullglob
+
+# A logical dump is the whole database in one file — positions, orders,
+# signals, PnL. On AWS the equivalent (EBS snapshots) was IAM+encryption gated;
+# here the only gate is the filesystem, so refuse to inherit a lax umask: the
+# backup directory is created 0700 and every dump written 0600.
+umask 077
 
 # ── Repo root from this script's own location — never a hardcoded /opt path ──
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -167,6 +175,12 @@ cd "$REPO_ROOT"
 # ── Preflight ────────────────────────────────────────────────────────────────
 mkdir -p "$BACKUP_DIR" || die "cannot create BACKUP_DIR $BACKUP_DIR"
 [ -w "$BACKUP_DIR" ] || die "BACKUP_DIR $BACKUP_DIR is not writable by $(id -un)"
+# umask only covers a directory we create; tighten a pre-existing one too.
+# Best effort: a directory we cannot chmod (someone else's) must not kill the
+# backup — but say so, because the dumps in it are readable by others.
+if ! chmod 700 -- "$BACKUP_DIR" 2>/dev/null; then
+    warn "could not chmod 700 $BACKUP_DIR — dumps may be readable by other local users"
+fi
 
 log "backup start — dir=$BACKUP_DIR keep=$BACKUP_KEEP service=$COMPOSE_SERVICE databases=${DATABASES[*]}"
 
@@ -256,7 +270,14 @@ backup_db() {
         die "$db: integrity check failed — pg_restore could not read the dump"
     fi
 
-    mv -f -- "$tmp" "$dest"
+    # Publish. Past this point the file has PASSED the integrity gate, so it is
+    # a real backup: if the rename fails (read-only remount, quota, ENOSPC) the
+    # EXIT trap must not treat it as a half-written dump and delete it. Clear
+    # PARTIAL first, then fail loudly with the path the good dump was left at.
+    if ! mv -f -- "$tmp" "$dest"; then
+        PARTIAL=""
+        die "$db: could not publish the verified dump to $dest — the verified dump is PRESERVED at $tmp, move it into place by hand"
+    fi
     PARTIAL=""
     log "$db: ok → $dest ($(du -h -- "$dest" | cut -f1))"
 

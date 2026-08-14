@@ -30,12 +30,28 @@ For each database, in order:
    run fails.
 3. **Publish** — only after the gate passes is `.part` renamed to the final
    `.dump` name. A crashed or failed run therefore never leaves anything that
-   later looks like a valid backup.
+   later looks like a valid backup. If the rename itself fails (read-only
+   remount, quota, ENOSPC) the already-verified `.part` file is **kept**, not
+   cleaned up, and the alert names its path — a dump that passed the gate is a
+   real backup and is never deleted by the cleanup path.
 4. **S3 push** (optional) — best effort, see below.
 5. **Rotate** — keep the newest `$BACKUP_KEEP` dumps *of that database*.
 
 Every step logs to stdout with a timestamp. Any fatal step fires a Telegram
 alert through `core/notify.py` and exits non-zero, so cron surfaces the failure.
+
+### Permissions
+
+A dump is the entire trading database in one file — positions, orders, signals,
+`features_snapshot`, PnL. On AWS the equivalent (EBS snapshots) was IAM- and
+encryption-gated; on this box the only gate is the filesystem. So the script
+sets `umask 077` before it creates anything and additionally `chmod 700`s
+`$BACKUP_DIR` on every run:
+
+- `$BACKUP_DIR` → `0700`, dumps → `0600`, owned by the cron user.
+- A pre-existing directory the script cannot `chmod` (owned by someone else)
+  produces a `WARN` rather than a failure — but fix it, because the dumps in it
+  are then readable by every local account for the full `BACKUP_KEEP` window.
 
 ---
 
@@ -74,6 +90,7 @@ the rotation builds a shell glob out of the name, so nothing exotic gets in.
 ```bash
 sudo mkdir -p /var/backups/dhan
 sudo chown "$USER":"$USER" /var/backups/dhan     # cron user must be able to write
+sudo chmod 700 /var/backups/dhan                 # dumps are full DB copies — owner only
 chmod +x scripts/backup_db.sh
 scripts/backup_db.sh                             # one manual run to prove it works
 ```
@@ -220,5 +237,7 @@ error, and it never rescues a failed backup.
 | `postgres in compose service 'timescaledb' is not accepting connections` | Stack is down (`docker compose ps`), or `COMPOSE_SERVICE` / `DB_USER` do not match the compose file. |
 | `BACKUP_DIR ... is not writable` | The cron user does not own `$BACKUP_DIR` — see Install. |
 | `integrity check failed` | The archive is unreadable; the file is deleted deliberately. Check free disk space first (a truncated write is the usual cause). |
+| `could not publish the verified dump ... PRESERVED at <file>.part` | The dump is **good** — only the rename failed (disk full / read-only mount). Free space, then `mv` the `.part` file to the same name without the suffix. |
+| `could not chmod 700 <dir> — dumps may be readable by other local users` | `$BACKUP_DIR` is owned by another account. `sudo chown "$USER":"$USER"` it and re-run — see Install. |
 | `permission denied while trying to connect to the Docker daemon` | Add the cron user to the `docker` group and re-login. |
 | Dumps accumulate past `BACKUP_KEEP` | Filenames were renamed by hand and no longer match the rotation glob. |
