@@ -41,9 +41,10 @@ was invoked from. Every hardcoded reference to that path resolves correctly with
 - There is no second `git pull` on a different machine anymore — deploying a merged change is
   `git pull` (if needed) plus a service restart, in the same checkout. See `CLAUDE.md`'s *Dev
   workflow*.
-- The script refuses to run from a git worktree (warns and continues only if you insist) — a
-  worktree gets deleted independently of the primary checkout, and `/opt/dhan-trading` would then
-  point at a tree that can disappear out from under a running service.
+- The script **warns but does not abort** when it is run from a git worktree (preflight tests for a
+  `.git` *file* instead of a directory) — a worktree gets deleted independently of the primary
+  checkout, and `/opt/dhan-trading` would then point at a tree that can disappear out from under a
+  running service. Heed the WARN and re-run from the primary clone; nothing enforces it for you.
 - The two hard failure modes are both here: something *other* than a symlink already at
   `/opt/dhan-trading` (an old-style clone), or a symlink pointing somewhere else. Both **abort**
   rather than silently deleting what they find — see `docs/local-setup.md` → *Gotchas*.

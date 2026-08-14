@@ -179,8 +179,8 @@ TRADING WAS HALTED for the day by the user (safe to do infra resizes). PAPER mod
 
 **Note (2026-08-14):** the bare-metal PostgreSQL box and the DB-on-a-dedicated-EC2 layout described
 above no longer exist. TimescaleDB now runs as a Docker Compose container on this same box
-(`docker-compose.yml`, `docs/local-db.md`), and the schema went through eight more migrations after
-this snapshot (head is now **014**, not the 007 implied elsewhere in this historical block).
+(`docker-compose.yml`, `docs/local-db.md`), and the schema went through seven more migrations after
+this snapshot (008 → 014; head is now **014**, not the 007 implied elsewhere in this historical block).
 
 ## ⚡ TL;DR — platform shape
 
@@ -242,10 +242,10 @@ disturbed). Highlights (see memory `terraform-state-and-apply`, `credential-scru
 the commit (merge directly here, or `git pull` in this checkout if you're resuming from a worktree
 or a stale clone), `sudo systemctl restart dhan-trader` picks up engine code and
 `sudo systemctl restart dhan-api` picks up backend API code. Frontend changes still need a rebuild
-first: `cd dashboard && npm run build` — Node's location on this box depends on how it was set up
-(`setup_local.sh` does not install Node/npm, unlike the old Hermes-provisioned PATH on the AWS
-agent, so there is no fixed `PATH` hack to document here; adjust `PATH` to wherever `npm` actually
-lives) — then `sudo systemctl restart dhan-api`.
+first: `cd dashboard && npm run build` — this box has system Node 22 from the NodeSource apt repo
+(`/usr/bin/node`, `/usr/bin/npm`) already on the default `PATH`, so no `PATH` hack is needed here
+(the old AWS agent needed `~/.local/bin:~/.hermes/node/bin`; `setup_local.sh` does not install
+Node/npm, so a fresh box needs it added separately) — then `sudo systemctl restart dhan-api`.
 
 ---
 
@@ -361,7 +361,7 @@ Crontab on this box (`infra/scripts/setup_local.sh` step 9, IST-native, weekdays
 | Schedule (IST) | Job | Log |
 |---|---|---|
 | `*/5 * * * *` | `scripts/health_alert.py` (24/7; market-hours gating is inside the script) | `health_alert.log` |
-| `0 9 * * 1-5` | `scripts/egress_check.py` — pre-open proxy identity check (new 2026-08-14) | stdout, Telegram on failure |
+| `0 9 * * 1-5` | `scripts/egress_check.py` — pre-open proxy identity check (new 2026-08-14) | `egress_check.log` (+ Telegram on failure) |
 | `45 16 * * 1-5` | `ml.calibration fill` + `report` | `calibration.log` |
 | `0 17 * * 1-5` | `scripts/eod_summary.py` | `eod_summary.log` |
 | `30 2 * * *` | `scripts/backup_db.sh` — nightly pg_dump (new 2026-08-14, replaces EBS/DLM snapshots) | `backup.log` |

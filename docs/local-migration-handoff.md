@@ -2,7 +2,8 @@
 
 > **Executed 2026-08-14.** This handoff was the planning brief written before the migration; the
 > work it describes is done (PRs #100–#105). It is kept as-is for the historical record of what
-> was asked for and why. For what actually shipped, the decisions made along the way, and the
+> was asked for and why — the only edit is the box's LAN address, redacted per the repo's
+> never-commit-real-IPs rule. For what actually shipped, the decisions made along the way, and the
 > verification evidence, see **`docs/migration-2026-08.md`**. For day-to-day operation of the
 > result, see `docs/local-setup.md`, `docs/local-db.md`, and `docs/local-db-backups.md`.
 
@@ -23,7 +24,7 @@
 - AWS bill (~₹25k) forced migration to owned hardware.
 - New host: Dell Precision T1700 — Xeon E3-1270 v3 (4c/8t, AVX2), 32GB DDR3,
   256GB SSD (SMALL — watch disk), Quadro K600 (ignore, CPU-only box),
-  Ubuntu kernel 6.14, IP 192.168.68.64 (get DHCP reservation).
+  Ubuntu kernel 6.14, LAN IP `<redacted>` (get a DHCP reservation for it).
 - Mac is gone (company-issued, laid off). This box is editor + executor now.
 - EC2 terminated → old .env, dhan_token.json, and the DB EBS volume are gone.
   S3 bucket, SSM parameters, and EBS snapshots MAY survive — verify before
