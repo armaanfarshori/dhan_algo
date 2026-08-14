@@ -383,10 +383,14 @@ async def main():
     master_tm = MasterTokenManager()
     access_token = await master_tm.load_or_generate()
 
+    # This is the only process that places orders, so it is the one that must
+    # egress from the Dhan-whitelisted IP. Unset DHAN_PROXY_URL = direct.
     async with DhanClient(
         client_id=cfg.dhan_client_id,
         access_token=access_token,
         auth_manager=master_tm,
+        proxy_url=cfg.dhan_proxy_url or None,
+        proxy_categories=cfg.dhan_proxy_categories_set,
     ) as dhan:
 
         # ── Journal + run record ───────────────────────────────────────────────

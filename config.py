@@ -30,6 +30,48 @@ class Config(BaseSettings):
     dhan_pin: str = ""
     dhan_totp_secret: str = ""
 
+    # ── Dhan egress proxy ───────────────────────────────────────────────────
+    # Dhan whitelists exactly ONE static public IP for order placement. A home
+    # line behind CGNAT has no stable egress, so orders would be rejected from
+    # here. DHAN_PROXY_URL points at an HTTP proxy (tinyproxy on a small cloud
+    # VM, reached over Tailscale) whose public IP *is* the whitelisted one:
+    # only the calls that need that identity borrow it. Empty = no proxy, every
+    # request goes direct exactly as before (back-compat default).
+    dhan_proxy_url: str = ""
+    # Only order placement is IP-gated. Market data, historicals and the
+    # WebSocket feed work from any IP and are orders of magnitude heavier —
+    # pushing them through a free-tier VM would burn its bandwidth and add a
+    # single point of failure to the data path for no benefit. "all" is the
+    # escape hatch for a box whose entire Dhan egress must be pinned.
+    dhan_proxy_categories: str = "orders"
+    # Expected public IP when egressing via the proxy. Read ONLY by
+    # scripts/egress_check.py: a silently-dead proxy would fall back to the home
+    # IP and every order would be rejected mid-session, so the identity is
+    # verified out-of-band before the open. Never commit a real value.
+    dhan_whitelisted_egress_ip: str = ""
+
+    @property
+    def dhan_proxy_categories_set(self) -> set[str]:
+        """Rate categories routed via the proxy — lower-cased, blanks dropped.
+
+        A configured proxy with an EMPTY category list would be inert: every
+        REST call, order placement included, would silently egress from this
+        box's own (un-whitelisted) IP while the platform looked configured, and
+        the misconfiguration would only surface as rejected orders mid-session.
+        So when a proxy URL is set but the list parses empty (blank, whitespace,
+        ",,"), fall back to the default {"orders"} — the one category that
+        genuinely needs the whitelisted identity. Routing nothing is expressed
+        by leaving DHAN_PROXY_URL empty, never by blanking the categories.
+        """
+        parsed = {
+            c.strip().lower()
+            for c in self.dhan_proxy_categories.split(",")
+            if c.strip()
+        }
+        if not parsed and self.dhan_proxy_url.strip():
+            return {"orders"}
+        return parsed
+
     # ── Trading mode ────────────────────────────────────────────────────────
     paper_trading: bool = True
     # Flipping to live via POST /api/mode additionally requires this flag —
@@ -206,6 +248,23 @@ class Config(BaseSettings):
                 "SEC-10: DB password is the known default 'trader123' while "
                 "PAPER_TRADING=false.  Set a strong DB_PASSWORD in .env before "
                 "running live."
+            )
+        return self
+
+    # A proxy URL with no usable categories is a silent order-path failure —
+    # dhan_proxy_categories_set repairs it to {"orders"}, this says so once at
+    # startup so the operator fixes the .env rather than trusting the default.
+    @model_validator(mode="after")
+    def _warn_inert_proxy_categories(self) -> "Config":
+        has_categories = any(
+            c.strip() for c in self.dhan_proxy_categories.split(",")
+        )
+        if self.dhan_proxy_url.strip() and not has_categories:
+            _cfg_logger.warning(
+                "DHAN_PROXY_URL is set but DHAN_PROXY_CATEGORIES is empty — "
+                "falling back to 'orders' so order placement still egresses "
+                "from the whitelisted IP. Set DHAN_PROXY_CATEGORIES explicitly "
+                "('orders' or 'all') to silence this."
             )
         return self
 

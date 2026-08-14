@@ -354,7 +354,11 @@ async def run_backfill(args, cfg):
     auth_mgr     = None   # backfill never owns token refresh
     refresh_task = None
 
-    async with DhanClient(cfg.dhan_client_id, access_token, auth_manager=auth_mgr) as client:
+    async with DhanClient(
+        cfg.dhan_client_id, access_token, auth_manager=auth_mgr,
+        proxy_url=cfg.dhan_proxy_url or None,
+        proxy_categories=cfg.dhan_proxy_categories_set,
+    ) as client:
         from core.api_usage import ApiUsageFlusher
         _usage_flusher = ApiUsageFlusher(process="backfill")
 

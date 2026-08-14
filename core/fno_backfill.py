@@ -797,7 +797,11 @@ async def _amain(args: argparse.Namespace) -> None:
     # Token via the manager (live cache → PIN/TOTP fallback), NOT the static
     # .env access token, which expires and triggers DH-901 on long-running jobs.
     access_token = await resolve_access_token()
-    async with DhanClient(cfg.dhan_client_id, access_token) as client:
+    async with DhanClient(
+        cfg.dhan_client_id, access_token,
+        proxy_url=cfg.dhan_proxy_url or None,
+        proxy_categories=cfg.dhan_proxy_categories_set,
+    ) as client:
         if args.futures:
             if not args.security_id:
                 raise SystemExit("--futures requires --security-id")

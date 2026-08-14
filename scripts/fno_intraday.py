@@ -35,7 +35,11 @@ logger = logging.getLogger("dhan.fno_intraday")
 
 async def _snapshot_live(cfg) -> dict:
     token = await fb.resolve_access_token()
-    async with DhanClient(cfg.dhan_client_id, token) as client:
+    async with DhanClient(
+        cfg.dhan_client_id, token,
+        proxy_url=cfg.dhan_proxy_url or None,
+        proxy_categories=cfg.dhan_proxy_categories_set,
+    ) as client:
         return await fb.snapshot_option_chain(
             client, "NIFTY", allow_market_hours=True,
         )
