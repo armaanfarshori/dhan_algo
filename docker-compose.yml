@@ -58,7 +58,12 @@ services:
     healthcheck:
       # Env-var forms so this stays correct if DB_USER/DB_NAME are overridden.
       # `$$` escapes Compose interpolation -> the container shell expands it.
-      test: ["CMD-SHELL", 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      # -h 127.0.0.1 forces TCP: initdb's temporary bootstrap server listens on
+      # the unix socket ONLY, so a socket-based pg_isready reports healthy
+      # mid-init and a client connecting then dies with "the database system is
+      # shutting down" (observed on first boot). TCP only answers once the real
+      # server is up.
+      test: ["CMD-SHELL", 'pg_isready -h 127.0.0.1 -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
       interval: 10s
       timeout: 5s
       retries: 12
