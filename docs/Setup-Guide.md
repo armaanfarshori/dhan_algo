@@ -1,5 +1,14 @@
 # Setup Guide
 
+> **Historical (pre-2026-08-14).** This guide describes the AWS two-EC2-instance deployment,
+> which is now **terminated** — the platform runs single-host on a T1700 box instead. For the
+> current bootstrap, use `docs/local-setup.md` (and `docs/local-db.md` /
+> `docs/local-db-backups.md` for the database). This file is left as-is rather than rewritten —
+> the *local development* section below is still broadly usable for a from-scratch dev clone (with
+> the schema-head and `.env` sourcing notes fixed inline), but the entire *Production deploy (AWS)*
+> section describes infrastructure that no longer exists. See `CLAUDE.md` and
+> `docs/migration-2026-08.md` for what replaced it.
+
 Two paths: **local development** (Mac/Linux, native Postgres, paper only) and
 the **production AWS deploy**. All live execution belongs on AWS — Dhan locks
 order placement to one whitelisted IP, and there is no sandbox.
@@ -24,11 +33,14 @@ cp .env.example .env
 # DB_* in .env. (No Docker — the platform runs bare-metal Postgres.)
 ```
 
-Run Alembic migrations (schema head is **007**). `alembic/env.py` reads `DB_*`
-from environment variables — source `.env` before running:
+Run Alembic migrations (schema head is **014** as of the 2026-08-14 single-host
+migration — this doc predates it and is not otherwise updated, see
+`docs/local-setup.md` / `docs/local-db.md` for the current path). `alembic/env.py`
+reads `DB_*` from environment variables — source `.env` before running, guarded so
+a missing file can't leave `allexport` stuck on for the rest of the shell:
 
 ```bash
-set -a && source .env && set +a
+[ -f .env ] && { set -a; source .env; set +a; }
 alembic upgrade head
 ```
 
@@ -144,8 +156,8 @@ Run migrations if this is a re-deploy and the schema changed:
 
 ```bash
 cd /opt/dhan-trading
-set -a && source .env && set +a
-.venv/bin/alembic upgrade head       # expects head: 007
+[ -f .env ] && { set -a; source .env; set +a; }
+.venv/bin/alembic upgrade head       # expects head: 014
 ```
 
 ### 4. Install / reinstall systemd services

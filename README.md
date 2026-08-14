@@ -212,7 +212,25 @@ python -m research.backtest --from 2026-05-01 --to 2026-06-01 --n 5
 python -m research.backtest --from 2026-05-01 --to 2026-06-01 --gate kronos --json out.json
 ```
 
-### Production (AWS)
+### Single-host deployment
+
+As of 2026-08-14 the platform runs single-host — trader, dashboard, and TimescaleDB all on one
+box, no AWS. The old two-EC2 Terraform deploy below is retired infrastructure (kept for history,
+not runnable against anything that still exists).
+
+```bash
+cd ~/dhan_algo
+infra/scripts/setup_local.sh          # idempotent bootstrap: venv, Docker, systemd, cron
+# fill in .env (the script prints exactly which keys), then:
+sudo systemctl start dhan-trader dhan-api
+```
+
+Full walkthrough: **[docs/local-setup.md](docs/local-setup.md)**. Database runbook:
+[docs/local-db.md](docs/local-db.md). Backups: [docs/local-db-backups.md](docs/local-db-backups.md).
+Why each piece landed the way it did: [docs/migration-2026-08.md](docs/migration-2026-08.md).
+
+<details>
+<summary>Retired: production deploy on AWS (pre-2026-08-14)</summary>
 
 ```bash
 cd infra
@@ -223,7 +241,11 @@ terraform apply
 # systemd units in infra/systemd/ run dhan-trader + dhan-api
 ```
 
-See [docs/Setup-Guide.md](docs/Setup-Guide.md) for the full walkthrough and [docs/Operations-Runbook.md](docs/Operations-Runbook.md) for day-2 operations.
+The EC2 instances this describes are terminated; `infra/*.tf` is dormant. See
+[docs/Setup-Guide.md](docs/Setup-Guide.md) and [docs/Operations-Runbook.md](docs/Operations-Runbook.md)
+for the full AWS-era walkthrough (both now marked historical at the top).
+
+</details>
 
 ---
 
@@ -233,7 +255,11 @@ See [docs/Setup-Guide.md](docs/Setup-Guide.md) for the full walkthrough and [doc
 |---|---|
 | [docs/Home.md](docs/Home.md) | Overview, current status, roadmap |
 | [docs/Architecture.md](docs/Architecture.md) | Process model, engine internals, data flow, design rationale |
-| [docs/Setup-Guide.md](docs/Setup-Guide.md) | Local dev and AWS deployment, step by step |
+| [docs/local-setup.md](docs/local-setup.md) | **Current** single-host bootstrap (T1700) — the replacement for the AWS deploy below |
+| [docs/local-db.md](docs/local-db.md) | Local TimescaleDB (Docker Compose) operator runbook |
+| [docs/local-db-backups.md](docs/local-db-backups.md) | Nightly `pg_dump` backups — config, rotation, restore |
+| [docs/migration-2026-08.md](docs/migration-2026-08.md) | AWS→single-host decision record (ADR-style, one section per decision) |
+| [docs/Setup-Guide.md](docs/Setup-Guide.md) | *Historical* — local dev + the retired AWS deployment, step by step |
 | [docs/Configuration.md](docs/Configuration.md) | Every config field with defaults and safety notes |
 | [docs/Strategies.md](docs/Strategies.md) | ORB rules, Kronos gate (scorer v2), risk model, calibration loop |
 | [docs/Backtesting.md](docs/Backtesting.md) | Backtester design, cost model, CLI usage, three-way study |
@@ -241,7 +267,7 @@ See [docs/Setup-Guide.md](docs/Setup-Guide.md) for the full walkthrough and [doc
 | [docs/NFRs.md](docs/NFRs.md) | Non-functional requirements |
 | [docs/M6-Auth-Design.md](docs/M6-Auth-Design.md) | Auth layer design (not yet implemented) |
 | [docs/Live-Readiness-Checklist.md](docs/Live-Readiness-Checklist.md) | Gate items before switching to live |
-| [docs/Operations-Runbook.md](docs/Operations-Runbook.md) | Deploy, monitor, recover — the ops playbook |
+| [docs/Operations-Runbook.md](docs/Operations-Runbook.md) | *Historical* — the retired AWS day-2 ops playbook |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution guide |
 
 ---
