@@ -92,13 +92,23 @@ naming the keys you must fill —
 | `DHAN_TOTP_SECRET` | with the PIN, tokens self-rotate into `dhan_token.json` |
 | `TELEGRAM_BOT_TOKEN` | alerts — health monitor, EOD summary, backup failures |
 | `TELEGRAM_CHAT_ID` | alert destination |
+| `DASHBOARD_TOKEN` | shared secret for the dashboard's control endpoints — see below |
 | `DHAN_PROXY_URL` | **only** if this box's public IP is not the whitelisted one |
 | `DHAN_WHITELISTED_EGRESS_IP` | the IP Dhan whitelisted; read by `scripts/egress_check.py` |
 
+`DASHBOARD_TOKEN` deserves a sentence, because this migration is what changes its threat
+model. `POST /api/killswitch` and `POST /api/watchlist/refresh` check it and **fail open
+when it is empty** — on AWS that was acceptable because a security group stood between
+the API and the world. Here `API_BIND_HOST` defaults to `0.0.0.0` on a box that sits on a
+home LAN and a tailnet, so an empty token means anyone who can reach `:8765` can flatten
+the book. Generate one with
+`python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`.
+
 If `.env` already exists it is left completely alone, apart from re-asserting mode 600
 (cheap repair, and the file holds live credentials). `PAPER_TRADING` is never written or
-flipped by this script in either path; if it finds `PAPER_TRADING=false` it warns, so a
-live-armed box cannot be mistaken for a paper one.
+flipped by this script in either path; if it finds `PAPER_TRADING` set to anything
+pydantic reads as false — `false`, `False`, `FALSE`, `no`, `off`, `0`, quoted or not — it
+warns, so a live-armed box cannot be mistaken for a paper one.
 
 **6. Database.** `docker compose up -d timescaledb` from the repo root (skipped if the
 container is already running), then polls
@@ -112,9 +122,14 @@ run `.venv/bin/alembic upgrade head` (skipped when `alembic current` already rep
 Alembic reads `DB_*` from the **environment**, not from `.env` — dotenv loading is a
 `config.py`/pydantic feature and Alembic never imports `config.py`. So the script reads
 those five keys out of `.env` itself with a targeted `KEY=VALUE` parser and exports them,
-falling back to the `config.py` defaults. It deliberately does **not** `source .env`:
-that file is operator input full of secrets and shell metacharacters, and sourcing it
-would execute whatever is in there and dump the whole file into the environment.
+announcing any key it had to fall back to a `config.py` default for — a silent fallback
+would migrate one database while the trader connected to another. That parser tracks
+python-dotenv's semantics on purpose (whitespace either side of `=`, quotes, inline
+comments, CRLF), since python-dotenv is what pydantic uses to read the very same file;
+`tests/test_setup_local_parser.py` pins the two against each other. It deliberately does
+**not** `source .env`: that file is operator input full of secrets and shell
+metacharacters, and sourcing it would execute whatever is in there and dump the whole
+file into the environment.
 
 **7. Logs.** `mkdir -p /var/log/dhan` owned by you (the units write there via
 `StandardOutput=append:`, which needs the directory to exist first), and
@@ -131,8 +146,11 @@ sed "s/^User=ubuntu$/User=$TARGET_USER/"
 ```
 
 Everything else is verbatim — the `/opt/dhan-trading` paths inside the units are correct
-because of step 3. The canonical units in the repo keep `User=ubuntu` and are never
-modified, so a `git pull` never collides with a local edit. Files identical to what is
+because of step 3. The rendered unit is then checked for the `User=` line it was supposed
+to grow, so a canonical unit whose `User=` directive drifts aborts the step instead of
+quietly installing a service that runs as a nonexistent `ubuntu`. The canonical units in
+the repo keep `User=ubuntu` and are never modified, so a `git pull` never collides with a
+local edit. Files identical to what is
 already installed are skipped; `daemon-reload` only runs if something actually changed;
 if a unit file changed under a *running* service you are told to restart it.
 
@@ -214,7 +232,8 @@ One caveat: `scripts/backup_db.sh` talks to Docker. If the script had to add you
 systemctl status dhan-trader dhan-api
 journalctl -u dhan-trader -n 50
 
-# dashboard (API_BIND_HOST defaults to 0.0.0.0 — also reachable over the tailnet)
+# dashboard (API_BIND_HOST defaults to 0.0.0.0 — LAN- and tailnet-reachable, so
+# set DASHBOARD_TOKEN unless you want the control endpoints open)
 curl -s localhost:8765/api/status
 
 # database container + schema

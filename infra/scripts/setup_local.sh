@@ -254,16 +254,21 @@ step_env() {
         chmod 600 "$ENV_FILE" || warn "could not chmod 600 $ENV_FILE"
         skipped ".env exists (permissions re-asserted to 600)"
 
-        # Never changed by this script — but the operator should know.
-        if grep -Eq '^[[:space:]]*(export[[:space:]]+)?PAPER_TRADING=[[:space:]]*false' "$ENV_FILE"; then
-            warn "$ENV_FILE has PAPER_TRADING=false — setup does not touch it, but this box is armed for LIVE order flow"
+        # Never changed by this script — but the operator should know. The
+        # pattern has to cover every spelling pydantic reads as False, or a
+        # live-armed box slips through unannounced: case-insensitive (-i, since
+        # `False`/`FALSE` parse identically), whitespace around `=`, optional
+        # quotes, and pydantic's full falsey set (false/f/no/n/off/0).
+        if grep -Eiq '^[[:space:]]*(export[[:space:]]+)?PAPER_TRADING[[:space:]]*=[[:space:]]*["'"'"']?(false|f|no|n|off|0)["'"'"']?[[:space:]]*(#.*)?$' "$ENV_FILE"; then
+            warn "$ENV_FILE sets PAPER_TRADING to a FALSE value — setup does not touch it, but this box is armed for LIVE order flow"
         fi
         return
     fi
 
     [ -f "$REPO_ROOT/.env.example" ] || die "no .env and no .env.example to seed it from"
-    cp "$REPO_ROOT/.env.example" "$ENV_FILE"
-    chmod 600 "$ENV_FILE"
+    # `install -m 600`, not cp-then-chmod: the file that is about to hold live
+    # credentials never exists at the umask default, not even for an instant.
+    install -m 600 "$REPO_ROOT/.env.example" "$ENV_FILE"
     did "seeded .env from .env.example (mode 600)"
 
     cat <<BANNER
@@ -282,6 +287,14 @@ step_env() {
     DHAN_TOTP_SECRET            base32 TOTP secret (with PIN, tokens self-rotate)
     TELEGRAM_BOT_TOKEN          alerts (health monitor, EOD, backup failures)
     TELEGRAM_CHAT_ID            alert destination
+    DASHBOARD_TOKEN             any long random string — e.g.
+                                  python3 -c 'import secrets;print(secrets.token_urlsafe(32))'
+                                LEAVE IT EMPTY AND THE CONTROL ENDPOINTS ARE OPEN:
+                                the API binds 0.0.0.0 on a LAN + tailnet (on AWS a
+                                security group stood in front of it; here nothing
+                                does), and POST /api/killswitch + /watchlist/refresh
+                                fail OPEN when this is unset — anyone who can reach
+                                :8765 can flatten the book.
 
   Uncomment + fill ONLY if this box egresses through the Dhan proxy VM
   (i.e. its public IP is not the one whitelisted at Dhan):
@@ -305,21 +318,44 @@ BANNER
 # One KEY=VALUE lookup out of .env. Deliberately NOT `source`: .env is operator
 # input containing secrets and shell metacharacters, and sourcing it would run
 # whatever is in there and pollute this shell's environment wholesale.
-# Matches python-dotenv/compose semantics closely enough for the DB_* keys:
-# last assignment wins, optional `export `, quotes stripped, and for unquoted
-# values a trailing ` #…` is a comment (as .env.example itself writes them).
+# Matches python-dotenv semantics for the DB_* keys — deliberately, because
+# python-dotenv is what config.py/pydantic actually uses to read this same file,
+# and a parser that disagrees with it would migrate one database while the app
+# connects to another. Verified against it in tests/test_setup_local_parser.py:
+#   • last assignment wins, optional `export `;
+#   • whitespace is allowed on BOTH sides of `=` (`DB_HOST = localhost` is a
+#     value, not a miss — the old `KEY=` -only pattern silently fell back to the
+#     hardcoded default here);
+#   • a quoted value ends at its closing quote, so an inline comment after it is
+#     dropped instead of being glued onto the value (backslash-escaped quotes
+#     inside a value are NOT handled — nothing in .env.example needs them);
+#   • for unquoted values a trailing ` #…` is a comment (as .env.example writes
+#     them), but `pw#123` keeps its hash.
 env_get() {
     local key="$1" raw
     [ -f "$ENV_FILE" ] || return 1
-    raw="$(sed -n -E "s/^[[:space:]]*(export[[:space:]]+)?${key}=(.*)\$/\2/p" "$ENV_FILE" | tail -n 1)"
+    raw="$(sed -n -E "s/^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=[[:space:]]*(.*)\$/\2/p" "$ENV_FILE" | tail -n 1)"
     raw="${raw%$'\r'}"
     case "$raw" in
-        '"'*'"') raw="${raw#\"}"; raw="${raw%\"}" ;;
-        "'"*"'") raw="${raw#\'}"; raw="${raw%\'}" ;;
-        *)       raw="$(printf '%s' "$raw" | sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]+$//')" ;;
+        '"'*) raw="${raw#\"}"; raw="${raw%%\"*}" ;;
+        "'"*) raw="${raw#\'}"; raw="${raw%%\'*}" ;;
+        *)    raw="$(printf '%s' "$raw" | sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]+$//')" ;;
     esac
     [ -n "$raw" ] || return 1
     printf '%s' "$raw"
+}
+
+# env_get with a fallback that ANNOUNCES itself. Alembic and the running app
+# must agree on which database they mean; a fallback that happened silently
+# would migrate the default database while the trader talked to the real one.
+env_get_or_default() {
+    local key="$1" default="$2" value
+    if value="$(env_get "$key")"; then
+        printf '%s' "$value"
+    else
+        warn "$key is not set (or is empty) in $ENV_FILE — falling back to the built-in default for the migration"
+        printf '%s' "$default"
+    fi
 }
 
 step_database() {
@@ -358,11 +394,11 @@ step_database() {
     # alembic/env.py reads DB_* from the ENVIRONMENT (it never loads .env — that
     # is a config.py/pydantic feature and Alembic does not import config.py).
     # Defaults below mirror config.py's Config fields and the compose defaults.
-    DB_HOST="$(env_get DB_HOST || true)";         export DB_HOST="${DB_HOST:-localhost}"
-    DB_PORT="$(env_get DB_PORT || true)";         export DB_PORT="${DB_PORT:-5432}"
-    DB_NAME="$(env_get DB_NAME || true)";         export DB_NAME="${DB_NAME:-dhan_trading}"
-    DB_USER="$(env_get DB_USER || true)";         export DB_USER="${DB_USER:-trader}"
-    DB_PASSWORD="$(env_get DB_PASSWORD || true)"; export DB_PASSWORD="${DB_PASSWORD:-trader123}"
+    DB_HOST="$(env_get_or_default DB_HOST localhost)";           export DB_HOST
+    DB_PORT="$(env_get_or_default DB_PORT 5432)";                export DB_PORT
+    DB_NAME="$(env_get_or_default DB_NAME dhan_trading)";        export DB_NAME
+    DB_USER="$(env_get_or_default DB_USER trader)";              export DB_USER
+    DB_PASSWORD="$(env_get_or_default DB_PASSWORD trader123)";   export DB_PASSWORD
     log "alembic target: ${DB_USER}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
 
     local alembic="$REPO_ROOT/.venv/bin/alembic" current
@@ -442,6 +478,18 @@ step_systemd() {
         # a local edit.
         tmp="$(mktemp)"
         sed "s/^User=ubuntu\$/User=${TARGET_USER}/" "$src" > "$tmp"
+
+        # Assert the substitution actually happened. If a canonical unit's
+        # `User=` line is ever reformatted (trailing space, CRLF, reordered,
+        # dropped), the sed above becomes a silent no-op and we would install a
+        # unit running as `ubuntu` — a user that does not exist on this box —
+        # while logging "(User=$TARGET_USER)" and reporting success. The
+        # service would then fail to start for a reason nothing in the output
+        # points at.
+        if ! grep -qx "User=${TARGET_USER}" "$tmp"; then
+            rm -f "$tmp"
+            die "$src did not yield a 'User=${TARGET_USER}' line — its User= directive is not the expected 'User=ubuntu'. Fix the canonical unit (or this script's sed) rather than installing a unit that runs as the wrong user."
+        fi
 
         if sudo cmp -s "$tmp" "$dst" 2>/dev/null; then
             skipped "$dst"
@@ -608,9 +656,12 @@ step_summary() {
        $REPO_ROOT/.venv/bin/alembic current
        tail -f $LOG_DIR/trader.log
 
-  The dashboard listens on :8765 (API_BIND_HOST defaults to 0.0.0.0, i.e. also
-  reachable over the tailnet). PAPER_TRADING is untouched by this script.
-  Re-running setup_local.sh is safe at any time.
+  The dashboard listens on :8765 (API_BIND_HOST defaults to 0.0.0.0, i.e.
+  reachable from the whole LAN and the tailnet — there is no security group in
+  front of it any more). Set DASHBOARD_TOKEN in .env unless you are content for
+  anyone who can reach that port to POST the kill switch; it fails OPEN when
+  unset. PAPER_TRADING is untouched by this script. Re-running setup_local.sh
+  is safe at any time.
 
 SUMMARY
 }
