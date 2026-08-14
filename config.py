@@ -214,6 +214,15 @@ class Config(BaseSettings):
     backfill_log_path: str = "/tmp/backfill.log"
 
     # ── TimescaleDB ─────────────────────────────────────────────────────────
+    # DB journalling (runs/signals/trades/orders/fills/equity_curve). The old
+    # heuristic disabled it whenever DB_HOST was ""/localhost — right on AWS,
+    # where the DB lived on another box and localhost meant "dev machine", but
+    # fatal on a single-host deploy where localhost IS the production DB: the
+    # trades table stays empty and RiskEngine's realized-loss meters read zero
+    # forever. Explicit flag instead; AsyncDBBackend.connect() still fail-
+    # silently disables itself when no DB answers, so a DB-less dev box costs
+    # one warning line, never a hang.
+    journal_db_enabled: bool = True
     db_host: str = "localhost"
     db_port: int = 5432
     db_name: str = "dhan_trading"
