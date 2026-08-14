@@ -104,11 +104,16 @@ not build the habit.
 
 ---
 
-## Critical: set `DB_HOST=127.0.0.1`, not `localhost`
+## Journalling: `JOURNAL_DB_ENABLED`, not a `DB_HOST` value check
 
-This is the sharpest edge in the AWS → local move, and it fails **silently**.
+This used to be the sharpest edge in the AWS → local move, and it used to fail
+**silently** — as of `fix(journal): explicit JOURNAL_DB_ENABLED replaces the
+localhost-disable heuristic` (2026-08-14, PR #102) it no longer does, but the
+history is worth knowing because the same shape of bug can come back if this
+flag is ever removed.
 
-`core/journal.py:56` decides whether to journal at all:
+`core/journal.py`'s `AsyncDBBackend.__init__` used to infer whether to journal
+from the *value* of `DB_HOST`:
 
 ```python
 self._enabled = get_config().db_host not in ("", "localhost")
@@ -116,35 +121,38 @@ self._enabled = get_config().db_host not in ("", "localhost")
 
 On AWS, `DB_HOST` was the database EC2's private IP, and `localhost` could only
 mean "a dev box with no database" — so treating it as "journalling off" was
-correct. On this machine the database genuinely *is* on localhost, so that same
-value now disables journalling on a working install.
+correct there. On this machine the database genuinely *is* on `localhost`
+(the Compose container publishes on `127.0.0.1:5432`), so that same value
+would disable journalling on a fully working install: the trader would still
+boot, still paper-trade, and still write `bars`, `engine_positions`,
+`daily_screen` and `api_usage` (those go through `db.get_session()` directly),
+but **`runs`, `signals`, `trades`, `orders`, `fills` and `equity_curve` would
+never be written**, and because `RiskEngine.refresh_pnl()` reads `trades`, the
+realized-P&L and daily-loss meters would stay pinned at zero — a risk engine
+blind to its own losses, with no error anywhere to point at why.
 
-With `DB_HOST=localhost` the trader still boots, still paper-trades, and still
-writes `bars`, `engine_positions`, `daily_screen` and `api_usage` (those go
-through `db.get_session()` directly). But **`runs`, `signals`, `trades`,
-`orders`, `fills` and `equity_curve` are never written** — every
-`AsyncDBBackend` call short-circuits at `core/journal.py:107`. You get a
-half-journalled system with no trade history, and because
-`RiskEngine.refresh_pnl()` reads `trades`, the realized-P&L and daily-loss
-meters stay pinned at zero.
+The fix is an explicit flag rather than a smarter heuristic:
 
-`127.0.0.1` connects to exactly the same container (the port publishes on
-`127.0.0.1:5432`) and passes the check. Use it in `.env`:
-
-```
-DB_HOST=127.0.0.1
+```python
+self._enabled = cfg.journal_db_enabled and cfg.db_host != ""
 ```
 
-Note `.env.example:19` still ships `DB_HOST=localhost`, inherited from the AWS
-layout. Verify journalling is actually live after the first paper session:
+`JOURNAL_DB_ENABLED` defaults to `true` in `config.py`. Leave it alone on this
+box — `DB_HOST=localhost` (the `.env.example` default) journals correctly now.
+Set it `false` only on a box with genuinely no database, to skip the one
+connect-failure `INFO` log line at startup; an empty `DB_HOST` still disables
+journalling regardless of the flag, since there's nothing to connect to.
+
+Verify journalling is actually live after the first paper session:
 
 ```bash
 docker compose exec timescaledb psql -U trader -d dhan_trading \
   -c "SELECT count(*) FROM runs;"     # must be > 0 after the trader has run
 ```
 
-A `0` here with a trader that has been running means `DB_HOST` is still
-`localhost`.
+A `0` here with a trader that has been running means either `JOURNAL_DB_ENABLED`
+was explicitly set `false`, or `DB_HOST` is empty — see `docs/migration-2026-08.md`
+for the full decision record.
 
 ---
 

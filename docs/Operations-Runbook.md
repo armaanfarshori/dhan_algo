@@ -1,5 +1,15 @@
 # Operations Runbook
 
+> **Historical (pre-2026-08-14).** This entire runbook describes day-2 operations for the AWS
+> two-EC2-instance deployment, which is now **terminated** — see `CLAUDE.md`'s "single-host T1700
+> deployment" section and `docs/migration-2026-08.md` for what replaced it. `~/Desktop/dhan_aws_access/`
+> no longer exists; there is no second box to SSH into; the DB is a local Docker container, not a
+> separate VPC-only EC2 instance. Kept as-is rather than rewritten wholesale — the general shape
+> (kill switch, mode changes, troubleshooting patterns) still applies on the T1700 box with `sudo`
+> run locally instead of over SSH, but every AWS-specific command below (Elastic IP, S3, DLM,
+> Terraform paths) is dead. For current operations, see `docs/local-setup.md`, `docs/local-db.md`,
+> and `docs/local-db-backups.md`.
+
 Day-2 operations for the AWS deployment. Conventions: the agent EC2 runs both
 services and the backfill; the DB EC2 is reachable only from inside the VPC.
 Real IPs, account IDs, and tokens live in `~/Desktop/dhan_aws_access/`, never here.
@@ -130,12 +140,14 @@ Edit `/opt/dhan-trading/.env` (`PAPER_TRADING`, and for live also
 
 ## DB migration (Alembic)
 
-Schema head is **007**. `alembic/env.py` reads `DB_*` from environment
-variables — source `.env` first, then run:
+Schema head is **014** (was 007 when this runbook was written; see
+`docs/local-db.md` for the current migration set). `alembic/env.py` reads
+`DB_*` from environment variables — source `.env` first, guarded so a missing
+file can't leave `allexport` stuck on for the rest of the shell:
 
 ```bash
 cd /opt/dhan-trading
-set -a && source .env && set +a
+[ -f .env ] && { set -a; source .env; set +a; }
 .venv/bin/alembic upgrade head
 ```
 
