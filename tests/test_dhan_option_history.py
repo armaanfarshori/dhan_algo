@@ -89,16 +89,16 @@ def test_resolve_underlying_rejects_bad_instrument():
 
 def test_resolve_underlying_nifty_expiry_rule_mirrors_condor():
     # NIFTY defaults MIRROR research/backtest/fno_condor.py IndexConfig: Thursday
-    # before the 2026-09-01 cutover, Tuesday on/after.
+    # before the 2025-09-01 cutover, Tuesday on/after.
     from datetime import date as _date
 
     u = oh.resolve_underlying("NIFTY")
     assert u.expiry_weekday == oh.TUESDAY        # post-cutover
     assert u.pre_cutover_weekday == oh.THURSDAY  # pre-cutover
-    assert u.cutover_date == _date(2026, 9, 1)
+    assert u.cutover_date == _date(2025, 9, 1)
     rule = u.expiry_rule
     assert rule.expiry_weekday == oh.TUESDAY
-    assert rule.cutover_date == _date(2026, 9, 1)
+    assert rule.cutover_date == _date(2025, 9, 1)
 
 
 def test_resolve_underlying_offregistry_custom_weekday_no_cutover():
@@ -162,11 +162,14 @@ def test_strike_offset_of_decodes():
 
 # ── rolling-code expiry attachment (the only use of expiry_calendar) ─────────────────
 def test_expiry_for_day_front_code1():
-    exps = [date(2026, 6, 18), date(2026, 6, 25), date(2026, 7, 2)]
+    # 2015 shares 2026's weekday-for-date calendar (both non-leap, Jan 1 =
+    # Thursday) and sits safely before the 2025-09-01 cutover, so these
+    # Thursday expiries resolve analytically as intended.
+    exps = [date(2015, 6, 18), date(2015, 6, 25), date(2015, 7, 2)]
     # code=1 = next expiry on/after the day.
-    assert oh.expiry_for_day(date(2026, 6, 15), exps, 1) == date(2026, 6, 18)
-    assert oh.expiry_for_day(date(2026, 6, 18), exps, 1) == date(2026, 6, 18)
-    assert oh.expiry_for_day(date(2026, 6, 19), exps, 1) == date(2026, 6, 25)
+    assert oh.expiry_for_day(date(2015, 6, 15), exps, 1) == date(2015, 6, 18)
+    assert oh.expiry_for_day(date(2015, 6, 18), exps, 1) == date(2015, 6, 18)
+    assert oh.expiry_for_day(date(2015, 6, 19), exps, 1) == date(2015, 6, 25)
 
 
 def test_expiry_for_day_term_structure_codes():
@@ -179,13 +182,15 @@ def test_expiry_for_day_derives_analytically_not_from_calendar():
     # HISTORICAL-MIS-ATTACH FIX: expiry is now DERIVED from the cutover-aware weekday
     # rule, NOT selected from the forward-only calendar. A sparse calendar no longer
     # exhausts — the analytic weekly weekday ≥ day is used regardless.
-    exps = [date(2026, 6, 18)]
+    # 2015 shares 2026's weekday-for-date calendar (both non-leap, Jan 1 =
+    # Thursday) and sits safely before the 2025-09-01 cutover.
+    exps = [date(2015, 6, 18)]
     # code=2 from 6/15 → 2nd weekly (6/25), derived even though the calendar has 1 entry.
-    assert oh.expiry_for_day(date(2026, 6, 15), exps, 2) == date(2026, 6, 25)
+    assert oh.expiry_for_day(date(2015, 6, 15), exps, 2) == date(2015, 6, 25)
     # 6/19 (Fri) → next Thursday 6/25 (pre-cutover weekday), not the past 6/18.
-    assert oh.expiry_for_day(date(2026, 6, 19), exps, 1) == date(2026, 6, 25)
+    assert oh.expiry_for_day(date(2015, 6, 19), exps, 1) == date(2015, 6, 25)
     # code<1 is invalid → None.
-    assert oh.expiry_for_day(date(2026, 6, 15), exps, 0) is None
+    assert oh.expiry_for_day(date(2015, 6, 15), exps, 0) is None
 
 
 def test_expiry_for_day_historical_pre_cutover_thursday():
@@ -198,7 +203,7 @@ def test_expiry_for_day_historical_pre_cutover_thursday():
 
 
 def test_expiry_for_day_post_cutover_tuesday():
-    # On/after the 2026-09-01 cutover the weekly weekday is Tuesday.
+    # On/after the 2025-09-01 cutover the weekly weekday is Tuesday.
     exp = oh.expiry_for_day(date(2026, 9, 10), [], 1)  # Thu
     assert exp == date(2026, 9, 15)  # next Tuesday
     assert exp.weekday() == 1        # Tuesday (post-cutover)
@@ -341,16 +346,18 @@ def test_atm_iv_rows_term_structure_code_attaches_2nd_expiry():
 def test_atm_iv_rows_derives_front_when_calendar_is_past():
     # HISTORICAL-MIS-ATTACH FIX: a day AFTER the only (stale) calendar entry no longer
     # "exhausts" — the analytic next weekly weekday is derived instead of skipping.
-    ts = [_epoch_ist(2026, 6, 20, 15, 25)]  # Sat after the stale 6/18 entry
+    # 2015 shares 2026's weekday-for-date calendar (both non-leap, Jan 1 =
+    # Thursday) and sits safely before the 2025-09-01 cutover.
+    ts = [_epoch_ist(2015, 6, 20, 15, 25)]  # Sat after the stale 6/18 entry
     ce = {"data": {"ce": _side_payload(ts, [12.0], [100]), "timestamp": ts}}
     pe = {"data": {"pe": _side_payload(ts, [16.0], [100]), "timestamp": ts}}
-    exps = [date(2026, 6, 18)]
+    exps = [date(2015, 6, 18)]
     rows = oh.atm_iv_rows_from_legs(
         ce, pe, symbol="NIFTY", expiries=exps, expiry_code=1, all_expiries=exps,
         strike_step=50,
     )
     assert len(rows) == 1
-    assert rows[0]["expiry_date"] == date(2026, 6, 25)  # next Thursday (pre-cutover)
+    assert rows[0]["expiry_date"] == date(2015, 6, 25)  # next Thursday (pre-cutover)
 
 
 def test_atm_iv_rows_historical_2021_not_mis_attached_to_future():
@@ -443,14 +450,16 @@ def test_chain_snapshot_rows_stock_seg_nse_eq():
 def test_chain_snapshot_derives_front_when_calendar_is_past():
     # HISTORICAL-MIS-ATTACH FIX: a bar after the stale calendar entry derives the
     # analytic next weekly weekday rather than being dropped.
-    ts = [_epoch_ist(2026, 6, 20, 9, 20)]  # Sat after the stale 6/18 entry
+    # 2015 shares 2026's weekday-for-date calendar (both non-leap, Jan 1 =
+    # Thursday) and sits safely before the 2025-09-01 cutover.
+    ts = [_epoch_ist(2015, 6, 20, 9, 20)]  # Sat after the stale 6/18 entry
     raw = {"data": {"ce": _side_payload(ts, [12.0], [110.0]), "timestamp": ts}}
     rows = oh.chain_snapshot_rows_from_side(
         raw, "ce", underlying_scrip=13, underlying_seg="IDX_I",
-        expiries=[date(2026, 6, 18)], expiry_code=1, strike=0.0,
+        expiries=[date(2015, 6, 18)], expiry_code=1, strike=0.0,
     )
     assert len(rows) == 1
-    assert rows[0]["expiry_date"] == date(2026, 6, 25)  # next Thursday (pre-cutover)
+    assert rows[0]["expiry_date"] == date(2015, 6, 25)  # next Thursday (pre-cutover)
 
 
 # ── build_request shape (matches the verified body) ─────────────────────────────────
@@ -729,9 +738,10 @@ def test_ingest_underlying_without_calendar_still_derives_expiry(_capture_upsert
             strikes=0, expiry_dates=None,
             req_spacing_sec=0, now=_off_hours(),
         ))
-    # The fake returns a single 2026-06-15 bar → analytic front = 6/18 (Thu, pre-cutover).
+    # The fake returns a single 2026-06-15 (Mon) bar, which is post the real
+    # 2025-09-01 cutover → analytic front = next Tuesday, 6/16.
     assert len(_capture_upserts["atm"]) == 1
-    assert _capture_upserts["atm"][0]["expiry_date"] == date(2026, 6, 18)
+    assert _capture_upserts["atm"][0]["expiry_date"] == date(2026, 6, 16)
     assert any("no expiry_calendar" in r.message for r in caplog.records)
 
 
