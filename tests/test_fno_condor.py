@@ -1425,61 +1425,62 @@ class TestCyclesFromDbWeekly:
     """Verify mode="weekly" builds expiry-weekday cycle boundaries from index_bars.
 
     Fidelity fix #1: the cycle boundary is the weekly-EXPIRY trading day (Thursday
-    before the 2026-09-01 Tuesday cutover; holiday-rolled to the prior trading day
+    before the 2025-09-01 Tuesday cutover; holiday-rolled to the prior trading day
     when the expiry weekday is closed), NOT just the last trading day of the ISO
-    week. All canned dates are in Jan-2026 → pre-cutover → target weekday Thursday.
+    week. All canned dates are in Jan-2015 (same weekday-for-date calendar as
+    2026 — both non-leap, Jan 1 = Thursday) → pre-cutover → target weekday Thursday.
 
     Canned trading calendar: 4 ISO weeks.
 
-        ISO week (2026, 1): Mon 2026-01-05, Tue 2026-01-06, Thu 2026-01-08
-            → Thursday present → boundary 2026-01-08 (Thu)
-        ISO week (2026, 2): Mon 2026-01-12, Wed 2026-01-14, Fri 2026-01-16
+        ISO week (2015, 1): Mon 2015-01-05, Tue 2015-01-06, Thu 2015-01-08
+            → Thursday present → boundary 2015-01-08 (Thu)
+        ISO week (2015, 2): Mon 2015-01-12, Wed 2015-01-14, Fri 2015-01-16
             → no Thursday (expiry-day holiday) → roll back to last day on/before
-              Thu = Wed 2026-01-14
-        ISO week (2026, 3): Mon 2026-01-19, Thu 2026-01-22
-            → Thursday present → boundary 2026-01-22 (Thu)
-        ISO week (2026, 4): Tue 2026-01-27, Fri 2026-01-30
-            → no Thursday → roll back to last day on/before Thu = Tue 2026-01-27
+              Thu = Wed 2015-01-14
+        ISO week (2015, 3): Mon 2015-01-19, Thu 2015-01-22
+            → Thursday present → boundary 2015-01-22 (Thu)
+        ISO week (2015, 4): Tue 2015-01-27, Fri 2015-01-30
+            → no Thursday → roll back to last day on/before Thu = Tue 2015-01-27
 
-    Boundaries: [2026-01-08, 2026-01-14, 2026-01-22, 2026-01-27]
+    Boundaries: [2015-01-08, 2015-01-14, 2015-01-22, 2015-01-27]
     Pairs: (01-08, 01-14), (01-14, 01-22), (01-22, 01-27)
 
-    VIX missing for 2026-01-14 → middle pair skipped → 2 cycles survive.
+    VIX missing for 2015-01-14 → middle pair skipped → 2 cycles survive.
     """
 
-    # All trading dates across 4 ISO weeks (2026 week numbers)
+    # All trading dates across 4 ISO weeks (2015 week numbers)
     _NIFTY_ROWS = [
         # ISO week 1
-        (date(2026, 1, 5),  22800.0, 0.11),
-        (date(2026, 1, 6),  22900.0, 0.11),
-        (date(2026, 1, 8),  23000.0, 0.12),   # boundary: Thu of week 1
+        (date(2015, 1, 5),  22800.0, 0.11),
+        (date(2015, 1, 6),  22900.0, 0.11),
+        (date(2015, 1, 8),  23000.0, 0.12),   # boundary: Thu of week 1
         # ISO week 2 (no Thursday → expiry rolls to Wed 01-14)
-        (date(2026, 1, 12), 23050.0, 0.12),
-        (date(2026, 1, 14), 23100.0, 0.13),   # boundary: rolled expiry of week 2
-        (date(2026, 1, 16), 23200.0, 0.13),
+        (date(2015, 1, 12), 23050.0, 0.12),
+        (date(2015, 1, 14), 23100.0, 0.13),   # boundary: rolled expiry of week 2
+        (date(2015, 1, 16), 23200.0, 0.13),
         # ISO week 3
-        (date(2026, 1, 19), 23250.0, 0.13),
-        (date(2026, 1, 22), 23300.0, 0.14),   # boundary: Thu of week 3
+        (date(2015, 1, 19), 23250.0, 0.13),
+        (date(2015, 1, 22), 23300.0, 0.14),   # boundary: Thu of week 3
         # ISO week 4 (no Thursday → expiry rolls to Tue 01-27)
-        (date(2026, 1, 27), 23350.0, 0.14),   # boundary: rolled expiry of week 4
-        (date(2026, 1, 30), 23400.0, 0.15),
+        (date(2015, 1, 27), 23350.0, 0.14),   # boundary: rolled expiry of week 4
+        (date(2015, 1, 30), 23400.0, 0.15),
     ]
 
     _VIX_ROWS_FULL = [
-        (date(2026, 1, 5),  13.0),
-        (date(2026, 1, 6),  13.5),
-        (date(2026, 1, 8),  14.0),
-        (date(2026, 1, 12), 14.2),
-        (date(2026, 1, 14), 14.5),
-        (date(2026, 1, 16), 15.0),
-        (date(2026, 1, 19), 15.2),
-        (date(2026, 1, 22), 15.5),
-        (date(2026, 1, 27), 15.8),
-        (date(2026, 1, 30), 16.0),
+        (date(2015, 1, 5),  13.0),
+        (date(2015, 1, 6),  13.5),
+        (date(2015, 1, 8),  14.0),
+        (date(2015, 1, 12), 14.2),
+        (date(2015, 1, 14), 14.5),
+        (date(2015, 1, 16), 15.0),
+        (date(2015, 1, 19), 15.2),
+        (date(2015, 1, 22), 15.5),
+        (date(2015, 1, 27), 15.8),
+        (date(2015, 1, 30), 16.0),
     ]
 
-    # VIX missing at 2026-01-14 (rolled expiry of week 2 → entry of pair 2)
-    _VIX_ROWS_MISSING_W2 = [r for r in _VIX_ROWS_FULL if r[0] != date(2026, 1, 14)]
+    # VIX missing at 2015-01-14 (rolled expiry of week 2 → entry of pair 2)
+    _VIX_ROWS_MISSING_W2 = [r for r in _VIX_ROWS_FULL if r[0] != date(2015, 1, 14)]
 
     @staticmethod
     def _make_weekly_session(nifty_rows, vix_rows):
@@ -1524,11 +1525,11 @@ class TestCyclesFromDbWeekly:
         """
         cycles = self._run()
         # Cycle 0: entry=01-08 (Thu), expiry=01-14 (rolled expiry of week 2)
-        assert cycles[0]["entry_date"] == date(2026, 1, 8)
-        assert cycles[0]["expiry_date"] == date(2026, 1, 14)
+        assert cycles[0]["entry_date"] == date(2015, 1, 8)
+        assert cycles[0]["expiry_date"] == date(2015, 1, 14)
         # Last cycle: entry=01-22 (Thu), expiry=01-27 (rolled expiry of week 4)
-        assert cycles[-1]["entry_date"] == date(2026, 1, 22)
-        assert cycles[-1]["expiry_date"] == date(2026, 1, 27)
+        assert cycles[-1]["entry_date"] == date(2015, 1, 22)
+        assert cycles[-1]["expiry_date"] == date(2015, 1, 27)
 
     def test_correct_number_of_cycles(self):
         """4 boundaries → 3 consecutive pairs → 3 cycles (all data present)."""
@@ -1570,20 +1571,20 @@ class TestCyclesFromDbWeekly:
 
     def test_missing_vix_at_boundary_skips_that_pair(self):
         """When VIX is absent for a boundary date, that pair is skipped."""
-        # VIX missing at 2026-01-14 (rolled expiry of week 2 → entry of pair 2)
+        # VIX missing at 2015-01-14 (rolled expiry of week 2 → entry of pair 2)
         cycles = self._run(vix_rows=self._VIX_ROWS_MISSING_W2)
         # Pair (01-08→01-14): VIX at 01-08=14.0 → survives
         # Pair (01-14→01-22): VIX at 01-14=missing → SKIPPED
         # Pair (01-22→01-27): VIX at 01-22=15.5 → survives
         assert len(cycles) == 2
-        assert cycles[0]["entry_date"] == date(2026, 1, 8)
-        assert cycles[1]["entry_date"] == date(2026, 1, 22)
+        assert cycles[0]["entry_date"] == date(2015, 1, 8)
+        assert cycles[1]["entry_date"] == date(2015, 1, 22)
 
     def test_missing_rvol_at_boundary_skips_pair(self):
         """When rvol is None for a boundary date, that pair is skipped."""
         nifty_no_rvol = list(self._NIFTY_ROWS)
         # Set rvol=None on boundary 01-08 → pair (01-08→01-16) skipped
-        nifty_no_rvol[2] = (date(2026, 1, 8), 23000.0, None)
+        nifty_no_rvol[2] = (date(2015, 1, 8), 23000.0, None)
         fake_gs = self._make_weekly_session(nifty_no_rvol, self._VIX_ROWS_FULL)
 
         from research.backtest.fno_condor import cycles_from_db
@@ -1594,7 +1595,7 @@ class TestCyclesFromDbWeekly:
         # Pair starting 01-08 is skipped; pairs starting 01-16 and 01-22 survive
         assert len(cycles) == 2
         entry_dates = [c["entry_date"] for c in cycles]
-        assert date(2026, 1, 8) not in entry_dates
+        assert date(2015, 1, 8) not in entry_dates
 
     def test_cycle_dict_has_required_keys(self):
         """Every weekly cycle dict must carry all keys run_backtest expects."""
@@ -1786,17 +1787,19 @@ class TestExpiryWeekday:
         after = date(NIFTY_TUESDAY_EXPIRY_CUTOVER.year + 1, 1, 1)
         assert expiry_weekday_for(after) == 1
 
-    def test_cutover_is_project_convention_2026_09_01(self):
-        """Project runs +1yr ahead of real life → real 2025-09-01 == 2026-09-01."""
+    def test_cutover_is_the_verified_2025_09_01_date(self):
+        """Cutover is the empirically verified real-world date, 2025-09-01."""
         from research.backtest.fno_condor import NIFTY_TUESDAY_EXPIRY_CUTOVER
-        assert NIFTY_TUESDAY_EXPIRY_CUTOVER == date(2026, 9, 1)
+        assert NIFTY_TUESDAY_EXPIRY_CUTOVER == date(2025, 9, 1)
 
     def test_snap_picks_thursday_before_cutover(self):
         from research.backtest.fno_condor import snap_to_expiry_weekday
-        # Full pre-cutover week Mon..Fri → Thursday chosen
-        week = [date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7),
-                date(2026, 1, 8), date(2026, 1, 9)]  # Mon..Fri; Thu = 01-08
-        assert snap_to_expiry_weekday(week) == date(2026, 1, 8)
+        # Full pre-cutover week Mon..Fri → Thursday chosen. 2015 has the same
+        # weekday-for-date calendar as 2026 (both non-leap, Jan 1 = Thursday)
+        # and sits safely before the 2025-09-01 cutover.
+        week = [date(2015, 1, 5), date(2015, 1, 6), date(2015, 1, 7),
+                date(2015, 1, 8), date(2015, 1, 9)]  # Mon..Fri; Thu = 01-08
+        assert snap_to_expiry_weekday(week) == date(2015, 1, 8)
 
     def test_snap_picks_tuesday_after_cutover(self):
         from research.backtest.fno_condor import snap_to_expiry_weekday
@@ -1808,9 +1811,11 @@ class TestExpiryWeekday:
 
     def test_snap_rolls_back_when_expiry_weekday_holiday(self):
         from research.backtest.fno_condor import snap_to_expiry_weekday
-        # Pre-cutover week with NO Thursday (holiday) → roll back to Wed
-        week = [date(2026, 1, 12), date(2026, 1, 14), date(2026, 1, 16)]  # Mon,Wed,Fri
-        assert snap_to_expiry_weekday(week) == date(2026, 1, 14)
+        # Pre-cutover week with NO Thursday (holiday) → roll back to Wed.
+        # 2015 mirrors 2026's weekday-for-date calendar (see comment above) and
+        # is safely before the 2025-09-01 cutover.
+        week = [date(2015, 1, 12), date(2015, 1, 14), date(2015, 1, 16)]  # Mon,Wed,Fri
+        assert snap_to_expiry_weekday(week) == date(2015, 1, 14)
 
     def test_snap_empty_week_returns_none(self):
         from research.backtest.fno_condor import snap_to_expiry_weekday
@@ -1883,16 +1888,18 @@ class TestIndexConfigAgnostic:
             expiry_weekday_for,
             snap_to_expiry_weekday,
         )
-        # Pre-cutover → Thursday; on/after → Tuesday (unchanged from the default).
-        assert expiry_weekday_for(date(2026, 1, 15), index=NIFTY) == 3
+        # Pre-cutover (2015, same weekday-for-date calendar as 2026 — both
+        # non-leap, Jan 1 = Thursday) → Thursday; on/after the real 2025-09-01
+        # cutover → Tuesday (unchanged from the default).
+        assert expiry_weekday_for(date(2015, 1, 15), index=NIFTY) == 3
         assert expiry_weekday_for(date(2026, 9, 1), index=NIFTY) == 1
         # Default arg (no index passed) must match passing NIFTY explicitly.
         assert expiry_weekday_for(date(2026, 1, 15)) == expiry_weekday_for(
             date(2026, 1, 15), index=NIFTY
         )
-        pre_week = [date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7),
-                    date(2026, 1, 8), date(2026, 1, 9)]
-        assert snap_to_expiry_weekday(pre_week, index=NIFTY) == date(2026, 1, 8)
+        pre_week = [date(2015, 1, 5), date(2015, 1, 6), date(2015, 1, 7),
+                    date(2015, 1, 8), date(2015, 1, 9)]
+        assert snap_to_expiry_weekday(pre_week, index=NIFTY) == date(2015, 1, 8)
 
     def test_non_nifty_index_drives_weekly_cycles_from_db(self):
         """End-to-end: a non-NIFTY IndexConfig drives cycles_from_db weekly
@@ -2680,12 +2687,12 @@ class TestCyclesFromDbRealIvJoin:
     #   ISO week 3: Mon 01-19, Thu 01-22
     # boundaries [01-08, 01-15, 01-22] → cycles (01-08→01-15), (01-15→01-22)
     _NIFTY_ROWS = [
-        (date(2026, 1, 5),  23000.0, 0.10),
-        (date(2026, 1, 8),  23000.0, 0.10),
-        (date(2026, 1, 12), 23000.0, 0.10),
-        (date(2026, 1, 15), 23000.0, 0.10),
-        (date(2026, 1, 19), 23000.0, 0.10),
-        (date(2026, 1, 22), 23000.0, 0.10),
+        (date(2015, 1, 5),  23000.0, 0.10),
+        (date(2015, 1, 8),  23000.0, 0.10),
+        (date(2015, 1, 12), 23000.0, 0.10),
+        (date(2015, 1, 15), 23000.0, 0.10),
+        (date(2015, 1, 19), 23000.0, 0.10),
+        (date(2015, 1, 22), 23000.0, 0.10),
     ]
     _VIX_ROWS = [(d, 14.0) for d, *_ in _NIFTY_ROWS]  # VIX/100 = 0.14 proxy
 
@@ -2719,13 +2726,13 @@ class TestCyclesFromDbRealIvJoin:
         # Real IV observed for expiry 01-15 on/before entry 01-08 → cycle 0 gets it.
         # Columns: (expiry_date, obs_date, straddle_iv)
         atm = [
-            (date(2026, 1, 15), date(2026, 1, 8), 0.20),
-            (date(2026, 1, 22), date(2026, 1, 15), 0.22),
+            (date(2015, 1, 15), date(2015, 1, 8), 0.20),
+            (date(2015, 1, 22), date(2015, 1, 15), 0.22),
         ]
         cycles = self._run(atm)
-        assert cycles[0]["expiry_date"] == date(2026, 1, 15)
+        assert cycles[0]["expiry_date"] == date(2015, 1, 15)
         assert cycles[0]["atm_straddle_iv"] == 0.20
-        assert cycles[1]["expiry_date"] == date(2026, 1, 22)
+        assert cycles[1]["expiry_date"] == date(2015, 1, 22)
         assert cycles[1]["atm_straddle_iv"] == 0.22
         # VIX proxy still present as the fallback.
         assert cycles[0]["straddle_iv"] == pytest.approx(0.14)
@@ -2735,15 +2742,15 @@ class TestCyclesFromDbRealIvJoin:
         # (the rolling-expiry roll — front becomes front the trading day AFTER the
         # prior expiry; entry is 01-08). Within the default ±2-trading-day
         # tolerance this NOW populates atm_straddle_iv (was the 41/232-miss bug).
-        atm = [(date(2026, 1, 15), date(2026, 1, 12), 0.20)]
+        atm = [(date(2015, 1, 15), date(2015, 1, 12), 0.20)]
         cycles = self._run(atm)
-        assert cycles[0]["expiry_date"] == date(2026, 1, 15)
+        assert cycles[0]["expiry_date"] == date(2015, 1, 15)
         assert cycles[0]["atm_straddle_iv"] == 0.20
 
     def test_tolerance_zero_reproduces_strict_lookahead_guard(self):
         # tolerance=0 → strict ``<= entry`` PIT: the post-entry roll row (01-12 >
         # entry 01-08) is NOT matched → cycle 0 stays on the VIX proxy.
-        atm = [(date(2026, 1, 15), date(2026, 1, 12), 0.20)]
+        atm = [(date(2015, 1, 15), date(2015, 1, 12), 0.20)]
         cycles = self._run(atm, real_iv_tolerance_days=0)
         assert "atm_straddle_iv" not in cycles[0]
 
@@ -2751,7 +2758,7 @@ class TestCyclesFromDbRealIvJoin:
         # A row far past entry (a genuine multi-week data gap, NOT the expiry-day
         # roll) must NOT match → cycle stays on the VIX proxy. expiry 01-15 entry
         # 01-08; obs 02-10 is ~33 days out, well beyond ±2 trading days.
-        atm = [(date(2026, 1, 15), date(2026, 2, 10), 0.20)]
+        atm = [(date(2015, 1, 15), date(2015, 2, 10), 0.20)]
         cycles = self._run(atm)
         assert "atm_straddle_iv" not in cycles[0]
 
@@ -2761,9 +2768,9 @@ class TestCyclesFromDbRealIvJoin:
         # expiry, the strict row MUST win (no look-ahead). Cycle 0 entry=01-08:
         #   strict-PIT row obs=01-08 iv=0.20  vs  tolerance row obs=01-09 iv=0.30.
         atm = [
-            (date(2026, 1, 15), date(2026, 1, 8),  0.20),  # strict PIT → must win
-            (date(2026, 1, 15), date(2026, 1, 9),  0.30),  # tolerance-eligible, must lose
-            (date(2026, 1, 22), date(2026, 1, 15), 0.22),  # cycle 1 normal strict row
+            (date(2015, 1, 15), date(2015, 1, 8),  0.20),  # strict PIT → must win
+            (date(2015, 1, 15), date(2015, 1, 9),  0.30),  # tolerance-eligible, must lose
+            (date(2015, 1, 22), date(2015, 1, 15), 0.22),  # cycle 1 normal strict row
         ]
         cycles = self._run(atm)
         assert cycles[0]["atm_straddle_iv"] == pytest.approx(0.20)
@@ -2774,9 +2781,9 @@ class TestCyclesFromDbRealIvJoin:
         # expiry, the EARLIEST (closest to entry) must be chosen. Cycle 0
         # entry=01-08: obs 01-09 iv=0.13 (earliest) vs 01-10 iv=0.40 (later).
         atm = [
-            (date(2026, 1, 15), date(2026, 1, 9),  0.13),  # earliest post-entry → chosen
-            (date(2026, 1, 15), date(2026, 1, 10), 0.40),  # later → must NOT win
-            (date(2026, 1, 22), date(2026, 1, 16), 0.22),  # cycle 1 rank-1 post-entry
+            (date(2015, 1, 15), date(2015, 1, 9),  0.13),  # earliest post-entry → chosen
+            (date(2015, 1, 15), date(2015, 1, 10), 0.40),  # later → must NOT win
+            (date(2015, 1, 22), date(2015, 1, 16), 0.22),  # cycle 1 rank-1 post-entry
         ]
         cycles = self._run(atm)
         assert cycles[0]["atm_straddle_iv"] == pytest.approx(0.13)
@@ -2786,8 +2793,8 @@ class TestCyclesFromDbRealIvJoin:
         # 5.2 (520 %) expiry-day blowup for cycle 0's expiry → filtered → VIX proxy.
         # cycle 1 gets a valid 0.20.
         atm = [
-            (date(2026, 1, 15), date(2026, 1, 8), 5.2),
-            (date(2026, 1, 22), date(2026, 1, 15), 0.20),
+            (date(2015, 1, 15), date(2015, 1, 8), 5.2),
+            (date(2015, 1, 22), date(2015, 1, 15), 0.20),
         ]
         cycles = self._run(atm)
         assert "atm_straddle_iv" not in cycles[0]      # blowup filtered
@@ -2795,7 +2802,7 @@ class TestCyclesFromDbRealIvJoin:
 
     def test_use_real_iv_false_skips_join_entirely(self):
         # Even with real rows present, use_real_iv=False must not enrich.
-        atm = [(date(2026, 1, 15), date(2026, 1, 8), 0.20)]
+        atm = [(date(2015, 1, 15), date(2015, 1, 8), 0.20)]
         cycles = self._run(atm, use_real_iv=False)
         assert all("atm_straddle_iv" not in c for c in cycles)
 
@@ -2803,7 +2810,7 @@ class TestCyclesFromDbRealIvJoin:
         # cycles_from_db default (use_real_iv unset → False) must NOT enrich, so
         # existing callers keep VIX-proxy behaviour. Real rows present but ignored.
         from research.backtest.fno_condor import cycles_from_db
-        atm = [(date(2026, 1, 15), date(2026, 1, 8), 0.20)]
+        atm = [(date(2015, 1, 15), date(2015, 1, 8), 0.20)]
         fake_gs = self._make_gs(atm)
         with patch("research.backtest.fno_condor.get_session", new=fake_gs, create=True), \
              patch("db.get_session", new=fake_gs):

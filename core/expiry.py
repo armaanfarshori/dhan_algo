@@ -26,9 +26,6 @@ The expiry_calendar is then used ONLY as a *refinement* where it actually covers
 the date (snap an analytic expiry to a real holiday-adjusted calendar entry within
 a few days); it is NEVER allowed to select a far-future entry for a historical day.
 
-Project date convention: this repo runs one year ahead of the real-world calendar
-(real-life NSE Tuesday cutover 2025-09-01 is represented as 2026-09-01).
-
 Python ``date.weekday()``: Monday=0 … Sunday=6 → Tuesday=1, Thursday=3.
 """
 from __future__ import annotations
@@ -41,9 +38,15 @@ from typing import Optional
 TUESDAY = 1
 THURSDAY = 3
 
-# NIFTY weekly-expiry Thursday→Tuesday cutover (project convention: real 2025-09-01
-# represented as 2026-09-01). Mirrors fno_condor.NIFTY_TUESDAY_EXPIRY_CUTOVER.
-NIFTY_TUESDAY_EXPIRY_CUTOVER = date(2026, 9, 1)
+# NIFTY weekly-expiry Thursday→Tuesday cutover. EMPIRICALLY VERIFIED 2026-08-15
+# against Dhan rollingoption premiums: the 15:20 front-weekly ATM straddle is
+# cheapest (near-zero, i.e. expiry-day evening) on WEDNESDAY evenings through
+# Aug 2025 and on TUESDAY evenings from Sep 2025 onward. The previous value
+# (2026-09-01, one year late, justified by a "repo runs a year ahead" note)
+# silently mis-keyed every option_atm_iv/option_chain_snapshot row after
+# Sep 2025 and mislabelled expiry-roll nights in research.
+# Mirrors fno_condor.NIFTY_TUESDAY_EXPIRY_CUTOVER.
+NIFTY_TUESDAY_EXPIRY_CUTOVER = date(2025, 9, 1)
 
 # A weekly front expiry is always within 7 days of the bar date; anything beyond
 # this (with slack) signals a mis-attachment (e.g. a forward-only calendar entry
