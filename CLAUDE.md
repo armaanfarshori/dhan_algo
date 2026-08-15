@@ -144,7 +144,7 @@ through the live-flip protocol (see Safety rules); never commit IPs/IDs/tokens (
 never rely on that; no secrets in git);
 branch + PR for every change (never commit straight to `main`). **The agent merges PRs itself**
 (memory `agent-handles-merges` — don't wait for a human) once gated by **green CI + outside
-market hours (09:15–15:30 IST)**. The market-hours + CI gates are safety rails, not
+market hours (09:15–15:40 IST, post-CAS)**. The market-hours + CI gates are safety rails, not
 human-gating; only the deploy (restart services on this box) stays a deliberate step.
 
 ---

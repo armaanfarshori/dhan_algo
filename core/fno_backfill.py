@@ -59,7 +59,9 @@ INDEX_SECURITY_IDS: dict[str, str] = {"NIFTY": "13", "INDIAVIX": "21"}
 SYMBOL_STRIKE_STEP: dict[str, int] = {"NIFTY": 50}
 
 _MARKET_OPEN = time(9, 15)
-_MARKET_CLOSE = time(15, 30)
+# Post-CAS (2026-08-03): stock derivatives trade to ~15:40 IST, so the
+# off-hours guard must cover the full extended window, not the old 15:30.
+_MARKET_CLOSE = time(15, 40)
 
 
 # ── time / market-hours guard ───────────────────────────────────────────────────
@@ -69,7 +71,7 @@ def _now_ist() -> datetime:
 
 def is_market_hours(now: Optional[datetime] = None) -> bool:
     """True iff ``now`` (default: real IST now) is within NSE trading hours —
-    a weekday between 09:15 and 15:30 IST inclusive."""
+    a weekday between 09:15 and 15:40 IST inclusive (post-CAS window)."""
     now = now or _now_ist()
     # A naive datetime is assumed to already be IST (the module's native zone);
     # a tz-aware one is converted. This avoids mis-judging a naive UTC `now`
@@ -86,7 +88,7 @@ def _assert_off_hours(action: str, now: Optional[datetime] = None) -> None:
     a research/backfill path that can never interleave with live trading)."""
     if is_market_hours(now):
         raise RuntimeError(
-            f"{action} refused during market hours (09:15–15:30 IST). "
+            f"{action} refused during market hours (09:15–15:40 IST). "
             "Run F&O data jobs off-hours."
         )
 

@@ -70,7 +70,17 @@ async def market_status_handler(_r: web.Request) -> web.Response:
     now = datetime.now(ZoneInfo("Asia/Kolkata"))
     t, wd = now.time(), now.weekday()
     is_weekday, is_saturday = wd < 5, wd == 5
-    nse = "OPEN" if is_weekday and dtime(9, 15) <= t <= dtime(15, 30) else "CLOSED"
+    # Post-CAS clock (live 2026-08-03): continuous trading for F&O-listed
+    # stocks ends 15:15, the closing auction runs 15:15–15:35, and stock
+    # derivatives trade to ~15:40. Non-F&O stocks still close 15:30 — this
+    # endpoint reports the F&O-stock clock, which is what the engine trades.
+    if is_weekday and dtime(9, 15) <= t < dtime(15, 15):
+        nse = "OPEN"
+    elif is_weekday and dtime(15, 15) <= t <= dtime(15, 35):
+        nse = "CAS"
+    else:
+        nse = "CLOSED"
+    fno = "OPEN" if is_weekday and dtime(9, 15) <= t <= dtime(15, 40) else "CLOSED"
     pre = "PRE" if is_weekday and dtime(9, 0) <= t < dtime(9, 15) else None
     if is_weekday:
         mcx = "OPEN" if dtime(9, 0) <= t <= dtime(23, 30) else "CLOSED"
@@ -79,7 +89,7 @@ async def market_status_handler(_r: web.Request) -> web.Response:
     else:
         mcx = "CLOSED"
     return web.json_response({
-        "nse_equity": pre or nse, "nse_fno": pre or nse, "mcx": mcx,
+        "nse_equity": pre or nse, "nse_fno": pre or fno, "mcx": mcx,
         "ist_time": now.strftime("%H:%M:%S"), "weekday": now.strftime("%A"),
         "is_weekend": not is_weekday and not is_saturday,
     })

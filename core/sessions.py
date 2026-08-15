@@ -142,15 +142,28 @@ class SessionClock:
 
 # ── Named profiles ─────────────────────────────────────────────────────────────
 
-# EQUITY reproduces the legacy hardcoded constants byte-identically:
-#   open 09:15, close 15:30, poll window 09:00–15:35, 15-min squareoff, Mon–Fri.
+# EQUITY is on the post-CAS clock (SEBI Closing Auction Session, live 2026-08-03,
+# circular HO/47/11/11(3)2025-MRD-POD2/I/2765/2026 dated 2026-01-16). For
+# F&O-listed stocks continuous trading now ends 15:15 IST; 15:15–15:35 is the
+# auction (order-entry phases to 15:30, matching 15:30–15:35) and the closing
+# price is the auction equilibrium, not the old 30-min VWAP. Non-F&O stocks
+# still trade continuously to 15:30, but the screener universe is dominated by
+# F&O names, so the whole equity engine runs on the earlier, safer clock —
+# 15 minutes of non-F&O tradability given up deliberately rather than risk
+# flattening into an auction book.
+#
+# Squareoff: close 15:15 − 10 min ⇒ 15:05, comfortably before the brokers'
+# own CAS-stock MIS force-square-off (~15:10–15:12 at Zerodha/Angel; Dhan
+# unconfirmed). Poll window runs to 15:40 so BarBuilder still captures the
+# auction close print and the stock-F&O tail (stock derivatives trade to
+# ~15:40 post-CAS).
 EQUITY = MarketSession(
     name="EQUITY",
     open_time=dtime(9, 15),
-    close_time=dtime(15, 30),
+    close_time=dtime(15, 15),
     poll_open=dtime(9, 0),
-    poll_close=dtime(15, 35),
-    squareoff_before_close_min=15,
+    poll_close=dtime(15, 40),
+    squareoff_before_close_min=10,
     weekdays=frozenset({0, 1, 2, 3, 4}),
 )
 

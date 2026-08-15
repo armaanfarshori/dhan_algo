@@ -461,8 +461,9 @@ def test_in_window_before_open():
 
 
 def test_in_window_after_close():
-    """15:36 is after the window."""
-    assert StrategyRunner._in_window(ist(15, 36)) is False
+    """15:41 is after the (post-CAS) poll window."""
+    assert StrategyRunner._in_window(ist(15, 41)) is False
+    assert StrategyRunner._in_window(ist(15, 40)) is True
 
 
 def test_in_window_weekend():

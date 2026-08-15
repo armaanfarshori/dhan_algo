@@ -39,6 +39,9 @@ logger = logging.getLogger("dhan.strategy.options_scalper")
 
 IST = ZoneInfo("Asia/Kolkata")
 MARKET_OPEN = dtime(9, 15)
+# INDEX options close: deliberately NOT moved for CAS (2026-08-03). The
+# closing auction applies to F&O-listed STOCKS; index derivatives kept the
+# 15:30 close. Do not "fix" this to 15:15/15:40 without a primary source.
 MARKET_CLOSE = dtime(15, 30)
 
 # Mirror ORB: a tick stamped further than this ahead of wall clock is ignored.
