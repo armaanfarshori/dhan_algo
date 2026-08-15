@@ -19,9 +19,9 @@ from core import expiry as ex
 
 # ── weekday rule (cutover-aware) ──────────────────────────────────────────────────
 def test_expiry_weekday_pre_cutover_is_thursday():
-    # Before the 2026-09-01 cutover NIFTY weeklies expire Thursday (=3).
+    # Before the 2025-09-01 cutover NIFTY weeklies expire Thursday (=3).
     assert ex.expiry_weekday_for(date(2021, 3, 10)) == ex.THURSDAY
-    assert ex.expiry_weekday_for(date(2026, 8, 31)) == ex.THURSDAY
+    assert ex.expiry_weekday_for(date(2025, 8, 31)) == ex.THURSDAY
 
 
 def test_expiry_weekday_on_or_after_cutover_is_tuesday():
@@ -67,11 +67,11 @@ def test_nth_weekly_rejects_code_below_one():
 
 
 def test_nth_weekly_crossing_cutover_flips_weekday():
-    # Around the cutover, a code that lands on/after 2026-09-01 picks up Tuesday.
-    # 2026-08-26 (Wed) → code1 Thursday 8/27 (pre), later codes cross to Tuesdays.
-    d = date(2026, 8, 26)
+    # Around the cutover, a code that lands on/after 2025-09-01 picks up Tuesday.
+    # 2025-08-26 (Tue, pre-cutover) → code1 Thursday 8/28, later codes cross to Tuesdays.
+    d = date(2025, 8, 26)
     c1 = ex.nth_weekly_expiry_on_or_after(d, 1)
-    assert c1 == date(2026, 8, 27) and c1.weekday() == ex.THURSDAY  # pre-cutover Thu
+    assert c1 == date(2025, 8, 28) and c1.weekday() == ex.THURSDAY  # pre-cutover Thu
     # A code well past the cutover must be a Tuesday.
     c5 = ex.nth_weekly_expiry_on_or_after(d, 5)
     assert c5.weekday() == ex.TUESDAY
@@ -104,9 +104,10 @@ def test_derive_front_forward_only_calendar_does_not_pull_historical():
 
 def test_derive_front_calendar_only_refines_when_within_slack():
     # A calendar entry far from the analytic date is NOT used (kept analytic).
+    # 2026-06-15 is post-cutover → analytic front is Tuesday 2026-06-16.
     assert ex.derive_front_expiry(
         date(2026, 6, 15), 1, calendar=[date(2026, 7, 30)]
-    ) == date(2026, 6, 18)
+    ) == date(2026, 6, 16)
 
 
 def test_derive_front_guard_returns_none_for_implausible_gap():
@@ -143,9 +144,9 @@ def test_next_weekly_crossing_cutover_resolves_to_post_cutover_weekday():
 def test_nth_weekly_strictly_increasing_correct_weekday_through_cutover():
     # REGRESSION: codes spanning the cutover are strictly increasing AND each lands
     # on the weekday its OWN date prescribes (Thursday pre, Tuesday post).
-    d = date(2026, 8, 27)  # last pre-cutover Thursday
+    d = date(2025, 8, 28)  # last pre-cutover Thursday
     seq = [ex.nth_weekly_expiry_on_or_after(d, k) for k in range(1, 5)]
-    assert seq == [date(2026, 8, 27), date(2026, 9, 1), date(2026, 9, 8), date(2026, 9, 15)]
+    assert seq == [date(2025, 8, 28), date(2025, 9, 2), date(2025, 9, 9), date(2025, 9, 16)]
     for e in seq:
         assert e.weekday() == ex.expiry_weekday_for(e)
     assert all(b > a for a, b in zip(seq, seq[1:]))

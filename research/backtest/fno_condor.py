@@ -128,11 +128,12 @@ def realized_vol_to_calendar_basis(
 _TUESDAY = 1
 _THURSDAY = 3
 
-# NIFTY weekly-expiry Thursday→Tuesday cutover. (Project date convention:
-# real-life 2025-09-01 is represented here as 2026-09-01 — the repo runs one
-# year ahead of the real-world calendar; today is 2026-06-20.) Kept as a
-# module-level constant for the NIFTY default + backward-compatible imports.
-NIFTY_TUESDAY_EXPIRY_CUTOVER = date(2026, 9, 1)
+# NIFTY weekly-expiry Thursday→Tuesday cutover — empirically verified against
+# Dhan rollingoption premiums (2026-08-15): expiry-day-evening straddles go
+# near-zero on Wednesdays through Aug 2025 and on Tuesdays from Sep 2025.
+# Kept as a module-level constant for the NIFTY default + backward-compatible
+# imports; mirrors core/expiry.NIFTY_TUESDAY_EXPIRY_CUTOVER.
+NIFTY_TUESDAY_EXPIRY_CUTOVER = date(2025, 9, 1)
 
 
 @dataclass(frozen=True)
@@ -183,7 +184,7 @@ class IndexConfig:
 
 
 # Default underlying — NIFTY. Weeklies exist; expiry weekday is Thursday before
-# the 2026-09-01 cutover and Tuesday on/after it. security_id=13, vix=21,
+# the 2025-09-01 cutover and Tuesday on/after it. security_id=13, vix=21,
 # lot=65, strike grid 50.
 NIFTY = IndexConfig(
     symbol="NIFTY",

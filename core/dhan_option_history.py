@@ -168,7 +168,7 @@ class Underlying:
     exchange_segment: str = "NSE_FNO"
     chain_seg: str = "IDX_I"
     # Expiry-weekday rule (cutover-aware, index-agnostic). Defaults to NIFTY —
-    # Tuesday on/after the 2026-09-01 cutover, Thursday before — MIRRORING the
+    # Tuesday on/after the 2025-09-01 cutover, Thursday before — MIRRORING the
     # IndexConfig values in research/backtest/fno_condor.py (replicated in core to
     # avoid a research→core import). A non-NIFTY underlying overrides these.
     expiry_weekday: int = TUESDAY
@@ -197,7 +197,7 @@ class Underlying:
 # ("BANKNIFTY" → underlying_id "25", strike_step 100, lot 30) and the index-config
 # notes in research/backtest/fno_condor.py). Its expiry weekday is its OWN rule, NOT
 # NIFTY's: BANKNIFTY weeklies were discontinued (monthly-only) and it never adopted
-# NIFTY's Thursday→Tuesday 2026-09-01 weekly cutover. It is pinned with
+# NIFTY's Thursday→Tuesday 2025-09-01 weekly cutover. It is pinned with
 # expiry_weekday=THURSDAY, pre_cutover_weekday=None, cutover_date=None so the
 # derivation uses a SINGLE fixed weekly/monthly weekday and never borrows NIFTY's
 # calendar (the OFF-cutover off-registry footgun the registry doc warns about). The
@@ -958,7 +958,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--expiry-weekday", type=_parse_weekday, default=None,
         help="weekly-expiry weekday (Mon=0..Sun=6) for a non-NIFTY underlying "
-             "(default = NIFTY rule: Tuesday on/after the 2026-09-01 cutover)",
+             "(default = NIFTY rule: Tuesday on/after the 2025-09-01 cutover)",
     )
     p.add_argument(
         "--strikes", type=int, default=None,
