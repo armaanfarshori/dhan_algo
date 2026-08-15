@@ -189,25 +189,35 @@ def _is_auth_error(exc: Exception) -> bool:
 
 
 def _reload_token(client: DhanClient) -> bool:
-    """Re-read dhan_token.json; if it rotated, push it into the live client.
+    """Ensure the shared client carries a currently-VALID token; True if it does.
 
-    Returns True if a *different* valid token was loaded, False otherwise.
+    ``read_current_token()`` returns a token only when dhan_token.json holds an
+    UNEXPIRED one — so "file token == client token" does not mean "no rotation
+    yet", it means the client already holds a live token and there is nothing
+    to wait for. The old file-vs-client inequality test deadlocked under
+    concurrency (observed live 2026-08-15, 4-way --concurrency): the first
+    waiter pushed the fresh token into the shared client and resumed, after
+    which every other waiter saw file == client and spun to max_wait. The lone
+    pathological case — a clock-valid token that Dhan has revoked server-side
+    — resumes immediately here, fails DH-901 again, and re-enters the wait at
+    the poll cadence, which is an acceptable pace for a 30-min window.
     """
     from core.token_manager import read_current_token
     fresh = read_current_token()
-    if fresh and fresh != client.access_token:
+    if not fresh:
+        return False            # nothing valid on disk yet — keep waiting
+    if fresh != client.access_token:
         client._on_token_refreshed(fresh)   # updates self.access_token + session header
         logger.info("  Token rotation detected — reloaded fresh token into client")
-        return True
-    return False
+    return True
 
 
 async def _wait_for_fresh_token(client: DhanClient, poll_s: int = 30, max_wait_s: int = 1800):
-    """Block until main.py rotates dhan_token.json to a token != the current one.
+    """Block until dhan_token.json rotates past the token that just failed.
 
     Backfill cannot mint tokens itself, so on an unrecoverable auth failure we
-    wait for main.py's MasterTokenManager to publish a fresh one, then resume
-    the SAME security (no checkpoint advance → no data loss)."""
+    wait for the trader's MasterTokenManager to publish a fresh one, then
+    resume the SAME security (no checkpoint advance → no data loss)."""
     waited = 0
     while waited < max_wait_s:
         if _reload_token(client):
