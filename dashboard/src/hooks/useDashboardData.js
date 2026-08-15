@@ -26,6 +26,8 @@ export function useDashboardData() {
   const kronosLive    = usePoller('/api/kronos/live',    15000)
   const screener      = usePoller('/api/kronos/screener', 300000)  // server caches 5 min
   const systemHealth  = usePoller('/api/system/health',  30000)
+  // Real host facts (cpu/mem/disk/os + db + migration list) — server caches 30 s
+  const systemHost    = usePoller('/api/system/host',    60000)
   const rateLimitsData = usePoller('/api/rate-limits',   12000)    // account-wide across all processes
 
   // ── F&O panel (data refreshes at most daily via the 16:00 IST collector) ──
@@ -73,7 +75,8 @@ export function useDashboardData() {
     snapshot, trader, alive, limits, gate,
     status, risk, paperPositions,
     signals, funds, positions, watchlist, market, tradelog, logs, equity,
-    dbStats, kronosSignals, kronosLive, screener, backfill, systemHealth, rateLimitsData,
+    dbStats, kronosSignals, kronosLive, screener, backfill, systemHealth, systemHost,
+    rateLimitsData,
     fnoVrp, fnoVrpSeries, fnoPaper, fnoChain, fnoBacktest,
     scalperLive, scalperGovernor, scalperTrades,
   }

@@ -602,3 +602,228 @@ def test_screener_n_param_respected(monkeypatch):
             asyncio.run(kronos_screener_handler(_FakeRequest(query={"n": "10"})))
 
     assert seen_n == [10]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# /api/system/host  — real host facts for the Infrastructure card
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _host_stubs(monkeypatch, cpu="Intel(R) Xeon(R) CPU E3-1270 v3 @ 3.50GHz",
+                mem=None, cpu_count=8):
+    """Patch the /proc + platform reads so host tests never touch the real box.
+
+    Also clears the module-level static cache so tests are order-independent
+    (the handler deliberately computes those facts once per process).
+    """
+    import apps.routes.system as sys_mod
+
+    _make_api_stubs(monkeypatch)
+    monkeypatch.setattr(sys_mod, "_STATIC_HOST", None, raising=False)
+    monkeypatch.setattr(sys_mod, "_cpu_model", lambda: cpu)
+    monkeypatch.setattr(
+        sys_mod, "_meminfo",
+        lambda: (mem if mem is not None
+                 else {"total": 33_554_432_000, "available": 12_000_000_000}))
+    monkeypatch.setattr("platform.node", lambda: "t1700")
+    monkeypatch.setattr("platform.platform", lambda: "Linux-6.14.0-37-generic-x86_64")
+    monkeypatch.setattr("os.cpu_count", lambda: cpu_count)
+    return sys_mod
+
+
+def _db_conn_for_host(values=None):
+    """Mock connection answering the host handler's per-fact scalar probes."""
+    values = values or {}
+    defaults = {
+        "version": "PostgreSQL 16.9 on x86_64-pc-linux-gnu",
+        "server_version": "16.9",
+        "alembic": "014",
+        "timescaledb": "2.17.2",
+        "hypertables": 8,
+    }
+    defaults.update(values)
+
+    def _execute(stmt, *_a, **_k):
+        sql = str(stmt)
+        result = MagicMock()
+        if "version()" in sql:
+            key = "version"
+        elif "server_version" in sql:
+            key = "server_version"
+        elif "alembic_version" in sql:
+            key = "alembic"
+        elif "pg_extension" in sql:
+            key = "timescaledb"
+        elif "hypertables" in sql:
+            key = "hypertables"
+        else:
+            key = None
+        val = defaults.get(key)
+        if isinstance(val, Exception):
+            raise val
+        result.scalar.return_value = val
+        return result
+
+    conn = MagicMock()
+    conn.__enter__ = MagicMock(return_value=conn)
+    conn.__exit__ = MagicMock(return_value=False)
+    conn.execute.side_effect = _execute
+    engine = MagicMock()
+    engine.connect.return_value = conn
+    return engine, conn
+
+
+def test_host_info_reports_real_hardware(monkeypatch):
+    """Happy path: cpu / memory / disk / os / DB facts all populated."""
+    from apps.routes.system import host_info_handler
+
+    _host_stubs(monkeypatch)
+    engine, _conn = _db_conn_for_host()
+
+    fake_usage = types.SimpleNamespace(
+        total=256_060_514_304, used=120_000_000_000, free=136_060_514_304)
+
+    with patch("db.get_engine", return_value=engine):
+        with patch("shutil.disk_usage", return_value=fake_usage):
+            resp = asyncio.run(host_info_handler(_FakeRequest()))
+
+    assert resp.status == 200
+    body = _body(resp)
+    assert body["ok"] is True
+
+    host = body["host"]
+    assert host["hostname"] == "t1700"
+    assert "Xeon" in host["cpu_model"]
+    assert host["cpu_count"] == 8
+    assert host["platform"].startswith("Linux-")
+    assert host["mem_total_bytes"] == 33_554_432_000
+    assert host["mem_available_bytes"] == 12_000_000_000
+    assert host["disk_total_bytes"] == 256_060_514_304
+    assert host["disk_free_bytes"] == 136_060_514_304
+
+    db = body["db"]
+    assert db["up"] is True
+    assert db["server_version"] == "16.9"
+    assert db["timescaledb"] == "2.17.2"
+    assert db["alembic_head"] == "014"
+    assert db["hypertables"] == 8
+
+    # No hardcoded AWS anywhere in the payload.
+    raw = json.dumps(body)
+    for dead in ("t4g", "r7g", "ap-south-1", "EBS", "DynamoDB"):
+        assert dead not in raw
+
+
+def test_host_info_migrations_listed_and_sorted(monkeypatch, tmp_path):
+    """Migrations come from alembic/versions/*.py, newest first, numeric sort."""
+    from apps.routes.system import host_info_handler
+
+    _host_stubs(monkeypatch)
+    versions = tmp_path / "alembic" / "versions"
+    versions.mkdir(parents=True)
+    for name in ("001_initial_schema.py", "009_fno_foundation.py",
+                 "010_fno_capture_everything.py", "014_scalper_tables.py"):
+        (versions / name).write_text("# migration\n")
+    # Files that must be ignored (no NNN_ prefix)
+    (versions / "__init__.py").write_text("")
+    (versions / "README.md").write_text("notes")
+
+    import apps.api as api_mod
+    monkeypatch.setattr(api_mod, "ROOT", tmp_path, raising=False)
+
+    engine, _conn = _db_conn_for_host()
+    with patch("db.get_engine", return_value=engine):
+        with patch("shutil.disk_usage",
+                   return_value=types.SimpleNamespace(total=1, used=0, free=1)):
+            resp = asyncio.run(host_info_handler(_FakeRequest()))
+
+    migrations = _body(resp)["migrations"]
+    # numeric, newest first — a string sort would put 009 above 010/014
+    assert [m["id"] for m in migrations] == ["014", "010", "009", "001"]
+    assert migrations[0]["desc"] == "scalper tables"
+    assert migrations[-1]["desc"] == "initial schema"
+
+
+def test_host_info_degrades_to_null(monkeypatch):
+    """/proc unreadable + disk error + DB down → nulls, still ok:True / 200."""
+    from apps.routes.system import host_info_handler
+
+    _host_stubs(monkeypatch, cpu=None,
+                mem={"total": None, "available": None}, cpu_count=None)
+
+    with patch("db.get_engine", side_effect=RuntimeError("db down")):
+        with patch("shutil.disk_usage", side_effect=OSError("no such path")):
+            resp = asyncio.run(host_info_handler(_FakeRequest()))
+
+    assert resp.status == 200
+    body = _body(resp)
+    assert body["ok"] is True
+
+    host = body["host"]
+    assert host["cpu_model"] is None
+    assert host["cpu_count"] is None
+    assert host["mem_total_bytes"] is None
+    assert host["mem_available_bytes"] is None
+    assert host["disk_total_bytes"] is None
+    assert host["disk_free_bytes"] is None
+
+    db = body["db"]
+    assert db["up"] is False
+    assert db["version"] is None
+    assert db["alembic_head"] is None
+    assert db["hypertables"] is None
+
+
+def test_host_info_survives_missing_timescaledb(monkeypatch):
+    """A failing probe rolls back and must not null the other DB facts."""
+    from apps.routes.system import host_info_handler
+
+    _host_stubs(monkeypatch)
+    engine, conn = _db_conn_for_host(
+        {"hypertables": RuntimeError("relation timescaledb_information.hypertables"),
+         "timescaledb": None})
+
+    with patch("db.get_engine", return_value=engine):
+        with patch("shutil.disk_usage",
+                   return_value=types.SimpleNamespace(total=1, used=0, free=1)):
+            resp = asyncio.run(host_info_handler(_FakeRequest()))
+
+    db = _body(resp)["db"]
+    assert db["server_version"] == "16.9"      # survived the failing probe
+    assert db["alembic_head"] == "014"
+    assert db["hypertables"] is None
+    assert db["timescaledb"] is None
+    conn.rollback.assert_called()               # aborted txn cleared
+
+
+def test_host_info_never_500s(monkeypatch):
+    """An exception escaping the collector → 200 with an all-null shell."""
+    from apps.routes.system import host_info_handler
+
+    _host_stubs(monkeypatch)
+    import apps.api as api_mod
+
+    async def _boom(_fn):
+        raise RuntimeError("executor exploded")
+
+    monkeypatch.setattr(api_mod, "_db_query", _boom, raising=False)
+
+    resp = asyncio.run(host_info_handler(_FakeRequest()))
+    assert resp.status == 200
+    body = _body(resp)
+    assert body["ok"] is False
+    assert body["migrations"] == []
+    assert body["host"]["cpu_model"] is None
+    assert body["db"]["up"] is False
+
+
+def test_host_info_uses_cache(monkeypatch):
+    """A warm cache short-circuits before any /proc or DB work."""
+    from apps.routes.system import host_info_handler
+
+    sentinel = {"ok": True, "host": {"hostname": "cached"}, "db": {}, "migrations": []}
+    _make_api_stubs(monkeypatch, cache_val=sentinel)
+
+    with patch("db.get_engine", side_effect=AssertionError("cache miss — DB touched")):
+        resp = asyncio.run(host_info_handler(_FakeRequest()))
+
+    assert _body(resp)["host"]["hostname"] == "cached"

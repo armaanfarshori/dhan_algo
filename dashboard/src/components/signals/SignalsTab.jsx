@@ -142,27 +142,45 @@ function KpiKronosGate({ trader, gate }) {
 
 // ─── Intraday P&L sparkline ───────────────────────────────────────────────────
 
+const SESSION_TICKS = ['09:15', '11:00', '12:45', '14:15', '15:30']
+
 function IntradaySparkline({ equity }) {
   // equity?.data?.intraday = [{t: "09:15", pnl: 0}, ...]
   const all = equity?.data?.intraday ?? []
-  // Reflect the trading session: clamp to 09:15–15:30 IST when those points exist.
+  // This chart is captioned "09:15 → 15:30 IST", so it may only ever plot
+  // session points. The old fallback silently plotted ALL points when the
+  // session window was empty — off-session equity snapshots (e.g. a 20:28
+  // restart) drew a curve under a caption that flatly did not describe it.
   const session = all.filter(p => p.t >= '09:15' && p.t <= '15:30')
-  const pts = (session.length >= 2 ? session : all).map(p => ({ t: p.t, v: p.pnl }))
+  const hasSession = session.length >= 2
+  const pts = hasSession ? session.map(p => ({ t: p.t, v: p.pnl })) : []
   const val  = pts.length ? pts[pts.length - 1].v : 0
   const isUp = val >= 0
 
-  const metaText = pts.length
+  const offSession = all.length - session.length
+  const metaText = hasSession
     ? `${isUp ? '+' : ''}${INR0(val)} · 09:15 → 15:30 IST`
-    : 'No session data'
+    : offSession > 0
+      ? `no session data · ${offSession} off-session snapshot${offSession === 1 ? '' : 's'}`
+      : 'no session data'
 
   return (
     <Panel>
       <PanelHeader
         title="Intraday P&L"
-        meta={<span className={`mono ${isUp ? 'text-profit' : 'text-loss'}`}>{metaText}</span>}
+        meta={
+          <span className={`mono ${hasSession ? (isUp ? 'text-profit' : 'text-loss') : 'text-faint'}`}>
+            {metaText}
+          </span>
+        }
       />
       <div className="px-3 pb-3 pt-3">
-        <PnlAreaChart data={pts} height={240} />
+        <PnlAreaChart
+          data={pts}
+          height={240}
+          emptyTicks={SESSION_TICKS}
+          emptyNote="no session data (09:15 → 15:30 IST)"
+        />
       </div>
     </Panel>
   )

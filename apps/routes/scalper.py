@@ -1,7 +1,8 @@
 """Scalper dashboard API handlers — three read-only GETs + one auth-gated control POST.
 
-Surfaces the intraday options-scalper forward-paper track (the scalper is
-un-backtestable today, so it is validated by forward paper-trading):
+Surfaces the intraday options-scalper PAPER track.  The sleeve was backtested on
+real minute data in June 2026 and came out decisively negative-EV, so it ships
+dark behind cfg.scalper_enabled (default False) and never trades live:
 
   GET  /api/scalper/live      — live scalper state from the trader heartbeat (hb["scalper"])
   GET  /api/scalper/trades    — scalper_trades summary + list (net-of-charges)
@@ -28,31 +29,51 @@ _IST = ZoneInfo("Asia/Kolkata")
 
 # ── 1. GET /api/scalper/live ──────────────────────────────────────────────────
 
+def _scalper_enabled() -> bool:
+    """cfg.scalper_enabled, read at call time (never cached).
+
+    The dashboard needs this to know whether Start can do anything at all:
+    with the flag off the trader creates no orchestrator, so the run/ flag
+    would be written and then silently ignored.  Resolved through apps.api.cfg
+    so tests can monkeypatch it like every other config read here.
+    """
+    try:
+        from apps.api import cfg
+        return bool(cfg.scalper_enabled)
+    except Exception:
+        return False
+
+
 async def scalper_live_handler(_r: web.Request) -> web.Response:
     """Live scalper state from the trader heartbeat (hb["scalper"]).
 
     The scalper may be OFF (key absent or None) — then we return a calm
     available:false shell, never an error. Pure heartbeat read; no DB.
+
+    `enabled` mirrors cfg.scalper_enabled (the ships-dark feature flag) so the
+    control bar can disable Start instead of pretending it will do something.
     """
     from apps.api import read_heartbeat
 
+    enabled = _scalper_enabled()
     try:
         hb, alive = read_heartbeat()
         state = hb.get("scalper")
         if not state:
             return web.json_response({
-                "ok": True, "available": False, "trader_alive": alive,
-                "state": None,
+                "ok": True, "available": False, "enabled": enabled,
+                "trader_alive": alive, "state": None,
             })
         return web.json_response({
-            "ok": True, "available": True, "trader_alive": alive,
-            "state": state,
+            "ok": True, "available": True, "enabled": enabled,
+            "trader_alive": alive, "state": state,
         })
     except Exception:
         logger.exception("scalper_live_handler failed")
         return web.json_response({
             "ok": False, "error": "internal error",
-            "available": False, "trader_alive": False, "state": None,
+            "available": False, "enabled": enabled,
+            "trader_alive": False, "state": None,
         })
 
 

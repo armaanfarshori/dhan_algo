@@ -4,8 +4,16 @@ import {
 import { INR0 } from '@/tokens'
 
 /** Shared P&L area chart — used by Signals "Intraday P&L" and Portfolio
- *  "Equity Curve" so they share one design. data: [{ t, v }]. */
-export function PnlAreaChart({ data, height = 210, xKey = 't', dataKey = 'v' }) {
+ *  "Equity Curve" so they share one design. data: [{ t, v }].
+ *
+ *  emptyTicks / emptyNote (optional) describe the EMPTY state: pass the axis
+ *  labels the chart *would* span (e.g. the trading session) and a note, and the
+ *  placeholder renders that axis instead of a bare "No data yet". Callers that
+ *  omit them keep the previous behaviour exactly. */
+export function PnlAreaChart({
+  data, height = 210, xKey = 't', dataKey = 'v',
+  emptyTicks = null, emptyNote = 'No data yet',
+}) {
   const pts  = data ?? []
   const last = pts.length ? (pts[pts.length - 1][dataKey] ?? 0) : 0
   const up   = last >= 0
@@ -13,9 +21,31 @@ export function PnlAreaChart({ data, height = 210, xKey = 't', dataKey = 'v' }) 
   const gid   = `pnlgrad-${dataKey}`
 
   if (pts.length < 2) {
+    // Placeholder axis: shows the window the chart covers WITHOUT plotting a
+    // single point, so an empty session can never be mistaken for a flat line.
+    if (emptyTicks?.length) {
+      return (
+        <div className="flex flex-col" style={{ height }}>
+          <div className="relative min-h-0 flex-1">
+            <div
+              className="absolute inset-x-0 top-1/2 border-t border-dashed border-border"
+              aria-hidden="true"
+            />
+            <div className="absolute inset-0 grid place-items-center">
+              <span className="mono text-[11px] text-muted-foreground">{emptyNote}</span>
+            </div>
+          </div>
+          <div className="flex justify-between border-t border-border px-1 pt-1.5">
+            {emptyTicks.map((t, i) => (
+              <span key={i} className="mono text-[9.5px] text-faint">{t}</span>
+            ))}
+          </div>
+        </div>
+      )
+    }
     return (
       <div className="flex items-center justify-center text-[11px] text-muted-foreground mono" style={{ height }}>
-        No data yet
+        {emptyNote}
       </div>
     )
   }

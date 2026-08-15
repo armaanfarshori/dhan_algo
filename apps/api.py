@@ -248,6 +248,7 @@ from apps.routes.system import (  # noqa: E402
     logs_handler,
     backfill_status_handler,
     system_health_handler,
+    host_info_handler,
 )
 from apps.routes.backtest import (  # noqa: E402
     backtest_runs_handler,
@@ -372,6 +373,7 @@ def build_app() -> web.Application:
     app.router.add_get("/api/screen/days", screen_days_handler)
     app.router.add_get("/api/backfill/status", backfill_status_handler)
     app.router.add_get("/api/system/health", system_health_handler)
+    app.router.add_get("/api/system/host", host_info_handler)
     app.router.add_get("/api/backtest/runs", backtest_runs_handler)
     app.router.add_get("/api/backtest/runs/{name}", backtest_run_handler)
     app.router.add_get("/api/fno/vrp", fno_vrp_handler)

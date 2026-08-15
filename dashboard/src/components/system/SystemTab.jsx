@@ -21,33 +21,46 @@ const RATE_LIMIT_LABELS = {
 
 const RATE_LIMIT_KEYS = ['orders', 'data', 'quote', 'non_trading']
 
-// NOTE: instance types are static config (no live EC2-metadata source in the
-// heartbeat) — keep in sync with infra/terraform.tfvars. The DB is on r7g.2xlarge
-// temporarily for the M2.5 build; it reverts to t4g.medium after the downgrade.
-// 'schema head' is overridden live from db_stats.alembic in InfraPanel; '008'
-// here is only the offline fallback.
-const INFRA_ROWS = [
-  { k: 'agent',         v: 't4g.large · 2 vCPU · 8 GB' },
-  { k: 'db',            v: 'r7g.2xlarge · 64 GB (M2.5; → t4g.medium)' },
-  { k: 'db engine',     v: 'PostgreSQL 16 + TimescaleDB (bare-metal)' },
-  { k: 'EBS snapshots', v: 'DLM daily' },
-  { k: 'TF state',      v: 'S3 + DynamoDB lock' },
-  { k: 'schema head',   v: '008' },
-  { k: 'region',        v: 'ap-south-1' },
-]
-
-const MIGRATION_ROWS = [
-  { id: '008', desc: 'daily_screen audit table',      head: true  },
-  { id: '007', desc: 'api_usage table',               head: false },
-  { id: '006', desc: 'features_snapshot jsonb + GIN', head: false },
-  { id: '005', desc: 'drop ohlcv_1min mirror',        head: false },
-  { id: '004', desc: 'engine_positions + signals',    head: false },
-  { id: '003', desc: 'journals + portfolio ledger',   head: false },
-  { id: '002', desc: 'instruments + watchlist',       head: false },
-  { id: '001', desc: 'bars hypertable + init schema', head: false },
-]
-
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Bytes → human size. Returns '—' for null/undefined (never a fake 0 B). */
+function fmtBytes(n) {
+  if (n == null || !Number.isFinite(Number(n))) return '—'
+  const b = Number(n)
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let i = 0
+  let v = b
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1 }
+  return `${v >= 100 || i === 0 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`
+}
+
+/** "Intel(R) Xeon(R) CPU E3-1270 v3 @ 3.50GHz" → "Xeon E3-1270 v3 @ 3.50GHz" */
+function shortCpu(model) {
+  if (!model) return null
+  return String(model)
+    .replace(/\((R|TM|r|tm)\)/g, '')
+    .replace(/\b(CPU|Processor)\b/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/^(Intel|AMD|Genuine\w*)\s+/i, '')
+    .trim()
+}
+
+/** "Linux-6.14.0-37-generic-x86_64-with-glibc2.39" → "Linux-6.14.0-37-generic-x86_64" */
+function shortOs(plat) {
+  if (!plat) return null
+  return String(plat).split('-with-')[0]
+}
+
+/** "PostgreSQL 16.9 (Ubuntu …) on x86_64…" → "PostgreSQL 16.9" */
+function shortPg(db) {
+  if (!db) return null
+  if (db.server_version) return `PostgreSQL ${db.server_version}`
+  if (db.version) {
+    const m = String(db.version).match(/^PostgreSQL\s+([\d.]+)/)
+    if (m) return `PostgreSQL ${m[1]}`
+  }
+  return null
+}
 
 function fmtByProcess(byProcess) {
   if (!byProcess || typeof byProcess !== 'object') return null
@@ -99,7 +112,7 @@ function KpiRow({ data }) {
     ? barsHyper.approx_rows >= 1e6
       ? `~${(barsHyper.approx_rows / 1e6).toFixed(0)}M rows`
       : `~${barsHyper.approx_rows.toLocaleString('en-IN')} rows`
-    : db?.up ? '5 hypertables' : '—'
+    : db?.up ? 'no bars data' : '—'
 
   // Uptime
   const uptime  = data.alive ? fmtUptime(t?.uptime_seconds ?? 0) : 'DOWN'
@@ -230,7 +243,7 @@ function ServicesPanel({ data }) {
     },
     {
       name:  'timescaledb',
-      sub:   ':5432 (DB EC2)',
+      sub:   ':5432 · docker (dhan-timescaledb)',
       dot:   data.dbStats?.data?.up ? 'active' : 'idle',
       state: data.dbStats?.data?.up ? 'active' : 'stopped',
       uptime: data.dbStats?.data?.up ? `ping ${data.dbStats.data.ping_ms}ms` : '',
@@ -260,7 +273,7 @@ function ServicesPanel({ data }) {
 
   return (
     <Panel>
-      <PanelHeader title="Services" meta="systemd · agent EC2" />
+      <PanelHeader title="Services" meta="systemd · this host" />
       {svcs.map((s, i) => (
         <ServiceRow key={i} {...s} />
       ))}
@@ -500,56 +513,127 @@ function HeartbeatPanel({ data }) {
 }
 
 // ─── Infrastructure Panel ─────────────────────────────────────────────────────
+// Everything here comes from GET /api/system/host (real /proc + shutil + DB
+// facts). It used to be a hardcoded list of AWS instance types — which kept
+// asserting a t4g.large agent and an ap-south-1 region long after the EC2 pair
+// was terminated. Nothing on this card is allowed to be a constant again.
 
-function InfraPanel({ dbStats }) {
-  const db = dbStats?.data
+function InfraRow({ k, title, children }) {
+  return (
+    <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-[9px] last:border-b-0">
+      <span className="shrink-0 text-[12px] text-muted-foreground">{k}</span>
+      {/* title carries the untruncated value — these rows are narrow */}
+      <span className="mono truncate text-right text-[12px] text-foreground" title={title}>
+        {children}
+      </span>
+    </div>
+  )
+}
+
+function InfraPanel({ systemHost, dbStats }) {
+  const payload = systemHost?.data
+  const host    = payload?.host ?? null
+  const db      = payload?.db ?? null
+  const loading = !payload && systemHost?.loading
+  const error   = systemHost?.error || (payload && payload.ok === false)
+
+  const cpu = shortCpu(host?.cpu_model)
+  const cpuTxt = cpu
+    ? `${cpu}${host?.cpu_count ? ` · ${host.cpu_count} threads` : ''}`
+    : host?.cpu_count ? `${host.cpu_count} threads` : '—'
+
+  const memTxt = host?.mem_total_bytes != null
+    ? `${fmtBytes(host.mem_total_bytes)}${host.mem_available_bytes != null ? ` · ${fmtBytes(host.mem_available_bytes)} free` : ''}`
+    : '—'
+
+  const diskTxt = host?.disk_total_bytes != null
+    ? `${fmtBytes(host.disk_total_bytes)}${host.disk_free_bytes != null ? ` · ${fmtBytes(host.disk_free_bytes)} free` : ''}`
+    : '—'
+
+  const pg = shortPg(db)
+  const engineTxt = pg
+    ? `${pg}${db?.timescaledb ? ` + TimescaleDB ${db.timescaledb}` : ''}`
+    : '—'
+
+  // Prefer the host endpoint's head; fall back to /api/db/stats (same DB).
+  const head = db?.alembic_head ?? dbStats?.data?.alembic ?? '—'
+  const hyper = db?.hypertables ?? (dbStats?.data?.hypertables?.length ?? null)
 
   return (
     <Panel>
-      <PanelHeader title="Infrastructure" meta="ap-south-1" />
-      {INFRA_ROWS.map(({ k, v }) => (
-        <div key={k} className="flex items-center justify-between border-b border-border px-4 py-[9px] last:border-b-0">
-          <span className="text-[12px] text-muted-foreground">{k}</span>
-          <span className="mono text-[12px] text-foreground">
-            {/* Live-override schema head from DB when available */}
-            {k === 'schema head' && db?.alembic ? db.alembic : v}
-          </span>
+      <PanelHeader
+        title="Infrastructure"
+        meta={<span className="mono">{host?.hostname ?? 'single host'}</span>}
+      />
+
+      {(loading || error) && (
+        <div className="mono border-b border-border px-4 py-2.5 text-[10px] text-faint">
+          {/* usePoller surfaces error as a STRING (e.message), not an object */}
+          {error
+            ? `Error: ${systemHost?.error || 'host facts unavailable'}`
+            : 'loading…'}
         </div>
-      ))}
+      )}
+
+      <InfraRow k="cpu" title={host?.cpu_model ?? undefined}>{cpuTxt}</InfraRow>
+      <InfraRow k="memory">{memTxt}</InfraRow>
+      <InfraRow k="disk /">{diskTxt}</InfraRow>
+      <InfraRow k="os" title={host?.platform ?? undefined}>
+        {shortOs(host?.platform) ?? '—'}
+      </InfraRow>
+      <InfraRow k="db engine" title={db?.version ?? undefined}>{engineTxt}</InfraRow>
+      <InfraRow k="schema head">
+        {head}{hyper != null ? ` · ${hyper} hypertables` : ''}
+      </InfraRow>
     </Panel>
   )
 }
 
 // ─── Schema / Migrations Panel ────────────────────────────────────────────────
+// Migration rows are listed server-side from alembic/versions/*.py, so the card
+// can never fall behind the repo the way the old hardcoded array did (it stopped
+// at 008 while the real head was 014).
 
-function SchemaPanel({ dbStats }) {
-  const db      = dbStats?.data
-  const dbHead  = db?.alembic ?? '008'
+function SchemaPanel({ systemHost, dbStats }) {
+  const payload = systemHost?.data
+  const rows    = payload?.migrations ?? []
+  const dbHead  = payload?.db?.alembic_head ?? dbStats?.data?.alembic ?? null
+  const loading = !payload && systemHost?.loading
 
   return (
     <Panel>
       <PanelHeader
         title="Schema"
-        meta={<span className="mono">alembic head {dbHead}</span>}
+        meta={<span className="mono">{dbHead ? `alembic head ${dbHead}` : 'alembic head —'}</span>}
       />
-      {MIGRATION_ROWS.map(({ id, desc, head }) => (
-        <div
-          key={id}
-          className="flex items-center gap-2.5 border-b border-border px-4 py-2 last:border-b-0"
-        >
-          <span
-            style={{
-              width: 6,
-              height: 6,
-              borderRadius: '50%',
-              flexShrink: 0,
-              background: head ? 'hsl(var(--profit))' : 'hsl(var(--border2))',
-            }}
-          />
-          <span className="mono w-[26px] shrink-0 text-[10px] text-faint">{id}</span>
-          <span className="mono text-[10.5px] text-muted-foreground">{desc}</span>
+      {rows.length === 0 ? (
+        <div className="mono px-4 py-3 text-[10px] text-faint">
+          {loading ? 'loading…' : 'migration list unavailable'}
         </div>
-      ))}
+      ) : (
+        // The list grows with every migration — scroll it rather than let one
+        // card stretch the whole equal-height row.
+        <div className="max-h-[300px] overflow-auto">
+          {rows.map(({ id, desc }) => (
+            <div
+              key={id}
+              className="flex items-center gap-2.5 border-b border-border px-4 py-2 last:border-b-0"
+            >
+              <span
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: '50%',
+                  flexShrink: 0,
+                  background: id === dbHead ? 'hsl(var(--profit))' : 'hsl(var(--border2))',
+                }}
+              />
+              <span className="mono w-[26px] shrink-0 text-[10px] text-faint">{id}</span>
+              <span className="mono truncate text-[10.5px] text-muted-foreground">{desc}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </Panel>
   )
 }
@@ -570,8 +654,8 @@ export default function SystemTab({ data }) {
       >
         <ServicesPanel data={data} />
         <HeartbeatPanel data={data} />
-        <InfraPanel dbStats={data.dbStats} />
-        <SchemaPanel dbStats={data.dbStats} />
+        <InfraPanel systemHost={data.systemHost} dbStats={data.dbStats} />
+        <SchemaPanel systemHost={data.systemHost} dbStats={data.dbStats} />
       </div>
 
       {/* API Spend — full width */}

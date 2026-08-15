@@ -16,6 +16,11 @@ export default function ScalperControlBar({ live }) {
   const [err, setErr]   = useState(null)
 
   const running = !!(live && live.available)
+  // scalper_enabled from GET /api/scalper/live. With the flag off the trader
+  // builds no orchestrator, so Start would write run/scalper_start and have it
+  // silently ignored — disable the button instead of faking a control surface.
+  // `undefined` (older API build) → leave enabled rather than lock the operator out.
+  const featureOff = live?.enabled === false
 
   async function send(action) {
     setBusy(action)
@@ -52,16 +57,21 @@ export default function ScalperControlBar({ live }) {
             ? <Badge variant="profit">RUNNING</Badge>
             : <Badge variant="default">OFF</Badge>}
           <Pill tone="neu">PAPER</Pill>
+          {featureOff && <Pill tone="neu">flag off</Pill>}
         </div>
 
         <div className="ml-auto flex items-center gap-2">
           <Button
             variant="profit" size="sm"
-            disabled={busy != null}
+            disabled={busy != null || featureOff}
+            title={featureOff
+              ? 'scalper_enabled=false on the trader — set it in .env and restart dhan-trader before Start can do anything'
+              : undefined}
             onClick={() => send('start')}
           >
             {busy === 'start' ? 'Starting…' : 'Start'}
           </Button>
+          {/* Stop is never gated: it must stay reachable whatever the flag says. */}
           <Button
             variant="destructive" size="sm"
             disabled={busy != null}
@@ -71,6 +81,14 @@ export default function ScalperControlBar({ live }) {
           </Button>
         </div>
       </div>
+
+      {featureOff && (
+        <div className="mono border-t border-border px-4 py-2 text-[10px] leading-relaxed text-faint">
+          Start disabled — <span className="text-amber">scalper_enabled=false</span> on the
+          trader (ships dark). Set it in <span className="text-amber">.env</span> and restart
+          dhan-trader; PAPER-only either way.
+        </div>
+      )}
 
       {(msg || err) && (
         <div className="border-t border-border px-4 py-2">

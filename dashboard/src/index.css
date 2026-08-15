@@ -94,6 +94,20 @@ html, body {
   -webkit-font-smoothing: antialiased;
   transition: background .25s ease, color .25s ease;
 }
+
+/* Theme-switch guard — set by useTheme.applyTheme() for exactly one frame.
+   Chrome does not restart a CSS transition when the transitioned property's
+   value changes only because an inherited custom property (--foreground, …)
+   was redefined on <html>; the element then keeps the OLD theme's computed
+   colour until an unrelated style change forces a recalc. That is what left
+   the active tab label white-on-white after switching to light. Suppressing
+   transitions across the swap makes every token re-resolve immediately. */
+html.theme-switching,
+html.theme-switching *,
+html.theme-switching *::before,
+html.theme-switching *::after {
+  transition: none !important;
+}
 #root { min-height: 100vh; }
 
 /* tabular mono numerals */

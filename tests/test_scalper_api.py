@@ -171,6 +171,44 @@ def test_live_error(monkeypatch):
     body = _body(resp)
     assert body["ok"] is False
     assert body["available"] is False
+    # the control bar reads `enabled` even on the error shell
+    assert body["enabled"] is False
+
+
+@requires_scalper
+def test_live_exposes_flag_off(monkeypatch):
+    """`enabled` mirrors cfg.scalper_enabled — off means Start is a no-op."""
+    import apps.api as api_mod
+    monkeypatch.setattr(api_mod, "cfg", _make_cfg(scalper_enabled=False), raising=False)
+    monkeypatch.setattr(api_mod, "read_heartbeat", lambda: ({}, False), raising=False)
+    resp = asyncio.run(scalper_mod.scalper_live_handler(_FakeRequest()))
+    body = _body(resp)
+    assert body["enabled"] is False
+    assert body["available"] is False
+
+
+@requires_scalper
+def test_live_exposes_flag_on(monkeypatch):
+    """scalper_enabled=True is reported alongside the live state."""
+    import apps.api as api_mod
+    monkeypatch.setattr(api_mod, "cfg", _make_cfg(scalper_enabled=True), raising=False)
+    monkeypatch.setattr(api_mod, "read_heartbeat",
+                        lambda: ({"scalper": {"state": "ACTIVE"}}, True), raising=False)
+    resp = asyncio.run(scalper_mod.scalper_live_handler(_FakeRequest()))
+    body = _body(resp)
+    assert body["enabled"] is True
+    assert body["available"] is True
+
+
+@requires_scalper
+def test_live_flag_read_failure_is_not_fatal(monkeypatch):
+    """A cfg without the attribute degrades to enabled:False, never a 500."""
+    import apps.api as api_mod
+    monkeypatch.setattr(api_mod, "cfg", types.SimpleNamespace(), raising=False)
+    monkeypatch.setattr(api_mod, "read_heartbeat", lambda: ({}, False), raising=False)
+    resp = asyncio.run(scalper_mod.scalper_live_handler(_FakeRequest()))
+    assert resp.status == 200
+    assert _body(resp)["enabled"] is False
 
 
 # ===========================================================================
