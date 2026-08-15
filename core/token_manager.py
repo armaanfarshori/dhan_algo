@@ -41,6 +41,8 @@ logger = logging.getLogger("dhan.token_manager")
 _TOKEN_FILE = Path(__file__).parent.parent / "dhan_token.json"
 _ENV_FILE   = Path(__file__).parent.parent / ".env"
 _LOCK_FILE  = Path(__file__).parent.parent / "dhan_token.lock"
+# Ceiling on one PIN+TOTP generation attempt (SDK has no timeout of its own).
+GENERATE_TIMEOUT_S = 90
 REFRESH_BEFORE_MIN = 30
 
 
@@ -152,7 +154,15 @@ class MasterTokenManager:
             dl = DhanLogin(self.client_id)
             return dl.generate_token(self.pin, totp)
 
-        data    = await loop.run_in_executor(None, _call)
+        # HARD TIMEOUT (2026-08-15): the SDK login call carries no network
+        # timeout of its own. A wedged HTTPS request here used to hang this
+        # coroutine forever — and with it the run() refresh loop — leaving the
+        # platform stranded on an expired token with no error and no alert
+        # (observed live: 50+ min hang after the 20:02 IST refresh attempt).
+        # wait_for abandons the executor thread (it cannot be cancelled) but
+        # frees the event loop to retry with a fresh TOTP.
+        data = await asyncio.wait_for(
+            loop.run_in_executor(None, _call), timeout=GENERATE_TIMEOUT_S)
         token   = data.get("accessToken") or data.get("access_token")
         exp_str = data.get("expiryTime") or data.get("expiry_time", "")
         if not token:
@@ -179,7 +189,9 @@ class MasterTokenManager:
                 dl = DhanLogin(self.client_id)
                 return dl.renew_token(old)
 
-            data    = await loop.run_in_executor(None, _call)
+            # Same no-timeout SDK hazard as _generate() — see the note there.
+            data = await asyncio.wait_for(
+                loop.run_in_executor(None, _call), timeout=GENERATE_TIMEOUT_S)
             token   = data.get("accessToken") or data.get("access_token")
             exp_str = data.get("expiryTime", "")
             if not token:
@@ -214,9 +226,25 @@ class MasterTokenManager:
             remaining = self._expiry - datetime.now(timezone.utc)
             if remaining < timedelta(minutes=REFRESH_BEFORE_MIN):
                 logger.warning("Token expiring in %d min — refreshing", remaining.seconds // 60)
-                renewed = await self._renew()
-                if not renewed:
-                    await self._generate()
+                try:
+                    renewed = await self._renew()
+                    if not renewed:
+                        await self._generate()
+                except Exception as exc:
+                    # The loop must SURVIVE a failed refresh: the next 10-min
+                    # tick retries (refresh starts 30 min out, so ≥2 retries
+                    # remain before expiry) and handle_auth_error() recovers
+                    # on demand. Alert loudly — a dying token is a full
+                    # platform outage if this keeps failing.
+                    logger.critical("Token refresh failed: %s — will retry "
+                                    "next cycle", exc)
+                    try:
+                        from core.notify import send
+                        send(f"🚨 Dhan token refresh FAILED ({type(exc).__name__}: "
+                             f"{exc}) — expiry {self._expiry}. Retrying every "
+                             "10 min; trader is stranded if this persists.")
+                    except Exception:
+                        logger.exception("token-refresh alert failed")
 
     async def handle_auth_error(self) -> str:
         """Called by DhanClient on DH-901/806 — force refresh.
