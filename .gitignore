@@ -62,3 +62,4 @@ docs/fno-sync-*.md
 .claude/worktrees/
 research/m3_results/
 research/backtest/results/*.json
+backfill_ckpt_*.json

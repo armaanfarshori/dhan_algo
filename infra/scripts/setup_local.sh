@@ -563,6 +563,7 @@ $CRON_BEGIN
 45 16 * * 1-5 cd $APP_LINK && .venv/bin/python -m ml.calibration fill >> $LOG_DIR/calibration.log 2>&1 && .venv/bin/python -m ml.calibration report >> $LOG_DIR/calibration.log 2>&1
 0 17 * * 1-5 cd $APP_LINK && .venv/bin/python scripts/eod_summary.py >> $LOG_DIR/eod_summary.log 2>&1
 0 9 * * 1-5 cd $APP_LINK && .venv/bin/python scripts/egress_check.py >> $LOG_DIR/egress_check.log 2>&1
+10 16 * * 1-5 cd $APP_LINK && .venv/bin/python scripts/cas_surprise_capture.py >> $LOG_DIR/cas_surprise.log 2>&1
 30 2 * * * cd $APP_LINK && scripts/backup_db.sh >> $LOG_DIR/backup.log 2>&1
 $CRON_END
 CRON_EOF
