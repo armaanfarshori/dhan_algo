@@ -36,9 +36,11 @@ def test_normalize_iv_percent_vs_fraction():
 def test_is_market_hours_weekday_inside():
     # Mon 2026-06-15 11:00 IST → open
     assert fb.is_market_hours(datetime(2026, 6, 15, 11, 0, tzinfo=_IST)) is True
-    # 09:14 just before open, 15:31 just after close → closed
+    # 09:14 just before open, 15:41 just after the post-CAS close → closed;
+    # 15:31 is now INSIDE the guarded window (stock F&O trades to ~15:40).
     assert fb.is_market_hours(datetime(2026, 6, 15, 9, 14, tzinfo=_IST)) is False
-    assert fb.is_market_hours(datetime(2026, 6, 15, 15, 31, tzinfo=_IST)) is False
+    assert fb.is_market_hours(datetime(2026, 6, 15, 15, 31, tzinfo=_IST)) is True
+    assert fb.is_market_hours(datetime(2026, 6, 15, 15, 41, tzinfo=_IST)) is False
 
 
 def test_is_market_hours_weekend():
@@ -62,9 +64,9 @@ def test_is_market_hours_naive_datetime():
 
 
 def test_is_market_hours_exact_boundaries_inclusive():
-    # Exact open 09:15 IST and exact close 15:30 IST are INCLUSIVE.
+    # Exact open 09:15 IST and exact post-CAS close 15:40 IST are INCLUSIVE.
     assert fb.is_market_hours(datetime(2026, 6, 15, 9, 15, tzinfo=_IST)) is True
-    assert fb.is_market_hours(datetime(2026, 6, 15, 15, 30, tzinfo=_IST)) is True
+    assert fb.is_market_hours(datetime(2026, 6, 15, 15, 40, tzinfo=_IST)) is True
 
 
 # ── futures history parsing ──────────────────────────────────────────────────────

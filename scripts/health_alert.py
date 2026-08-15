@@ -6,7 +6,7 @@ code at runtime).
 
 Checks (all gated to market hours where noted):
   1. Heartbeat stale  — run/trader_heartbeat.json missing or ts > 90s old
-                        (weekday 09:15–15:30 IST only)
+                        (weekday 09:15–15:40 IST only)
   2. Feed down        — heartbeat feed.connected == false (market hours only)
   3. Risk halted      — heartbeat risk.halted == true (any hour, de-duped)
   4. Disk full        — / usage > 80% (any hour)
@@ -68,13 +68,17 @@ def _ist_now() -> datetime:
 
 
 def _is_market_hours() -> bool:
-    """True during weekday 09:15–15:30 IST (inclusive)."""
+    """True during weekday 09:15–15:40 IST (inclusive).
+
+    Post-CAS (2026-08-03): the closing auction runs to 15:35 and stock F&O to
+    ~15:40, so monitoring stays in market-hours mode through the full tail.
+    """
     now = _ist_now()
     if now.weekday() >= 5:       # Saturday = 5, Sunday = 6
         return False
     t = now.time()
     from datetime import time as _time
-    return _time(9, 15) <= t <= _time(15, 30)
+    return _time(9, 15) <= t <= _time(15, 40)
 
 
 # ── State file helpers ────────────────────────────────────────────────────────

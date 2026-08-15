@@ -36,18 +36,20 @@ def _ist(d: date, hh: int, mm: int) -> datetime:
     return datetime(d.year, d.month, d.day, hh, mm, tzinfo=IST)
 
 
-# ── EQUITY profile (legacy parity) ──────────────────────────────────────────────
+# ── EQUITY profile (post-CAS clock, live 2026-08-03) ───────────────────────────
 
-def test_equity_constants_match_legacy():
+def test_equity_constants_match_cas():
+    # Continuous trading for F&O-listed stocks ends 15:15; the closing auction
+    # runs to 15:35 and stock F&O to ~15:40 (poll window covers the tail).
     assert EQUITY.open_time == dtime(9, 15)
-    assert EQUITY.close_time == dtime(15, 30)
+    assert EQUITY.close_time == dtime(15, 15)
     assert EQUITY.poll_open == dtime(9, 0)
-    assert EQUITY.poll_close == dtime(15, 35)
-    assert EQUITY.squareoff_before_close_min == 15
+    assert EQUITY.poll_close == dtime(15, 40)
+    assert EQUITY.squareoff_before_close_min == 10
     # Equity close never flips with DST.
     assert EQUITY.standard_close_time is None
-    assert EQUITY.close_time_for(DST_ON) == dtime(15, 30)
-    assert EQUITY.close_time_for(DST_OFF) == dtime(15, 30)
+    assert EQUITY.close_time_for(DST_ON) == dtime(15, 15)
+    assert EQUITY.close_time_for(DST_OFF) == dtime(15, 15)
 
 
 def test_equity_is_open():
@@ -55,24 +57,26 @@ def test_equity_is_open():
     assert c.is_open(_ist(DST_ON, 9, 15)) is True       # open inclusive
     assert c.is_open(_ist(DST_ON, 10, 30)) is True
     assert c.is_open(_ist(DST_ON, 9, 14)) is False      # before open
-    assert c.is_open(_ist(DST_ON, 15, 30)) is False     # close exclusive
-    assert c.is_open(_ist(DST_ON, 15, 31)) is False
+    assert c.is_open(_ist(DST_ON, 15, 14)) is True
+    assert c.is_open(_ist(DST_ON, 15, 15)) is False     # close exclusive (CAS starts)
+    assert c.is_open(_ist(DST_ON, 15, 30)) is False
 
 
 def test_equity_poll_window():
     c = SessionClock(EQUITY)
     assert c.in_poll_window(_ist(DST_ON, 10, 30)) is True
     assert c.in_poll_window(_ist(DST_ON, 9, 0)) is True    # both ends inclusive
-    assert c.in_poll_window(_ist(DST_ON, 15, 35)) is True
+    assert c.in_poll_window(_ist(DST_ON, 15, 40)) is True
     assert c.in_poll_window(_ist(DST_ON, 8, 59)) is False
-    assert c.in_poll_window(_ist(DST_ON, 15, 36)) is False
+    assert c.in_poll_window(_ist(DST_ON, 15, 41)) is False
 
 
 def test_equity_squareoff():
     c = SessionClock(EQUITY)
-    # 15:30 − 15 min = 15:15, regardless of DST (equity is fixed).
-    assert c.squareoff_time(DST_ON) == dtime(15, 15)
-    assert c.squareoff_time(DST_OFF) == dtime(15, 15)
+    # 15:15 − 10 min = 15:05, regardless of DST (equity is fixed) — before
+    # brokers' own CAS-stock MIS force-square-off (~15:10–15:12).
+    assert c.squareoff_time(DST_ON) == dtime(15, 5)
+    assert c.squareoff_time(DST_OFF) == dtime(15, 5)
 
 
 def test_equity_weekend_closed():

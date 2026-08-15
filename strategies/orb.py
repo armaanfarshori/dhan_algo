@@ -25,8 +25,9 @@ logger = logging.getLogger("dhan.strategy.orb")
 
 IST = ZoneInfo("Asia/Kolkata")
 # Equity trading hours — sourced from the EQUITY session profile (core/sessions.py)
-# so the platform has a single source of truth for session hours. The names and
-# values (09:15 / 15:30) are preserved verbatim: ~10 sibling strategies import
+# so the platform has a single source of truth for session hours. Post-CAS
+# (2026-08-03) the EQUITY close is 15:15 (continuous trading end for F&O-listed
+# stocks); ~10 sibling strategies import
 # MARKET_OPEN/MARKET_CLOSE from this module, and equity behaviour must stay
 # byte-identical. These remain the EQUITY defaults; a strategy instance may be
 # bound to a DIFFERENT session (e.g. MCX evening) via the optional `session`
