@@ -1,11 +1,13 @@
 /**
- * ScalperTab — intraday options-scalper forward-paper panel.
+ * ScalperTab — intraday options-scalper PAPER panel.
  *
- * The scalper is un-backtestable (no intraday option-premium series) → it is
- * validated by forward paper-trading. This tab surfaces that track: KPI strip,
- * a start/stop control bar, the Daily Risk Governor (limits vs today's totals),
- * the live signal + open-tranche snapshot (with a client-side hold timer), and
- * the recent-trades log.
+ * The sleeve WAS backtested (June 2026, real minute data) and came out
+ * decisively negative-EV: −₹365 to −₹681 per scalp, negative in all 18 cost
+ * cells and all 27 regime cells. It ships dark behind scalper_enabled (default
+ * OFF) and PAPER-only. This tab surfaces that track: KPI strip, a start/stop
+ * control bar, the Daily Risk Governor (limits vs today's totals), the live
+ * signal + open-tranche snapshot (with a client-side hold timer), and the
+ * recent-trades log.
  *
  * The scalper may be OFF — every sub-panel renders its own empty/loading state,
  * so the tab is never a broken grid (same discipline as FnoTab).
@@ -38,11 +40,13 @@ export default function ScalperTab({ data }) {
       {/* Row 4 — recent trades */}
       <ScalperTradesTable trades={trades} />
 
-      {/* Honesty footer */}
+      {/* Honesty footer — the backtest verdict, not the old "un-backtestable" line */}
       <div className="mono mt-3.5 px-1 text-[10px] leading-relaxed text-faint">
-        The scalper is <span className="text-amber">un-backtestable</span> (no intraday
-        option-premium data) — this is a <span className="text-amber">forward paper</span>{' '}
-        track, not a validated live edge. PAPER throughout.
+        Backtested June 2026 on real minute data: <span className="text-loss">decisively
+        negative-EV</span> — −₹365 to −₹681 per scalp, negative in all 18 cost cells and
+        all 27 regime cells. The sleeve ships <span className="text-amber">dark</span>{' '}
+        (<span className="mono">scalper_enabled</span> default OFF) and is{' '}
+        <span className="text-amber">PAPER-only</span>: no validated live edge.
       </div>
     </div>
   )
