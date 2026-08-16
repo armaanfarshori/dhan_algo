@@ -1,7 +1,15 @@
 # DhanAIBot — Trading Platform (agent instructions)
 **Repo:** `github.com/armaanfarshori/dhan_algo` (PRIVATE — never commit IPs, account IDs, tokens, chat IDs)
-**Last updated:** 2026-08-14
-**Current phase:** SINGLE-HOST DEPLOYMENT (T1700) — LIVE-PATH INFRASTRUCTURE READY. The
+**Last updated:** 2026-08-16
+**Current phase:** ⚠️ **HARDWARE HANDOFF IN PROGRESS (2026-08-16).** The operator is selling the
+T1700 and moving to a refurbished tiny PC. Everything durable is off-box: repo fully pushed,
+DB dump + research corpus + Claude memory archives in
+`s3://dhan-trading-data-155304839154/{backups,handoff}/` — see
+**docs/machine-handoff-2026-08.md** for the exact restore sequence, what was backed up, and the
+agenda a fresh session should pick up. Any reference below to "this box" describing the T1700 is
+about to be stale; the T1700 section stays accurate as the template for what the new box must
+become (the migration is a re-run of `infra/scripts/setup_local.sh` on new hardware, not a new
+design). Previous phase (still the substantive state): SINGLE-HOST DEPLOYMENT (T1700) — LIVE-PATH INFRASTRUCTURE READY. The
 AWS→home-server migration (PRs #100–#105, 2026-08-14) is complete: trader + dashboard +
 TimescaleDB all run on one owned box, the old EC2 pair is **terminated**, and the operator has
 directed the project to pursue live trading — this **supersedes** the 2026-06-21 wind-down verdict
